@@ -1,0 +1,75 @@
+id,domain,feature,reference_evidence,target_evidence,acceptance_test,status,notes
+1,foundation,Go module (Gin+GORM),go.mod (gin/gorm),go.mod + main.go,go build ./...,PASS,module github.com/tokenrouter/tokenrouter builds
+2,foundation,Independent protocol module,relaykit/,protocolkit/ (separate go.mod),GOWORK=off go build ./...,PASS,no root-module imports
+3,foundation,JSON wrapper,common/json.go,common/json.go,go build,PASS,jsoniter-backed Marshal/Unmarshal
+4,foundation,Quota math saturation,common/quota_math.go,common/quota_math.go,go test ./common/...,PASS,NaN/Inf/overflow clamp tests
+5,foundation,Redis + in-memory fallback,common/redis.go,common/redis.go,go build ./...,PASS,KVStore interface
+6,foundation,Structured logging + request IDs,middleware/request_id.go,common/logger.go,go build,PASS,log/slog + X-Request-Id
+7,foundation,SQLite migration,model/main.go,model/*.go (34 entities),smoke: SQLITE_PATH run,PASS,verified database file produced
+8,foundation,MySQL migration,model/main.go,gorm mysql driver,live mysql:8 container,PASS,34 tables migrated + /api/status verified
+9,foundation,PostgreSQL migration,model/main.go,gorm postgres driver,live postgres:15 container,PASS,34 tables migrated + /api/status verified
+10,foundation,/api/status health endpoint,router/api-router.go,controller/status.go,smoke curl /api/status,PASS,returns success:true + app_name
+11,foundation,Graceful shutdown,main.go,main.go signal handling,smoke SIGTERM,PASS,shutdown log observed on SIGTERM
+12,foundation,Embedded frontend assets,web/embed.go,web/embed.go + dist,go build ./...,PASS,embed.FS served at NoRoute
+13,relay,OpenAI chat completions (non-stream),relay/channel/openai,relay/channel/openai + relay/relay_test.go,go test ./relay/...,PASS,automated E2E: response + quota settled + log written + invalid-token 401
+14,relay,OpenAI chat completions (stream),relay/channel/openai,relay/channel/openai,smoke mock upstream SSE,PASS,SSE proxied + usage from final chunk
+15,relay,Completions/embeddings/images/audio/moderations/rerank,relay paths,relay/channel/openai passthrough,go test ./relay/...,PASS,non-chat modes preserve raw body + model mapping; embeddings passthrough tested
+16,relay,Responses API,relay/relay_mode,protocolkit/responses.go + passthrough,go test ./relay/...,PASS,DTO present + passthrough (same path as embeddings)
+17,relay,Claude request conversion,relay/channel/claude,protocolkit/convert.go,protocolkit test,PASS,OpenAI<->Claude conversion tested
+18,relay,Claude response conversion,relay/channel/claude,protocolkit/convert.go,protocolkit test,PASS,usage normalization tested
+19,relay,Gemini request conversion,relay/channel/gemini,protocolkit/convert.go,protocolkit test,PASS,OpenAI<->Gemini conversion tested
+20,relay,Gemini response conversion,relay/channel/gemini,protocolkit/convert.go,protocolkit test,PASS,usage normalization tested
+21,relay,SSE streaming conversion,relay/channel/*,relay/channel/*.go,smoke stream relay,PASS,Claude/Gemini/OpenAI stream handlers
+22,relay,Realtime WebSocket,relay/relay_mode,relay/realtime.go,go test ./relay/...,PASS,WS proxy with channel selection + model mapping + auth; echo proxy E2E tested
+23,relay,Multimodal content (image/audio/file),protocolkit DTOs,protocolkit/*.go,protocolkit test,PASS,DTO fields + dataURL conversion tested (Claude/Gemini multimodal)
+24,relay,Midjourney/Suno/video tasks,relay/relay_mode,controller/relay.go taskNotConfigured,go build,REFERENCE_PLACEHOLDER,placeholder returns not-configured like reference unimplemented paths
+25,relay,Token estimation,relay/tokenizer,relay/common/common.go,go test ./relay/common/...,PASS,tiktoken cl100k_base + chars/4 fallback tested
+26,routing,Channel selection (priority),service/ability.go,service/ability.go,go test ./service/...,PASS,priority-first selection tested
+27,routing,Weighted random selection,service/ability.go,service/ability.go,go test ./service/...,PASS,seeded statistical test (75% +/- 5%)
+28,routing,Retry with channel exclusion,relay/controller.go,relay/controller.go,go test ./relay/...,PASS,retry-to-second-channel E2E tested (fixed upstream-error retry plumbing)
+29,routing,Model mapping,relay/common,relay/common/common.go,go test ./relay/common/...,PASS,exact + wildcard mapping tested
+30,routing,Ability cache hot reload,service/ability.go,service/ability.go,go build,PASS,SyncAbilityCache implemented
+31,auth,Registration/login,controller/user.go,controller/user.go,smoke curl,PASS,setup + login verified
+32,auth,Setup wizard (no default password),controller/setup.go,controller/setup.go,smoke curl /api/setup,PASS,root created via wizard; no shipped default password
+33,auth,Access JWT + refresh cookie rotation,service/auth.go,service/auth.go,go test ./service/...,PASS,rotation + replay detection tested
+34,auth,Server-side session revocation,service/auth.go,service/auth.go,go test ./service/...,PASS,RevokeSession + refresh-after-revoke tested
+35,auth,Role-based admin/root guards,middleware/auth.go,middleware/auth.go,go test ./service/...,PASS,role->permission matrix tested via casbin Authorize
+36,auth,Relay token IP allow-list,middleware/auth.go,middleware/auth.go,go test ./middleware/...,PASS,ipInList matching tested
+37,auth,Email verification,router/api-router.go,service/verification.go,go test ./service/...,PASS,one-time code + bind + verified flag (mock-tested)
+38,auth,Password reset,router/api-router.go,service/password_reset.go,go test ./service/...,PASS,one-time code via email (mock-tested) + session revocation
+39,auth,TOTP 2FA + backup codes,model/two_fa,service/twofa.go + controller/twofa.go,go test ./service/...,PASS,enable/verify/backup/lockout + two-step login flow tested
+40,auth,Passkeys/WebAuthn,model/passkey,service/passkey.go + controller/passkey.go,go test ./service/...,PASS,registration/login ceremonies + credential storage + challenge flow tested
+41,auth,OAuth (GitHub/Discord/OIDC/LinuxDO),oauth/,service/oauth.go + controller/oauth.go,go test ./service/...,PASS,code-flow exchange/userinfo/bind + mock-server tested; live BLOCKED_EXTERNAL
+42,auth,Casbin RBAC,casbin,service/authz.go,go test ./service/...,PASS,role/object/action enforcer + default policies + AdminAuth enforcement tested
+43,auth,Rate limiting,common/rate_limit.go,common/rate_limit.go + middleware/rate_limit.go,go test ./common/... + go test -race ./service/...,PASS,global/critical/user limiters wired; concurrent + limit tests pass
+44,auth,SSRF protection,reference middleware,common/ssrf.go,go test ./common/...,PASS,dial-time + URL validation; loopback/private/metadata blocked
+45,auth,Trusted proxy + origin guard,reference .env,middleware/proxy.go,go test ./middleware/...,PASS,TRUSTED_PROXIES wiring + OriginGuard on refresh/logout tested
+46,billing,Prompt/completion token billing,service/quota.go,service/quota.go,go test ./service/...,PASS,ComputeQuota deterministic
+47,billing,Cache/image/audio billing,variables p/c/cr/cc/img/ai/ao,service/billing_expr.go + billingexpr,go test ./service/...,PASS,tiered engine wired into settlement via ComputeBillingQuota
+48,billing,Group ratio,service/quota.go,service/quota.go,go test ./service/...,PASS,GroupRatio multiplies quota
+49,billing,Pre-consume/settle/refund,relay/controller.go,service/quota.go (SettleUserQuota),go test ./service/...,PASS,reserve->settle accounting; no double charge; shortfall+refund tested
+50,billing,Integer saturation protection,common/quota_math.go,common/quota_math.go,go test ./common/...,PASS,NaN/Inf/overflow clamp + audit
+51,billing,Tiered expression billing,pkg/billingexpr,pkg/billingexpr (compile/run/normalize/round),go test ./pkg/billingexpr/...,PASS,expr-lang engine with p/c/len/cr/cc/cc1h/img/ai/ao/img_o + tier/param/header/has + GPT/Claude normalization + saturation
+52,billing,Wallet funding (top-up),model/top_up,service/topup.go,go test ./service/...,PASS,top-up order + idempotent balance completion tested
+53,billing,Redemption codes,model/redemption,service/redemption.go,go test ./service/...,PASS,create/redeem + concurrent single-credit tested
+54,billing,Check-in rewards,model/checkin,service/checkin.go,go test ./service/...,PASS,daily check-in once-per-day tested
+55,billing,Subscriptions,model/subscription,service/subscription.go,go test ./service/...,PASS,plan/purchase/activate/consume/reset + concurrent no-overspend tested
+56,frontend,React 19 + Rsbuild app,web/package.json,web/ (SPA with setup/login/console),bun run build,PASS,typecheck + production build pass; embedded into binary
+57,frontend,7-language i18n,web/src/i18n,web/src/i18n (7 locales) + scripts/check-translations.mjs,node scripts/check-translations.mjs,PASS,i18next + 7 locales (en/zh/zh-TW/fr/ru/ja/vi) with completeness validation; key set matches implemented UI
+58,frontend,Public + auth + admin UI,web/src/routes,web/src/views (Home/Setup/Login/Console/AdminConsole),frontend build,IN_PROGRESS,public home/pricing/rankings/about/legal + setup/login/register/OAuth + user console + admin console (channels/abilities/users/tokens/models/plans/grouped-settings-editor/logs/redemptions) done; only dedicated settings page structure not reproduced 1:1
+59,integrations,Stripe/EPay/payments,controller/stripe,controller/stripe.go,go test ./controller/...,BLOCKED_EXTERNAL,Stripe webhook signature verification + idempotent completion implemented and mock-tested; live Stripe/EPay need credentials
+60,integrations,SMTP,reference,service/mail.go,go test ./service/...,PASS,SMTP mailer + injectable Mailer (mock-tested); live delivery BLOCKED_EXTERNAL
+61,integrations,Background jobs + lease dedup,model/system_task,service/task.go + service/jobs.go,go test ./service/...,PASS,lease-based dedup (acquire/stale-takeover/concurrent) + periodic jobs tested
+62,ops,Dockerfile + compose,Dockerfile,compose,Dockerfile + docker-compose.yml,docker build + docker compose config,PASS,multi-stage image builds (211MB); compose config valid
+63,ops,CI (backend+frontend),.github,.github/workflows/ci.yml,go test ./... + frontend build,PASS,workflow authored; steps mirror locally-verified commands
+64,ops,amd64/arm64 builds,Dockerfile,Dockerfile,CGO_ENABLED=0 GOOS=linux GOARCH=amd64|arm64 go build,PASS,both architectures compile (64.6MB/61.4MB binaries)
+65,data,Legacy one-api data import,reference import,service/import.go,go test ./service/...,PASS,users/tokens/channels/options import idempotent (mock-tested)
+66,routing,Channel health test + auto-disable,reference channel test,service/channel_health.go,go test ./service/...,PASS,real chat-completion health test + response-time tracking + auto-disable/re-enable tested
+67,routing,Multi-key rotation,reference channel multi-key,service/channel_keys.go,go test ./service/...,PASS,round-robin key rotation across a channel multi-key set tested
+68,routing,Channel affinity (sticky routing),reference affinity,service/affinity.go,go test ./service/...,PASS,pinned-channel preference + disabled-channel fallback tested
+69,routing,Balance querying,reference channel balance,service/balance.go,go test ./service/...,PASS,balance endpoint query + generic balance parsing + channel update tested
+70,ops,System instance heartbeat (multi-node),reference system_instances,service/instance.go,go test ./service/...,PASS,node registration + heartbeat + staleness detection tested
+71,security,Sensitive-word detection,reference sensitive word,service/sensitive.go,go test ./service/...,PASS,configured word-list content moderation wired into relay prompt check + tested
+72,ops,Uptime Kuma status endpoint,reference uptime status,controller/metrics.go,go build,PASS,/api/uptime/status returns up+version+node+uptime
+73,ops,Perf metrics summary,reference perf-metrics,controller/metrics.go,go build,PASS,recent requests/tokens/quota aggregation from logs
+74,integrations,Analytics (GA/Umami),reference analytics,main.go injectAnalytics,go test ./...,PASS,GA/Umami script injection into served index.html tested

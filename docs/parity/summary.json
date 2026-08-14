@@ -1,0 +1,25 @@
+{
+  "generated": "2026-08-13T17:38:18.779Z",
+  "counts": {
+    "routes": 341,
+    "entities": 35,
+    "channels": 211,
+    "relay": 58,
+    "settings": 270,
+    "frontend": 98,
+    "billing-security": 67
+  },
+  "anchors": {
+    "entities": "~34",
+    "routes": "~300-350",
+    "channel_types": "~57",
+    "providers": "~37",
+    "relay_formats": "~13",
+    "relay_modes": "~38",
+    "frontend_domains": "~23",
+    "frontend_routes": "~59",
+    "settings_pages": "~40",
+    "languages": "~7",
+    "translation_keys": "~5266"
+  }
+}
