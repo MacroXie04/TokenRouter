@@ -191,6 +191,69 @@ func PasskeyEnabled(userId int) bool {
 	return count > 0
 }
 
+// PasskeyPurposeVerify is the step-up verification auth-flow purpose.
+const PasskeyPurposeVerify = "passkey_verify"
+
+// BeginPasskeyVerify starts a passkey step-up assertion for an authenticated
+// user. The flow is bound to the user's current session and the requested
+// proof scope.
+func BeginPasskeyVerify(userId int, sessionId, scope string) (*protocol.CredentialAssertion, string, error) {
+	if wa == nil {
+		return nil, "", errors.New("WebAuthn not initialized")
+	}
+	wu, err := loadPasskeyUser(userId)
+	if err != nil {
+		return nil, "", err
+	}
+	options, sessionData, err := wa.BeginLogin(wu)
+	if err != nil {
+		return nil, "", err
+	}
+	payload, err := common.Marshal(sessionData)
+	if err != nil {
+		return nil, "", err
+	}
+	flowToken, err := CreateAuthFlow(PasskeyPurposeVerify, "passkey", scope, userId, sessionId, string(payload), 5*time.Minute)
+	if err != nil {
+		return nil, "", err
+	}
+	return options, flowToken, nil
+}
+
+// FinishPasskeyVerify validates the step-up assertion, requires the flow to
+// belong to the same user and session that started it, and returns the scope
+// the proof should carry.
+func FinishPasskeyVerify(userId int, sessionId, flowToken string, response *protocol.ParsedCredentialAssertionData) (string, error) {
+	if wa == nil {
+		return "", errors.New("WebAuthn not initialized")
+	}
+	flow, err := ConsumeAuthFlow(flowToken, PasskeyPurposeVerify)
+	if err != nil {
+		return "", ErrInvalidFlowToken
+	}
+	if flow.UserId != userId || flow.SessionId != sessionId {
+		return "", ErrInvalidFlowToken
+	}
+	var sd webauthn.SessionData
+	if err := common.UnmarshalJsonStr(flow.Payload, &sd); err != nil {
+		return "", err
+	}
+	wu, err := loadPasskeyUser(userId)
+	if err != nil {
+		return "", err
+	}
+	credential, err := wa.ValidateLogin(wu, sd, response)
+	if err != nil {
+		return "", err
+	}
+	_ = model.DB.Model(&model.PasskeyCredential{}).Where("user_id = ?", userId).
+		Updates(map[string]any{"sign_count": credential.Authenticator.SignCount, "last_used_at": time.Now()}).Error
+	if flow.Intent == "" {
+		return "", ErrInvalidFlowToken
+	}
+	return flow.Intent, nil
+}
+
 // storePasskeySession persists a WebAuthn session (challenge) in an AuthFlow.
 func storePasskeySession(purpose string, userId int, sd *webauthn.SessionData) (string, error) {
 	payload, err := common.Marshal(sd)
@@ -220,4 +283,18 @@ func encodeBase64(b []byte) string {
 func decodeBase64(s string) []byte {
 	b, _ := base64.RawURLEncoding.DecodeString(s)
 	return b
+}
+
+// ListPasskeys returns the user's registered passkeys.
+func ListPasskeys(userId int) ([]model.PasskeyCredential, error) {
+	var creds []model.PasskeyCredential
+	if err := model.DB.Where("user_id = ?", userId).Order("id desc").Find(&creds).Error; err != nil {
+		return nil, err
+	}
+	return creds, nil
+}
+
+// DeleteAllPasskeys removes every passkey of a user.
+func DeleteAllPasskeys(userId int) error {
+	return model.DB.Where("user_id = ?", userId).Delete(&model.PasskeyCredential{}).Error
 }
