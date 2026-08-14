@@ -4,6 +4,8 @@ import (
 	"errors"
 	"time"
 
+	"gorm.io/gorm"
+
 	"github.com/tokenrouter/tokenrouter/common"
 	"github.com/tokenrouter/tokenrouter/model"
 )
@@ -160,7 +162,7 @@ func RefreshSession(sid, refreshToken string) (string, string, *model.User, erro
 	newRefresh := common.RandomAlphanumeric(64)
 	now := time.Now()
 	updates := map[string]any{
-		"refresh_hash":         common.SHA256Hex(newRefresh),
+		"refresh_hash":          common.SHA256Hex(newRefresh),
 		"previous_refresh_hash": session.RefreshHash,
 		"previous_valid_until":  common.NowTimestamp() + 60,
 		"last_active_at":        now.Unix(),
@@ -181,8 +183,8 @@ func RevokeSession(sid string) error {
 	return model.DB.Model(&model.UserSession{}).
 		Where("sid = ?", sid).
 		Updates(map[string]any{
-			"status":       SessionStatusRevoked,
-			"revoked_at":   common.NowTimestamp(),
+			"status":         SessionStatusRevoked,
+			"revoked_at":     common.NowTimestamp(),
 			"revoked_reason": "logout",
 		}).Error
 }
@@ -192,8 +194,8 @@ func RevokeAllUserSessions(userId int) error {
 	return model.DB.Model(&model.UserSession{}).
 		Where("user_id = ? AND status = ?", userId, SessionStatusActive).
 		Updates(map[string]any{
-			"status":       SessionStatusRevoked,
-			"revoked_at":   common.NowTimestamp(),
+			"status":         SessionStatusRevoked,
+			"revoked_at":     common.NowTimestamp(),
 			"revoked_reason": "revoke_all",
 		}).Error
 }
@@ -203,4 +205,29 @@ func GetUserSessions(userId int) []model.UserSession {
 	var sessions []model.UserSession
 	model.DB.Where("user_id = ?", userId).Order("created_at desc").Find(&sessions)
 	return sessions
+}
+
+// RevokeOtherSessions deletes every session of a user except the given sid.
+func RevokeOtherSessions(userId int, keepSid string) error {
+	return model.DB.Where("user_id = ? AND sid <> ?", userId, keepSid).
+		Delete(&model.UserSession{}).Error
+}
+
+// BumpAuthVersionKeepSession increments the user's auth version (invalidating
+// every other session on next refresh) and re-syncs the kept session so it
+// survives.
+func BumpAuthVersionKeepSession(userId int, keepSid string) error {
+	return model.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&model.User{}).Where("id = ?", userId).
+			UpdateColumn("auth_version", gorm.Expr("auth_version + 1")).Error; err != nil {
+			return err
+		}
+		var user model.User
+		if err := tx.First(&user, userId).Error; err != nil {
+			return err
+		}
+		return tx.Model(&model.UserSession{}).
+			Where("user_id = ? AND sid = ?", userId, keepSid).
+			UpdateColumn("user_auth_version", user.AuthVersion).Error
+	})
 }

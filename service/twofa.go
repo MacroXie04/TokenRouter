@@ -12,9 +12,9 @@ import (
 
 // 2FA errors.
 var (
-	ErrTwoFANotEnabled   = errors.New("2FA not enabled")
-	ErrTwoFAInvalidCode  = errors.New("invalid 2FA code")
-	ErrTwoFALocked       = errors.New("2FA locked")
+	ErrTwoFANotEnabled  = errors.New("2FA not enabled")
+	ErrTwoFAInvalidCode = errors.New("invalid 2FA code")
+	ErrTwoFALocked      = errors.New("2FA locked")
 )
 
 const (
@@ -137,4 +137,26 @@ func TwoFAStatus(userId int) bool {
 		return false
 	}
 	return twoFA.IsEnabled
+}
+
+// RegenerateBackupCodes replaces the user's 2FA backup codes with a fresh set
+// of one-time codes (requires 2FA to be enabled).
+func RegenerateBackupCodes(userId int) ([]string, error) {
+	var twoFA model.TwoFA
+	if err := model.DB.Where("user_id = ? AND is_enabled = ?", userId, true).First(&twoFA).Error; err != nil {
+		return nil, ErrTwoFANotEnabled
+	}
+	if err := model.DB.Where("user_id = ?", userId).Delete(&model.TwoFABackupCode{}).Error; err != nil {
+		return nil, err
+	}
+	codes := make([]string, 0, backupCodeCount)
+	for i := 0; i < backupCodeCount; i++ {
+		c := common.RandomNumeric(8)
+		codes = append(codes, c)
+		bc := model.TwoFABackupCode{UserId: userId, CodeHash: common.SHA256Hex(c), CreatedAt: time.Now()}
+		if err := model.DB.Create(&bc).Error; err != nil {
+			return nil, err
+		}
+	}
+	return codes, nil
 }
