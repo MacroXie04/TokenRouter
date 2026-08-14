@@ -199,17 +199,23 @@ func weightedRandomIndex(r *rand.Rand, weights []uint) int {
 	return len(weights) - 1
 }
 
-// GetSatisfiedChannelWithAffinity selects a channel, preferring the pinned
-// (affinity) channel for a user+model when it is still enabled and not ignored.
-func GetSatisfiedChannelWithAffinity(group, modelName string, userId int, ignore map[int]struct{}, r *rand.Rand) (*model.Channel, error) {
-	if affinity := GetAffinityChannel(userId, modelName); affinity > 0 {
-		if _, skip := ignore[affinity]; !skip {
-			if ch, err := GetChannelByID(affinity); err == nil && ch.Status == constant.ChannelStatusEnabled {
-				return ch, nil
+// GetSatisfiedChannelWithPreferred selects an eligible channel for a request.
+// A preferred channel is honored only when it has an enabled ability for the
+// requested group/model and has not already failed in this retry sequence.
+func GetSatisfiedChannelWithPreferred(group, modelName string, preferredChannelID int, ignore map[int]struct{}, r *rand.Rand) (*model.Channel, bool, error) {
+	if preferredChannelID > 0 {
+		candidates := collectCandidates(group, modelName, ignore)
+		if len(candidates) == 0 && group != GroupDefault {
+			candidates = collectCandidates(GroupDefault, modelName, ignore)
+		}
+		for _, candidate := range candidates {
+			if candidate.channel.Id == preferredChannelID {
+				return candidate.channel, true, nil
 			}
 		}
 	}
-	return GetRandomSatisfiedChannel(group, modelName, ignore, r)
+	channel, err := GetRandomSatisfiedChannel(group, modelName, ignore, r)
+	return channel, false, err
 }
 
 // GetChannelByID loads a channel by id.

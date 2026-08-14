@@ -206,3 +206,66 @@ const (
 	MaxChannelWeight          = 100
 	DefaultChannelTestModel   = ""
 )
+
+// ChannelBaseURLs maps a channel type to its default upstream base URL
+// (factual provider endpoints; empty where the type has no default).
+var ChannelBaseURLs = []string{
+	"",                                     // 0 Unknown
+	"https://api.openai.com",               // 1 OpenAI
+	"",                                     // 2 Midjourney
+	"",                                     // 3 Azure
+	"http://localhost:11434",               // 4 Ollama
+	"",                                     // 5 MidjourneyPlus
+	"https://api.openaimax.com",            // 6 OpenAIMax
+	"https://api.ohmygpt.com",              // 7 OhMyGPT
+	"",                                     // 8 Custom
+	"https://api.caipacity.com",            // 9 AILS
+	"https://api.aiproxy.io",               // 10 AIProxy
+	"",                                     // 11 PaLM
+	"https://api.api2gpt.com",              // 12 API2GPT
+	"https://api.aigc2d.com",               // 13 AIGC2D
+	"https://api.anthropic.com",            // 14 Anthropic
+	"https://aip.baidubce.com",             // 15 Baidu
+	"https://open.bigmodel.cn",             // 16 Zhipu
+	"https://dashscope.aliyuncs.com",       // 17 Ali
+	"",                                     // 18 Xunfei
+	"https://api.360.cn",                   // 19 360
+	"https://openrouter.ai/api",            // 20 OpenRouter
+	"https://api.aiproxy.io",               // 21 AIProxyLibrary
+	"https://fastgpt.run/api/openapi",      // 22 FastGPT
+	"https://hunyuan.tencentcloudapi.com",  // 23 Tencent
+	"https://generativelanguage.googleapis.com", // 24 Gemini
+	"https://api.moonshot.cn",              // 25 Moonshot
+	"https://open.bigmodel.cn",             // 26 ZhipuV4
+	"https://api.perplexity.ai",            // 27 Perplexity
+	"https://api.lingyiwanwu.com",          // 28 LingYiWanWu
+	"",                                     // 29 Aws
+	"https://api.cohere.ai",                // 30 Cohere
+	"https://api.minimax.chat",             // 31 MiniMax
+	"",                                     // 32 SunoAPI
+	"https://api.dify.ai",                  // 33 Dify
+	"https://api.jina.ai",                  // 34 Jina
+	"https://api.cloudflare.com",           // 35 Cloudflare
+	"https://api.siliconflow.cn",           // 36 SiliconFlow
+	"",                                     // 37 VertexAi
+	"https://api.mistral.ai",               // 38 Mistral
+	"https://api.deepseek.com",             // 39 DeepSeek
+	"https://api.moka.ai",                  // 40 MokaAI
+	"https://ark.cn-beijing.volces.com",    // 41 VolcEngine
+	"https://qianfan.baidubce.com",         // 42 BaiduV2
+	"",                                     // 43 Xinference
+	"https://api.x.ai",                     // 44 Xai
+	"https://api.coze.cn",                  // 45 Coze
+	"https://api.klingai.com",              // 46 Kling
+	"https://visual.volcengineapi.com",     // 47 Jimeng
+	"https://api.vidu.cn",                  // 48 Vidu
+	"https://llm.submodel.ai",              // 49 Submodel
+	"https://ark.cn-beijing.volces.com",    // 50 DoubaoVideo
+	"https://api.openai.com",               // 51 Sora
+	"https://api.replicate.com",            // 52 Replicate
+	"https://chatgpt.com",                  // 53 Codex
+	"",                                     // 54 AdvancedCustom
+	"",                                     // 55 Sub2API
+	"",                                     // 56 NewAPI
+	"",                                     // 57 Dummy
+}
