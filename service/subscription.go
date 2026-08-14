@@ -2,8 +2,13 @@ package service
 
 import (
 	"errors"
+	"fmt"
 	"strconv"
+	"strings"
 	"time"
+
+	"github.com/shopspring/decimal"
+	"gorm.io/gorm"
 
 	"github.com/tokenrouter/tokenrouter/common"
 	"github.com/tokenrouter/tokenrouter/model"
@@ -14,6 +19,12 @@ const (
 	SubscriptionStatusActive    = "active"
 	SubscriptionStatusExpired   = "expired"
 	SubscriptionStatusCancelled = "cancelled"
+)
+
+// Subscription payment method/provider identifiers.
+const (
+	PaymentMethodBalance   = "balance"
+	PaymentProviderBalance = "balance"
 )
 
 // ErrNoActiveSubscription is returned when a user has no active subscription.
@@ -32,10 +43,14 @@ func CreateSubscriptionPlan(p *model.SubscriptionPlan) error {
 	return model.DB.Create(p).Error
 }
 
-// ListSubscriptionPlans returns enabled plans ordered by sort order.
+// ListSubscriptionPlans returns enabled plans for the user-facing plans view,
+// highest sort order first, with display defaults normalized.
 func ListSubscriptionPlans() []model.SubscriptionPlan {
 	var plans []model.SubscriptionPlan
-	model.DB.Where("enabled = ?", true).Order("sort_order asc").Find(&plans)
+	model.DB.Where("enabled = ?", true).Order("sort_order desc, id desc").Find(&plans)
+	for i := range plans {
+		NormalizeSubscriptionPlanDefaults(&plans[i])
+	}
 	return plans
 }
 
@@ -48,62 +63,116 @@ func GetSubscriptionPlan(id int) (*model.SubscriptionPlan, error) {
 	return &p, nil
 }
 
-// PurchaseSubscription purchases a plan for a user (offline balance path),
-// creating an order and immediately activating the subscription.
-func PurchaseSubscription(userId, planId int) (*model.UserSubscription, error) {
-	plan, err := GetSubscriptionPlan(planId)
+// ParseSubscriptionPlanPrice parses the plan's stored price string. An empty
+// price means free; an unparseable non-empty value is a parameter error,
+// matching the admin plan-validation contract.
+func ParseSubscriptionPlanPrice(s string) (float64, error) {
+	price := strings.TrimSpace(s)
+	if price == "" {
+		return 0, nil
+	}
+	f, err := strconv.ParseFloat(price, 64)
 	if err != nil {
-		return nil, err
+		return 0, errors.New("参数错误")
 	}
-	if !plan.Enabled {
-		return nil, errors.New("订阅计划未启用")
-	}
+	return f, nil
+}
 
-	now := common.NowTimestamp()
-	// Cancel any previous active subscription.
-	_ = model.DB.Model(&model.UserSubscription{}).
-		Where("user_id = ? AND status = ?", userId, SubscriptionStatusActive).
-		Update("status", SubscriptionStatusCancelled).Error
+// calcSubscriptionBalanceQuota converts a plan price (USD) into the wallet
+// quota to deduct, rounding up, and rejects amounts that would saturate the
+// quota column instead of charging a clamped value.
+func calcSubscriptionBalanceQuota(priceAmount float64) (int, error) {
+	if priceAmount <= 0 {
+		return 0, nil
+	}
+	quota := decimal.NewFromFloat(priceAmount).
+		Mul(decimal.NewFromInt(common.QuotaPerUnit)).
+		Ceil()
+	return common.QuotaFromDecimalStrict(quota)
+}
 
-	order := model.SubscriptionOrder{
-		UserId:        userId,
-		PlanId:        planId,
-		Money:         parsePrice(plan.PriceAmount),
-		TradeNo:       common.RandomAlphanumeric(32),
-		PaymentMethod: "balance",
-		Status:        "success",
-		CreateTime:    now,
-		CompleteTime:  now,
+// PurchaseSubscriptionWithBalance purchases a plan for the user by deducting
+// wallet quota. The subscription is created through the same transaction used
+// by the admin bind (stacking, per-user purchase cap, calendar-accurate end
+// and reset times, group upgrade with previous-group snapshot), together with
+// a completed order row; a top-up log records the purchase.
+func PurchaseSubscriptionWithBalance(userId, planId int) error {
+	if userId <= 0 || planId <= 0 {
+		return errors.New("invalid userId or planId")
 	}
-	if err := model.DB.Create(&order).Error; err != nil {
-		return nil, err
+	var (
+		logPlanTitle string
+		logMoney     float64
+		chargedQuota int
+	)
+	err := model.DB.Transaction(func(tx *gorm.DB) error {
+		var plan model.SubscriptionPlan
+		if err := tx.First(&plan, planId).Error; err != nil {
+			return err
+		}
+		NormalizeSubscriptionPlanDefaults(&plan)
+		if !plan.Enabled {
+			return errors.New("套餐未启用")
+		}
+		price, err := ParseSubscriptionPlanPrice(plan.PriceAmount)
+		if err != nil {
+			return err
+		}
+		if price < 0 {
+			return errors.New("套餐价格不能为负数")
+		}
+		if plan.AllowBalancePay != nil && !*plan.AllowBalancePay {
+			return errors.New("该套餐不允许使用余额兑换")
+		}
+		requiredQuota, err := calcSubscriptionBalanceQuota(price)
+		if err != nil {
+			return err
+		}
+		// Lock the user row first so concurrent purchases serialize the
+		// balance check, purchase-cap check, and group snapshot.
+		var user model.User
+		if err := subscriptionLockForUpdate(tx).Where("id = ?", userId).First(&user).Error; err != nil {
+			return err
+		}
+		if requiredQuota > 0 {
+			if user.Quota < requiredQuota {
+				return errors.New("余额不足")
+			}
+			if err := tx.Model(&model.User{}).Where("id = ?", userId).
+				Update("quota", gorm.Expr("quota - ?", requiredQuota)).Error; err != nil {
+				return err
+			}
+		}
+		if _, err := createUserSubscriptionFromPlanTx(tx, userId, &plan, PaymentMethodBalance); err != nil {
+			return err
+		}
+		now := common.NowTimestamp()
+		order := model.SubscriptionOrder{
+			UserId:          userId,
+			PlanId:          plan.Id,
+			Money:           price,
+			TradeNo:         fmt.Sprintf("SUBBALUSR%dNO%s%d", userId, common.RandomAlphanumeric(6), time.Now().UnixNano()),
+			PaymentMethod:   PaymentMethodBalance,
+			PaymentProvider: PaymentProviderBalance,
+			Status:          TopUpStatusSuccess,
+			CreateTime:      now,
+			CompleteTime:    now,
+			ProviderPayload: fmt.Sprintf("charged_quota=%d", requiredQuota),
+		}
+		if err := tx.Create(&order).Error; err != nil {
+			return err
+		}
+		logPlanTitle = plan.Title
+		logMoney = price
+		chargedQuota = requiredQuota
+		return nil
+	})
+	if err != nil {
+		return err
 	}
-
-	endTime := now + int64(planDuration(plan).Seconds())
-	sub := model.UserSubscription{
-		UserId:        userId,
-		PlanId:        planId,
-		AmountTotal:   plan.TotalAmount,
-		AmountUsed:    0,
-		StartTime:     now,
-		EndTime:       endTime,
-		Status:        SubscriptionStatusActive,
-		Source:        "purchase",
-		NextResetTime: nextResetTime(plan, now),
-		UpgradeGroup:  plan.UpgradeGroup,
-		DowngradeGroup: plan.DowngradeGroup,
-		AllowWalletOverflow: plan.AllowWalletOverflow != nil && *plan.AllowWalletOverflow,
-		CreatedAt:     now,
-		UpdatedAt:     now,
-	}
-	if err := model.DB.Create(&sub).Error; err != nil {
-		return nil, err
-	}
-	// Apply the plan's group upgrade so the user's routing group changes.
-	if plan.UpgradeGroup != "" {
-		_ = SetUserGroup(userId, plan.UpgradeGroup)
-	}
-	return &sub, nil
+	RecordSystemLog(userId, LogTypeTopup,
+		fmt.Sprintf("使用余额购买订阅成功，套餐: %s，支付金额: %.2f，扣除额度: %d", logPlanTitle, logMoney, chargedQuota))
+	return nil
 }
 
 // GetActiveSubscription returns the user's active (non-expired) subscription.
@@ -144,59 +213,60 @@ func ConsumeSubscriptionQuota(userId, quota int) (int, error) {
 	return quota, nil
 }
 
-// ResetSubscriptionQuota resets the subscription's used quota according to its
-// reset period and advances NextResetTime.
+// ResetSubscriptionQuota performs a due periodic reset: usage is zeroed and
+// the schedule advances along calendar-aligned boundaries walked forward from
+// the last reset base, so a subscription that slept through several windows
+// catches up to the current one instead of drifting.
 func ResetSubscriptionQuota(sub *model.UserSubscription) error {
 	plan, err := GetSubscriptionPlan(sub.PlanId)
 	if err != nil {
 		return err
 	}
 	now := common.NowTimestamp()
-	return model.DB.Model(&model.UserSubscription{}).Where("id = ?", sub.Id).
-		Updates(map[string]any{
-			"amount_used":      0,
-			"last_reset_time":  now,
-			"next_reset_time":  nextResetTime(plan, now),
-		}).Error
+	if sub.NextResetTime > 0 && sub.NextResetTime > now {
+		return nil
+	}
+	updates := map[string]any{"updated_at": now}
+	if NormalizeSubscriptionResetPeriod(plan.QuotaResetPeriod) == SubscriptionResetNever {
+		// The plan no longer resets: clear a stale schedule so the reset job
+		// stops selecting this subscription. Usage is intentionally kept.
+		if sub.NextResetTime == 0 {
+			return nil
+		}
+		updates["next_reset_time"] = 0
+		return model.DB.Model(&model.UserSubscription{}).Where("id = ?", sub.Id).Updates(updates).Error
+	}
+	baseUnix := sub.LastResetTime
+	if baseUnix <= 0 {
+		baseUnix = sub.StartTime
+	}
+	base := time.Unix(baseUnix, 0)
+	next := calcSubscriptionNextResetTime(base, plan, sub.EndTime)
+	advanced := false
+	for next > 0 && next <= now {
+		advanced = true
+		base = time.Unix(next, 0)
+		next = calcSubscriptionNextResetTime(base, plan, sub.EndTime)
+	}
+	if advanced {
+		updates["amount_used"] = 0
+		updates["last_reset_time"] = base.Unix()
+	} else if next > 0 && sub.NextResetTime == 0 {
+		updates["last_reset_time"] = base.Unix()
+	} else if next == sub.NextResetTime {
+		// Nothing due and nothing to correct.
+		return nil
+	}
+	updates["next_reset_time"] = next
+	return model.DB.Model(&model.UserSubscription{}).Where("id = ?", sub.Id).Updates(updates).Error
 }
 
-func planDuration(plan *model.SubscriptionPlan) time.Duration {
-	if plan.CustomSeconds > 0 {
-		return time.Duration(plan.CustomSeconds) * time.Second
+// PurchaseSubscription purchases a plan for the user with wallet balance and
+// returns the resulting active subscription (adapter over
+// PurchaseSubscriptionWithBalance for the dashboard purchase endpoint).
+func PurchaseSubscription(userId, planId int) (*model.UserSubscription, error) {
+	if err := PurchaseSubscriptionWithBalance(userId, planId); err != nil {
+		return nil, err
 	}
-	n := plan.DurationValue
-	if n <= 0 {
-		n = 1
-	}
-	switch plan.DurationUnit {
-	case "day":
-		return time.Duration(n) * 24 * time.Hour
-	case "month":
-		return time.Duration(n) * 30 * 24 * time.Hour
-	case "year":
-		return time.Duration(n) * 365 * 24 * time.Hour
-	default:
-		return 30 * 24 * time.Hour
-	}
-}
-
-func nextResetTime(plan *model.SubscriptionPlan, now int64) int64 {
-	if plan.QuotaResetCustomSeconds > 0 {
-		return now + plan.QuotaResetCustomSeconds
-	}
-	switch plan.QuotaResetPeriod {
-	case "daily":
-		return now + int64(24*time.Hour.Seconds())
-	case "weekly":
-		return now + int64(7*24*time.Hour.Seconds())
-	case "monthly":
-		return now + int64(30*24*time.Hour.Seconds())
-	default:
-		return 0 // no periodic reset
-	}
-}
-
-func parsePrice(s string) float64 {
-	f, _ := strconv.ParseFloat(s, 64)
-	return f
+	return GetActiveSubscription(userId)
 }

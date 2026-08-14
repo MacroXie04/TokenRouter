@@ -11,9 +11,20 @@ import (
 	"github.com/tokenrouter/tokenrouter/service"
 )
 
-// ListSubscriptionPlans returns enabled plans (public).
+// ListSubscriptionPlans returns enabled plans for the user plans view. Until
+// the operator confirms payment compliance the list is empty rather than an
+// error, so the storefront simply shows nothing.
 func ListSubscriptionPlans(c *gin.Context) {
-	c.JSON(http.StatusOK, dto.Ok(service.ListSubscriptionPlans()))
+	if !service.PaymentComplianceConfirmed() {
+		c.JSON(http.StatusOK, dto.Ok([]SubscriptionPlanDTO{}))
+		return
+	}
+	plans := service.ListSubscriptionPlans()
+	result := make([]SubscriptionPlanDTO, 0, len(plans))
+	for _, p := range plans {
+		result = append(result, SubscriptionPlanDTO{Plan: p})
+	}
+	c.JSON(http.StatusOK, dto.Ok(result))
 }
 
 // CreateSubscriptionPlan creates a plan (admin).
@@ -30,29 +41,60 @@ func CreateSubscriptionPlan(c *gin.Context) {
 	c.JSON(http.StatusOK, dto.Ok(p))
 }
 
-// PurchaseSubscription purchases a plan for the authenticated user.
-func PurchaseSubscription(c *gin.Context) {
+// SubscriptionRequestBalancePay purchases a plan for the authenticated user by
+// deducting wallet balance.
+func SubscriptionRequestBalancePay(c *gin.Context) {
+	if !requirePaymentCompliance(c) {
+		return
+	}
 	var req struct {
-		PlanId int `json:"plan_id" binding:"required"`
+		PlanId int `json:"plan_id"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil || req.PlanId <= 0 {
+		c.JSON(http.StatusBadRequest, dto.Fail("参数错误"))
+		return
+	}
+	if err := service.PurchaseSubscriptionWithBalance(common.GetUserId(c), req.PlanId); err != nil {
+		c.JSON(http.StatusBadRequest, dto.Fail(err.Error()))
+		return
+	}
+	c.JSON(http.StatusOK, dto.Ok(nil))
+}
+
+// GetSelfSubscription returns the user's billing preference plus their active
+// and historical subscriptions. List loading errors degrade to empty lists so
+// the view always renders.
+func GetSelfSubscription(c *gin.Context) {
+	userId := common.GetUserId(c)
+	active, err := service.GetAllActiveUserSubscriptions(userId)
+	if err != nil {
+		active = []service.SubscriptionSummary{}
+	}
+	all, err := service.GetAllUserSubscriptions(userId)
+	if err != nil {
+		all = []service.SubscriptionSummary{}
+	}
+	c.JSON(http.StatusOK, dto.Ok(gin.H{
+		"billing_preference": service.GetUserBillingPreference(userId),
+		"subscriptions":      active,
+		"all_subscriptions":  all,
+	}))
+}
+
+// UpdateSubscriptionPreference stores the user's billing preference. Unknown
+// values normalize to the default rather than erroring.
+func UpdateSubscriptionPreference(c *gin.Context) {
+	var req struct {
+		BillingPreference string `json:"billing_preference"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, dto.Fail("参数错误"))
 		return
 	}
-	sub, err := service.PurchaseSubscription(common.GetUserId(c), req.PlanId)
+	pref, err := service.UpdateUserBillingPreference(common.GetUserId(c), req.BillingPreference)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, dto.Fail(err.Error()))
 		return
 	}
-	c.JSON(http.StatusOK, dto.Ok(sub))
-}
-
-// GetSelfSubscription returns the user's active subscription.
-func GetSelfSubscription(c *gin.Context) {
-	sub, err := service.GetActiveSubscription(common.GetUserId(c))
-	if err != nil {
-		c.JSON(http.StatusOK, dto.Ok(nil))
-		return
-	}
-	c.JSON(http.StatusOK, dto.Ok(sub))
+	c.JSON(http.StatusOK, dto.Ok(gin.H{"billing_preference": pref}))
 }
