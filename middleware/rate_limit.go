@@ -62,3 +62,21 @@ func buildRateLimit(prefix string, limit int, window time.Duration, keyFunc func
 		c.Next()
 	}
 }
+
+// UserCriticalRateLimit bounds a per-user critical action (e.g. access-token
+// generation) to CRITICAL_RATE_LIMIT requests per
+// CRITICAL_RATE_LIMIT_DURATION (reference: 20 per 20 minutes). Disabled with
+// CRITICAL_RATE_LIMIT_ENABLE=false.
+func UserCriticalRateLimit(scope string) gin.HandlerFunc {
+	if !common.GetEnvBool("CRITICAL_RATE_LIMIT_ENABLE", true) {
+		return func(c *gin.Context) { c.Next() }
+	}
+	limit := common.GetEnvInt("CRITICAL_RATE_LIMIT", 20)
+	duration := time.Duration(common.GetEnvInt("CRITICAL_RATE_LIMIT_DURATION", 20*60)) * time.Minute
+	return buildRateLimit("UC:"+scope, limit, duration, func(c *gin.Context) string {
+		if uid := common.GetUserId(c); uid != 0 {
+			return common.Int2Str(uid)
+		}
+		return c.ClientIP()
+	})
+}
