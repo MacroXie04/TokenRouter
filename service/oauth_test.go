@@ -56,7 +56,7 @@ func TestOAuthCodeFlow(t *testing.T) {
 
 	token, err := ExchangeCode(cfg, "code", "http://localhost/callback")
 	require.NoError(t, err)
-	assert.Equal(t, "tok-123", token)
+	assert.Equal(t, "tok-123", token.AccessToken)
 
 	pu, err := FetchUserInfo(cfg, "github", token)
 	require.NoError(t, err)

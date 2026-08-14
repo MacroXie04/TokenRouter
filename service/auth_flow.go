@@ -10,8 +10,9 @@ import (
 
 // Auth flow purposes.
 const (
-	AuthFlowPurposeLogin2FA = "login_2fa"
-	AuthFlowPurposeOAuth    = "oauth"
+	AuthFlowPurposeLogin2FA     = "login_2fa"
+	AuthFlowPurposeOAuth        = "oauth"
+	AuthFlowPurposeTelegramBind = "telegram_bind"
 )
 
 // ErrInvalidFlowToken is returned when an auth flow is unknown, consumed, or expired.
