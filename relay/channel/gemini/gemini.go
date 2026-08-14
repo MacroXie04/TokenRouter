@@ -3,6 +3,7 @@ package gemini
 
 import (
 	"bufio"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -27,7 +28,9 @@ func (a *Adaptor) GetRequestURL(meta *relaycommon.Meta) (string, error) {
 		base = "https://generativelanguage.googleapis.com"
 	}
 	if a.Mode == constant.RelayModeEmbeddings {
-		return relaycommon.JoinURL(base, "/v1beta/models/"+meta.ModelName+":embedContent"), nil
+		// The embedding payload is always built batch-style (requests array),
+		// matching the reference; use the batch endpoint.
+		return relaycommon.JoinURL(base, "/v1beta/models/"+meta.ModelName+":batchEmbedContents"), nil
 	}
 	action := "generateContent"
 	if meta.IsStream {
@@ -44,21 +47,107 @@ func (a *Adaptor) SetupRequestHeader(req *http.Request, meta *relaycommon.Meta) 
 
 func (a *Adaptor) ConvertRequest(meta *relaycommon.Meta) ([]byte, error) {
 	if a.Mode == constant.RelayModeEmbeddings {
-		// Keep the raw body for embeddings; parse content from the OpenAI request.
-		return protocolkit.MarshalJSON(meta.Request)
+		return convertEmbeddingRequest(meta)
 	}
 	geminiReq := protocolkit.OpenAIRequestToGeminiRequest(meta.Request)
 	return protocolkit.MarshalJSON(geminiReq)
+}
+
+// convertEmbeddingRequest converts an OpenAI embedding request (input as a
+// string or array of strings) into the Gemini batch embedContent payload.
+func convertEmbeddingRequest(meta *relaycommon.Meta) ([]byte, error) {
+	inputs, err := embeddingInputs(meta)
+	if err != nil {
+		return nil, err
+	}
+	requests := make([]map[string]any, 0, len(inputs))
+	for _, input := range inputs {
+		requests = append(requests, map[string]any{
+			"model": "models/" + meta.ModelName,
+			"content": protocolkit.GeminiChatContent{
+				Parts: []protocolkit.GeminiPart{{Text: input}},
+			},
+		})
+	}
+	return protocolkit.MarshalJSON(map[string]any{"requests": requests})
+}
+
+// embeddingInputs extracts the OpenAI embedding input field (string or
+// []string) from the raw request body.
+func embeddingInputs(meta *relaycommon.Meta) ([]string, error) {
+	if meta.Request == nil || meta.Request.Extra == nil {
+		return nil, fmt.Errorf("embedding request missing input")
+	}
+	switch in := meta.Request.Extra["input"].(type) {
+	case string:
+		if in == "" {
+			return nil, fmt.Errorf("input is empty")
+		}
+		return []string{in}, nil
+	case []any:
+		out := make([]string, 0, len(in))
+		for _, item := range in {
+			if s, ok := item.(string); ok && s != "" {
+				out = append(out, s)
+			}
+		}
+		if len(out) == 0 {
+			return nil, fmt.Errorf("input is empty")
+		}
+		return out, nil
+	case []string:
+		out := make([]string, 0, len(in))
+		for _, s := range in {
+			if s != "" {
+				out = append(out, s)
+			}
+		}
+		if len(out) == 0 {
+			return nil, fmt.Errorf("input is empty")
+		}
+		return out, nil
+	default:
+		return nil, fmt.Errorf("input is required")
+	}
 }
 
 func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, meta *relaycommon.Meta) (*protocolkit.Usage, error) {
 	if resp.StatusCode >= 400 {
 		return nil, relaycommon.HandleErrorResponse(resp)
 	}
+	if a.Mode == constant.RelayModeEmbeddings {
+		return a.embeddingResponse(c, resp, meta)
+	}
 	if meta.IsStream {
 		return a.streamResponse(c, resp, meta)
 	}
 	return a.nonStreamResponse(c, resp)
+}
+
+// embeddingResponse converts the batch embedContent response into the OpenAI
+// embeddings list shape. Embeddings are billed by prompt tokens.
+func (a *Adaptor) embeddingResponse(c *gin.Context, resp *http.Response, meta *relaycommon.Meta) (*protocolkit.Usage, error) {
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	var batch struct {
+		Embeddings []protocolkit.ContentEmbedding `json:"embeddings"`
+	}
+	if err := protocolkit.UnmarshalJSON(body, &batch); err != nil {
+		return nil, err
+	}
+	data := make([]gin.H, 0, len(batch.Embeddings))
+	for i, emb := range batch.Embeddings {
+		data = append(data, gin.H{"object": "embedding", "embedding": emb.Values, "index": i})
+	}
+	usage := &protocolkit.Usage{PromptTokens: meta.PromptTokens, TotalTokens: meta.PromptTokens}
+	out := gin.H{"object": "list", "data": data, "model": meta.ModelName, "usage": usage}
+	b, _ := protocolkit.MarshalJSON(out)
+	c.Status(resp.StatusCode)
+	c.Header("Content-Type", "application/json")
+	_, _ = c.Writer.Write(b)
+	return usage, nil
 }
 
 func (a *Adaptor) nonStreamResponse(c *gin.Context, resp *http.Response) (*protocolkit.Usage, error) {

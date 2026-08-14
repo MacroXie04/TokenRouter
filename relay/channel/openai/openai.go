@@ -50,14 +50,20 @@ func (a *Adaptor) GetRequestURL(meta *relaycommon.Meta) (string, error) {
 		return relaycommon.JoinURL(base, "/v1/images/generations"), nil
 	case constant.RelayModeImagesEdits:
 		return relaycommon.JoinURL(base, "/v1/images/edits"), nil
+	case constant.RelayModeEdits:
+		return relaycommon.JoinURL(base, "/v1/edits"), nil
 	case constant.RelayModeAudioSpeech:
 		return relaycommon.JoinURL(base, "/v1/audio/speech"), nil
 	case constant.RelayModeAudioTranscription:
 		return relaycommon.JoinURL(base, "/v1/audio/transcriptions"), nil
 	case constant.RelayModeAudioTranslation:
 		return relaycommon.JoinURL(base, "/v1/audio/translations"), nil
-	case constant.RelayModeResponses, constant.RelayModeResponsesCompact:
+	case constant.RelayModeResponses:
 		return relaycommon.JoinURL(base, "/v1/responses"), nil
+	case constant.RelayModeResponsesCompact:
+		return relaycommon.JoinURL(base, "/v1/responses/compact"), nil
+	case constant.RelayModeAlphaSearch:
+		return relaycommon.JoinURL(base, "/v1/alpha/search"), nil
 	case constant.RelayModeRerank:
 		return relaycommon.JoinURL(base, "/v1/rerank"), nil
 	case constant.RelayModeRealtime:
@@ -102,10 +108,69 @@ func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, meta *relaycom
 	if resp.StatusCode >= 400 {
 		return nil, relaycommon.HandleErrorResponse(resp)
 	}
+	switch a.Mode {
+	case constant.RelayModeAlphaSearch:
+		return a.alphaSearchResponse(c, resp)
+	case constant.RelayModeResponsesCompact:
+		return a.compactResponse(c, resp)
+	}
 	if meta.IsStream {
 		return a.streamResponse(c, resp, meta)
 	}
 	return a.nonStreamResponse(c, resp)
+}
+
+// alphaSearchResponse copies the upstream response verbatim (preserving the
+// upstream content type). Upstream alpha search carries no usage; the caller
+// settles with the prompt estimate, mirroring the reference's per-call billing.
+func (a *Adaptor) alphaSearchResponse(c *gin.Context, resp *http.Response) (*protocolkit.Usage, error) {
+	if ct := resp.Header.Get("Content-Type"); ct != "" {
+		c.Header("Content-Type", ct)
+	}
+	c.Status(resp.StatusCode)
+	if _, err := io.Copy(c.Writer, resp.Body); err != nil {
+		return nil, err
+	}
+	return nil, nil
+}
+
+// compactResponse parses the Responses-compaction envelope: an upstream error
+// field is surfaced, and input/output usage becomes the settlement usage.
+func (a *Adaptor) compactResponse(c *gin.Context, resp *http.Response) (*protocolkit.Usage, error) {
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	var compact struct {
+		Usage *struct {
+			InputTokens  int `json:"input_tokens"`
+			OutputTokens int `json:"output_tokens"`
+			TotalTokens  int `json:"total_tokens"`
+		} `json:"usage"`
+		Error any `json:"error"`
+	}
+	if err := protocolkit.UnmarshalJSON(body, &compact); err != nil {
+		return nil, err
+	}
+	if compact.Error != nil {
+		var e struct {
+			Error protocolkit.OpenAIError `json:"error"`
+		}
+		_ = protocolkit.UnmarshalJSON(body, &e)
+		return nil, relaycommon.UpstreamErrorFromOpenAI(e.Error, resp.StatusCode)
+	}
+	var usage *protocolkit.Usage
+	if compact.Usage != nil {
+		usage = &protocolkit.Usage{
+			PromptTokens:     compact.Usage.InputTokens,
+			CompletionTokens: compact.Usage.OutputTokens,
+			TotalTokens:      compact.Usage.TotalTokens,
+		}
+	}
+	c.Status(resp.StatusCode)
+	c.Header("Content-Type", "application/json")
+	_, _ = c.Writer.Write(body)
+	return usage, nil
 }
 
 func (a *Adaptor) nonStreamResponse(c *gin.Context, resp *http.Response) (*protocolkit.Usage, error) {

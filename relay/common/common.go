@@ -128,6 +128,19 @@ func HandleErrorResponse(resp *http.Response) error {
 	return &UpstreamError{StatusCode: resp.StatusCode, Body: string(body)}
 }
 
+// UpstreamErrorFromOpenAI wraps an OpenAI error envelope as an UpstreamError
+// so WriteUpstreamError relays it to the client unchanged.
+func UpstreamErrorFromOpenAI(e protocolkit.OpenAIError, statusCode int) error {
+	if statusCode == 0 {
+		statusCode = http.StatusBadRequest
+	}
+	body, err := protocolkit.MarshalJSON(gin.H{"error": e})
+	if err != nil {
+		return &UpstreamError{StatusCode: statusCode, Body: e.Message}
+	}
+	return &UpstreamError{StatusCode: statusCode, Body: string(body)}
+}
+
 // WriteUpstreamError writes an upstream error to the client as an
 // OpenAI-compatible JSON error, passing through an upstream error body when it
 // is already in the OpenAI error shape.
@@ -199,6 +212,23 @@ func EstimatePromptTokens(req *protocolkit.GeneralOpenAIRequest) int {
 	}
 	if s, ok := req.Prompt.(string); ok {
 		total += CountTokens(s)
+	}
+	// Embedding requests carry the text in `input` (string or array).
+	if req.Extra != nil {
+		switch in := req.Extra["input"].(type) {
+		case string:
+			total += CountTokens(in)
+		case []any:
+			for _, item := range in {
+				if s, ok := item.(string); ok {
+					total += CountTokens(s)
+				}
+			}
+		case []string:
+			for _, s := range in {
+				total += CountTokens(s)
+			}
+		}
 	}
 	return total
 }

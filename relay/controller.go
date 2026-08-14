@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -17,8 +18,8 @@ import (
 	"github.com/tokenrouter/tokenrouter/model"
 	"github.com/tokenrouter/tokenrouter/pkg/billingexpr"
 	"github.com/tokenrouter/tokenrouter/protocolkit"
-	"github.com/tokenrouter/tokenrouter/service"
 	relaycommon "github.com/tokenrouter/tokenrouter/relay/common"
+	"github.com/tokenrouter/tokenrouter/service"
 	"github.com/tokenrouter/tokenrouter/setting"
 )
 
@@ -31,6 +32,26 @@ var relayHTTPClient = &http.Client{
 	},
 }
 
+type firstResponseWriter struct {
+	gin.ResponseWriter
+	once sync.Once
+	at   time.Time
+}
+
+func (writer *firstResponseWriter) Write(data []byte) (int, error) {
+	writer.mark()
+	return writer.ResponseWriter.Write(data)
+}
+
+func (writer *firstResponseWriter) WriteString(data string) (int, error) {
+	writer.mark()
+	return writer.ResponseWriter.WriteString(data)
+}
+
+func (writer *firstResponseWriter) mark() {
+	writer.once.Do(func() { writer.at = time.Now() })
+}
+
 func init() {
 	if relayHTTPClient.Timeout == 0 {
 		relayHTTPClient.Timeout = 0 // no timeout (0 = unlimited)
@@ -39,17 +60,20 @@ func init() {
 
 // RelayInfo carries state through a single relay request lifecycle.
 type RelayInfo struct {
-	Mode         constant.RelayMode
-	Format       constant.RelayFormat
-	ModelName    string
-	Request      *protocolkit.GeneralOpenAIRequest
-	PromptTokens int
-	Quota        int
-	QuotaClamp   *common.QuotaClamp
-	Channel      *model.Channel
-	Usage        *protocolkit.Usage
-	Group        string
-	IsStream     bool
+	Mode          constant.RelayMode
+	Format        constant.RelayFormat
+	ModelName     string
+	Request       *protocolkit.GeneralOpenAIRequest
+	ClaudeRequest *protocolkit.ClaudeRequest // set for Claude-format /v1/messages relays
+	GeminiRequest *protocolkit.GeminiChatRequest
+	RawBody       []byte // verbatim request body for native passthrough relays
+	PromptTokens  int
+	Quota         int
+	QuotaClamp    *common.QuotaClamp
+	Channel       *model.Channel
+	Usage         *protocolkit.Usage
+	Group         string
+	IsStream      bool
 }
 
 // Relay is the main relay handler for OpenAI-compatible paths.
@@ -60,17 +84,19 @@ func Relay(c *gin.Context) {
 		return
 	}
 
-	request, err := parseRequest(c)
+	request, rawBody, err := parseRequest(c)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": protocolkit.OpenAIError{Message: err.Error(), Type: "invalid_request_error"}})
 		return
 	}
 
 	info := &RelayInfo{
-		Mode:    mode,
-		Request: request,
+		Mode:      mode,
+		Format:    relaycommon.GetRelayFormat(constant.ChannelTypeOpenAI, mode),
+		Request:   request,
+		RawBody:   rawBody,
 		ModelName: request.Model,
-		Group:  getRelayGroup(c),
+		Group:     getRelayGroup(c),
 	}
 
 	if err := relayAndSettle(c, info); err != nil {
@@ -88,35 +114,70 @@ func getRelayGroup(c *gin.Context) string {
 }
 
 // parseRequest reads and parses the request body into the OpenAI DTO.
-func parseRequest(c *gin.Context) (*protocolkit.GeneralOpenAIRequest, error) {
+func parseRequest(c *gin.Context) (*protocolkit.GeneralOpenAIRequest, []byte, error) {
 	body, err := io.ReadAll(io.LimitReader(c.Request.Body, 16*1024*1024))
 	if err != nil {
-		return nil, errors.New("读取请求体失败")
+		return nil, nil, errors.New("读取请求体失败")
 	}
 	req := &protocolkit.GeneralOpenAIRequest{}
 	if err := protocolkit.UnmarshalJSON(body, req); err != nil {
-		return nil, errors.New("无效的 JSON 请求体")
+		return nil, nil, errors.New("无效的 JSON 请求体")
 	}
 	// Preserve the raw body for provider-specific passthrough fields.
 	var extra map[string]any
 	_ = protocolkit.UnmarshalJSON(body, &extra)
 	req.Extra = extra
 	if req.Model == "" {
-		return nil, errors.New("缺少 model 字段")
+		return nil, nil, errors.New("缺少 model 字段")
 	}
-	return req, nil
+	return req, body, nil
 }
 
 // relayAndSettle runs the full lifecycle for a relay request.
 func relayAndSettle(c *gin.Context, info *RelayInfo) error {
+	return relayAndSettleWithDispatch(c, info, dispatchUpstream)
+}
+
+// relayAndSettleWithDispatch is the shared lifecycle; Claude-format relays
+// pass their own dispatch (native Anthropic passthrough or OpenAI conversion).
+func relayAndSettleWithDispatch(c *gin.Context, info *RelayInfo, dispatch func(*gin.Context, *RelayInfo) (*protocolkit.Usage, error)) error {
 	start := time.Now()
+	originalWriter := c.Writer
+	timedWriter := &firstResponseWriter{ResponseWriter: originalWriter}
+	c.Writer = timedWriter
+	metricSuccess := false
+	defer func() {
+		now := time.Now()
+		latencyMs := now.Sub(start).Milliseconds()
+		ttftMs := int64(0)
+		generationMs := latencyMs
+		hasTtft := info.IsStream && timedWriter.at.After(start)
+		if hasTtft {
+			ttftMs = timedWriter.at.Sub(start).Milliseconds()
+			generationMs = now.Sub(timedWriter.at).Milliseconds()
+		}
+		if generationMs <= 0 {
+			generationMs = latencyMs
+		}
+		outputTokens := int64(0)
+		if info.Usage != nil {
+			outputTokens = int64(info.Usage.CompletionTokens)
+		}
+		service.RecordPerfMetricSample(service.PerfMetricSample{
+			Model: info.ModelName, Group: info.Group, LatencyMs: latencyMs,
+			TtftMs: ttftMs, HasTtft: hasTtft, Success: metricSuccess,
+			OutputTokens: outputTokens, GenerationMs: generationMs,
+		})
+		c.Writer = originalWriter
+	}()
 	token := middleware.GetRelayToken(c)
 	userId := common.GetUserId(c)
 
 	info.IsStream = info.Request.Stream
 
-	// Sensitive-word content moderation.
-	if requestContainsSensitive(info.Request) {
+	// Sensitive-word content moderation (gated on the same defaults as the
+	// reference: CheckSensitiveEnabled + CheckSensitiveOnPromptEnabled).
+	if service.ShouldCheckPromptSensitive() && requestContainsSensitive(info.Request) {
 		abortRelay(c, http.StatusBadRequest, "请求包含敏感内容", "invalid_request_error")
 		return nil
 	}
@@ -132,50 +193,70 @@ func relayAndSettle(c *gin.Context, info *RelayInfo) error {
 			return nil
 		}
 	}
-	// Always reserve user quota before the upstream call, regardless of token
-	// quota mode, so concurrent requests cannot overspend the shared quota.
-	if err := service.PreConsumeUserQuota(userId, reserved); err != nil {
-		abortRelay(c, http.StatusBadRequest, "用户额度不足", "insufficient_quota")
+	// Always reserve before the upstream call, regardless of token quota mode,
+	// so concurrent requests cannot overspend. The funding session picks the
+	// source (subscription or wallet) from the user's billing preference.
+	session, err := service.NewFundingSession(userId, reserved)
+	if err != nil {
+		switch {
+		case service.IsSubscriptionFundingErr(err):
+			abortRelay(c, http.StatusBadRequest, "订阅额度不足或未配置订阅: "+err.Error(), "insufficient_quota")
+		case errors.Is(err, service.ErrInsufficientQuota):
+			abortRelay(c, http.StatusBadRequest, "用户额度不足", "insufficient_quota")
+		default:
+			abortRelay(c, http.StatusInternalServerError, "预扣费失败: "+err.Error(), "pre_consume_failed")
+		}
 		return nil
 	}
 
 	retryTimes := common.GetEnvInt("RETRY_TIMES", setting.GetOptionIntOrDefault(setting.RetryTimesOption, 0))
+	preferredChannelID, affinityFound := service.GetPreferredChannelByAffinity(c, info.ModelName, info.Group, info.RawBody)
+	ignore := make(map[int]struct{}, retryTimes+1)
+	initialChannelID := 0
 	var lastErr error
 	for attempt := 0; attempt <= retryTimes; attempt++ {
-		ignore := map[int]struct{}{}
-		if info.Channel != nil {
-			ignore[info.Channel.Id] = struct{}{}
-		}
-		channel, err := service.GetSatisfiedChannelWithAffinity(info.Group, info.ModelName, userId, ignore, nil)
+		channel, usedAffinity, err := service.GetSatisfiedChannelWithPreferred(info.Group, info.ModelName, preferredChannelID, ignore, nil)
 		if err != nil {
 			lastErr = err
 			break
 		}
+		if attempt == 0 && affinityFound && !usedAffinity && !service.ShouldKeepChannelAffinityOnChannelDisabled() {
+			service.ClearCurrentChannelAffinityCache(c)
+		}
+		if initialChannelID == 0 {
+			initialChannelID = channel.Id
+		}
+		if usedAffinity {
+			service.MarkChannelAffinityUsed(c, info.Group, channel.Id)
+		}
 		info.Channel = channel
 
-		usage, rerr := dispatchUpstream(c, info)
+		usage, rerr := dispatch(c, info)
 		if rerr != nil {
 			lastErr = rerr
-			// Retryable upstream errors (5xx, transport) retry; client errors abort.
-			if !relaycommon.IsRetryableUpstreamError(rerr) {
+			ignore[channel.Id] = struct{}{}
+			if service.ShouldSkipRetryAfterChannelAffinityFailure(c) || !relaycommon.IsRetryableUpstreamError(rerr) {
 				break
 			}
 			continue
 		}
 		info.Usage = usage
-		service.SetAffinityChannel(userId, info.ModelName, info.Channel.Id)
+		lastErr = nil
+		metricSuccess = true
+		service.RecordChannelAffinity(c, initialChannelID, info.Channel.Id)
 		break
 	}
 
 	if info.Usage == nil && lastErr != nil {
 		// Refund the reservation: no successful upstream response was produced.
-		_ = service.RefundUserQuota(userId, reserved)
+		session.Refund()
 		relaycommon.WriteUpstreamError(c, lastErr)
 		return nil
 	}
 	if info.Usage == nil {
 		info.Usage = &protocolkit.Usage{}
 	}
+	service.ObserveChannelAffinityUsage(c, info.Usage, info.Format)
 
 	// Settle actual quota (tiered expression billing when configured).
 	isClaude := info.Channel != nil && info.Channel.Type == int(constant.ChannelTypeAnthropic)
@@ -191,10 +272,13 @@ func relayAndSettle(c *gin.Context, info *RelayInfo) error {
 		info.Quota, info.QuotaClamp, _ = service.ComputeBillingQuota(info.ModelName, info.Group, isClaude, info.Usage, reqInput)
 	}
 
-	// Settle user accounting: adjust the reservation to the actual amount
+	// Settle the funding source: adjust the reservation to the actual amount
 	// (refund the over-reservation or deduct the shortfall), and record
 	// used_quota + request count exactly once.
-	_ = service.SettleUserQuota(userId, reserved, info.Quota)
+	_ = session.Settle(info.Quota)
+
+	// Low-quota reminder (once per threshold crossing; see service).
+	service.CheckAndSendQuotaReminder(userId)
 
 	// Token accounting: deduct actual usage from the token's remaining quota.
 	if token != nil && !token.UnlimitedQuota {
@@ -204,6 +288,7 @@ func relayAndSettle(c *gin.Context, info *RelayInfo) error {
 	// Usage log.
 	service.RecordConsumeLog(
 		userId,
+		common.GetUsername(c),
 		common.GetString(c, common.ContextKeyTokenName),
 		info.ModelName,
 		max(info.Usage.PromptTokens, info.PromptTokens),
@@ -217,13 +302,24 @@ func relayAndSettle(c *gin.Context, info *RelayInfo) error {
 		common.GetRequestId(c),
 		"",
 		common.GetInt(c, common.ContextKeyTokenId),
-		buildLogOther(info),
+		buildLogOther(c, info, session),
 	)
 	return nil
 }
 
 // dispatchUpstream builds the provider request and performs the upstream call.
 func dispatchUpstream(c *gin.Context, info *RelayInfo) (*protocolkit.Usage, error) {
+	// Alpha search is a Codex-standalone endpoint: only the same upstream
+	// families the reference gates support it; other channel types error so
+	// the retry loop can fall through to another channel.
+	if info.Mode == constant.RelayModeAlphaSearch {
+		switch constant.ChannelType(info.Channel.Type) {
+		case constant.ChannelTypeSub2API, constant.ChannelTypeNewAPI,
+			constant.ChannelTypeCodex, constant.ChannelTypeAdvancedCustom:
+		default:
+			return nil, errors.New("channel does not support /v1/alpha/search")
+		}
+	}
 	adaptor := GetAdaptor(constant.ChannelType(info.Channel.Type))
 	meta := &relaycommon.Meta{
 		Channel:      info.Channel,
@@ -254,6 +350,7 @@ func dispatchUpstream(c *gin.Context, info *RelayInfo) (*protocolkit.Usage, erro
 	if err := adaptor.SetupRequestHeader(req, meta); err != nil {
 		return nil, err
 	}
+	service.ApplyChannelAffinityRequestHeaders(c, req)
 
 	resp, err := relayHTTPClient.Do(req)
 	if err != nil {
@@ -278,11 +375,15 @@ func abortRelay(c *gin.Context, status int, message, code string) {
 	c.JSON(status, gin.H{"error": protocolkit.OpenAIError{Message: message, Type: "invalid_request_error", Code: code}})
 }
 
-func buildLogOther(info *RelayInfo) map[string]any {
+func buildLogOther(c *gin.Context, info *RelayInfo, session *service.FundingSession) map[string]any {
 	other := map[string]any{}
 	if info.QuotaClamp != nil {
 		other["quota_saturation"] = info.QuotaClamp
 	}
+	for k, v := range session.BillingLogFields() {
+		other[k] = v
+	}
+	service.AppendChannelAffinityAdminInfo(c, other)
 	return other
 }
 

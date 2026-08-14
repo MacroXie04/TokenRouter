@@ -28,10 +28,10 @@ func TestClaudeUsageToOpenAIUsage(t *testing.T) {
 
 func TestGeminiUsageToOpenAIUsage(t *testing.T) {
 	meta := &GeminiUsageMetadata{
-		PromptTokenCount:     120,
-		CandidatesTokenCount: 30,
-		TotalTokenCount:      150,
-		PromptTokensDetails:  []GeminiPromptTokensDetails{{Modality: "AUDIO", TokenCount: 20}},
+		PromptTokenCount:        120,
+		CandidatesTokenCount:    30,
+		TotalTokenCount:         150,
+		PromptTokensDetails:     []GeminiPromptTokensDetails{{Modality: "AUDIO", TokenCount: 20}},
 		CandidatesTokensDetails: []GeminiCandidatesTokensDetails{{Modality: "IMAGE", TokenCount: 5}},
 	}
 	got := GeminiUsageToOpenAIUsage(meta)
@@ -124,4 +124,85 @@ func TestRoundTripMarshalPreservesExplicitZero(t *testing.T) {
 	require.NoError(t, json.Unmarshal(b, &raw))
 	assert.Contains(t, raw, "max_tokens")
 	assert.Equal(t, float64(0), raw["max_tokens"])
+}
+
+func TestOpenAIResponseToClaudeResponse(t *testing.T) {
+	resp := &ChatCompletionsResponse{
+		Id:    "chatcmpl-9",
+		Model: "claude-3-5-sonnet-20241022",
+		Choices: []ChatCompletionsChoice{
+			{Index: 0, Message: &ChatResponseMessage{Role: "assistant", Content: "hello there"}, FinishReason: "stop"},
+		},
+		Usage: &Usage{PromptTokens: 5, CompletionTokens: 2, TotalTokens: 7},
+	}
+	got := OpenAIResponseToClaudeResponse(resp)
+	require.NotNil(t, got)
+	assert.Equal(t, "message", got.Type)
+	assert.Equal(t, "assistant", got.Role)
+	require.Len(t, got.Content, 1)
+	assert.Equal(t, "hello there", got.Content[0].Text)
+	assert.Equal(t, "end_turn", got.StopReason)
+	require.NotNil(t, got.Usage)
+	assert.Equal(t, 5, got.Usage.InputTokens)
+	assert.Equal(t, 2, got.Usage.OutputTokens)
+
+	assert.Equal(t, "max_tokens", OpenAIFinishReasonToClaudeStopReason("length"))
+	assert.Equal(t, "tool_use", OpenAIFinishReasonToClaudeStopReason("tool_calls"))
+	assert.Equal(t, "refusal", OpenAIFinishReasonToClaudeStopReason("content_filter"))
+}
+
+func TestOpenAIResponseToGeminiResponse(t *testing.T) {
+	resp := &ChatCompletionsResponse{
+		Id:    "chatcmpl-9",
+		Model: "gemini-2.0-flash",
+		Choices: []ChatCompletionsChoice{
+			{Index: 0, Message: &ChatResponseMessage{Role: "assistant", Content: "hello there"}, FinishReason: "stop"},
+		},
+		Usage: &Usage{PromptTokens: 5, CompletionTokens: 2, TotalTokens: 7},
+	}
+	got := OpenAIResponseToGeminiResponse(resp)
+	require.NotNil(t, got)
+	require.Len(t, got.Candidates, 1)
+	cand := got.Candidates[0]
+	require.NotNil(t, cand.Content)
+	assert.Equal(t, "model", cand.Content.Role)
+	require.Len(t, cand.Content.Parts, 1)
+	assert.Equal(t, "hello there", cand.Content.Parts[0].Text)
+	assert.Equal(t, "STOP", cand.FinishReason)
+	require.NotNil(t, got.UsageMetadata)
+	assert.Equal(t, 5, got.UsageMetadata.PromptTokenCount)
+	assert.Equal(t, 2, got.UsageMetadata.CandidatesTokenCount)
+	assert.Equal(t, 7, got.UsageMetadata.TotalTokenCount)
+}
+
+func TestOpenAIResponseToGeminiResponseToolCall(t *testing.T) {
+	resp := &ChatCompletionsResponse{
+		Choices: []ChatCompletionsChoice{{
+			Index: 0,
+			Message: &ChatResponseMessage{Role: "assistant",
+				ToolCalls: []ToolCallResponse{{Type: "function", Function: &FunctionResponse{Name: "get_weather", Arguments: `{"city":"sf"}`}}},
+			},
+			FinishReason: "tool_calls",
+		}},
+	}
+	got := OpenAIResponseToGeminiResponse(resp)
+	require.Len(t, got.Candidates, 1)
+	parts := got.Candidates[0].Content.Parts
+	require.Len(t, parts, 1)
+	require.NotNil(t, parts[0].FunctionCall)
+	assert.Equal(t, "get_weather", parts[0].FunctionCall.Name)
+	assert.Equal(t, "sf", parts[0].FunctionCall.Args["city"])
+	assert.Equal(t, "STOP", got.Candidates[0].FinishReason)
+}
+
+func TestClaudeRequestToOpenAIRequestNilMetadata(t *testing.T) {
+	req := &ClaudeRequest{
+		Model:     "claude-3-5-sonnet-20241022",
+		MaxTokens: 128,
+		Messages:  []ClaudeMessage{{Role: "user", Content: "hi"}},
+	}
+	got := ClaudeRequestToOpenAIRequest(req) // must not panic on nil Metadata
+	require.NotNil(t, got)
+	assert.Equal(t, "claude-3-5-sonnet-20241022", got.Model)
+	require.Len(t, got.Messages, 1)
 }

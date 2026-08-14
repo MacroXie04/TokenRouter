@@ -19,12 +19,12 @@ func ClaudeUsageToOpenAIUsage(u *ClaudeUsage) *Usage {
 	prompt := u.InputTokens + u.CacheCreationInputTokens + u.CacheReadInputTokens
 	completion := u.OutputTokens
 	return &Usage{
-		PromptTokens:            prompt,
-		CompletionTokens:        completion,
-		TotalTokens:             prompt + completion,
-		PromptCacheHitTokens:    u.CacheReadInputTokens,
-		PromptCacheMissTokens:   u.CacheCreationInputTokens,
-		PromptCacheWriteTokens:  u.CacheCreationInputTokens,
+		PromptTokens:           prompt,
+		CompletionTokens:       completion,
+		TotalTokens:            prompt + completion,
+		PromptCacheHitTokens:   u.CacheReadInputTokens,
+		PromptCacheMissTokens:  u.CacheCreationInputTokens,
+		PromptCacheWriteTokens: u.CacheCreationInputTokens,
 		PromptTokensDetails: &InputTokenDetails{
 			CachedTokens:         u.CacheReadInputTokens,
 			CachedCreationTokens: u.CacheCreationInputTokens,
@@ -77,13 +77,15 @@ func ClaudeRequestToOpenAIRequest(req *ClaudeRequest) *GeneralOpenAIRequest {
 		return &GeneralOpenAIRequest{}
 	}
 	out := &GeneralOpenAIRequest{
-		Model:     req.Model,
-		Stream:    req.Stream,
-		MaxTokens: &req.MaxTokens,
+		Model:       req.Model,
+		Stream:      req.Stream,
+		MaxTokens:   &req.MaxTokens,
 		Temperature: req.Temperature,
-		TopP:       req.TopP,
-		Stop:       req.StopSequences,
-		User:       req.Metadata.UserId,
+		TopP:        req.TopP,
+		Stop:        req.StopSequences,
+	}
+	if req.Metadata != nil {
+		out.User = req.Metadata.UserId
 	}
 
 	// System prompt becomes a leading system message.
@@ -404,11 +406,11 @@ func OpenAIRequestToClaudeRequest(req *GeneralOpenAIRequest) *ClaudeRequest {
 		return &ClaudeRequest{}
 	}
 	out := &ClaudeRequest{
-		Model:        req.Model,
-		Stream:       req.Stream,
-		Temperature:  req.Temperature,
-		TopP:         req.TopP,
-		MaxTokens:    maxTokensFromRequest(req),
+		Model:         req.Model,
+		Stream:        req.Stream,
+		Temperature:   req.Temperature,
+		TopP:          req.TopP,
+		MaxTokens:     maxTokensFromRequest(req),
 		StopSequences: stopToStrings(req.Stop),
 	}
 	if req.User != "" {
@@ -542,10 +544,10 @@ func OpenAIRequestToGeminiRequest(req *GeneralOpenAIRequest) *GeminiChatRequest 
 	}
 	out := &GeminiChatRequest{Model: req.Model}
 	genCfg := &GeminiChatGenerationConfig{
-		Temperature: req.Temperature,
-		TopP:        req.TopP,
+		Temperature:     req.Temperature,
+		TopP:            req.TopP,
 		MaxOutputTokens: intPtr(maxTokensFromRequest(req)),
-		StopSequences: stopToStrings(req.Stop),
+		StopSequences:   stopToStrings(req.Stop),
 	}
 	out.GenerationConfig = genCfg
 	for _, m := range req.Messages {
@@ -646,3 +648,136 @@ func dataURLToInline(dataURL string) *GeminiInlineData {
 }
 
 func intPtr(v int) *int { return &v }
+
+// OpenAIFinishReasonToClaudeStopReason maps an OpenAI finish_reason to the
+// closest Anthropic stop_reason.
+func OpenAIFinishReasonToClaudeStopReason(reason string) string {
+	switch reason {
+	case "length":
+		return "max_tokens"
+	case "tool_calls", "function_call":
+		return "tool_use"
+	case "content_filter":
+		return "refusal"
+	case "stop", "":
+		return "end_turn"
+	default:
+		return "end_turn"
+	}
+}
+
+// OpenAIResponseToClaudeResponse converts a non-stream OpenAI chat completion
+// into an Anthropic Messages response.
+func OpenAIResponseToClaudeResponse(resp *ChatCompletionsResponse) *ClaudeResponse {
+	if resp == nil {
+		return nil
+	}
+	out := &ClaudeResponse{
+		Id:    resp.Id,
+		Type:  "message",
+		Role:  "assistant",
+		Model: resp.Model,
+	}
+	for _, ch := range resp.Choices {
+		if ch.Message != nil {
+			switch content := ch.Message.Content.(type) {
+			case string:
+				out.Content = append(out.Content, ClaudeMediaMessage{Type: "text", Text: content})
+			case nil:
+			default:
+				out.Content = append(out.Content, ClaudeMediaMessage{Type: "text", Text: contentString(content)})
+			}
+		}
+		out.StopReason = OpenAIFinishReasonToClaudeStopReason(ch.FinishReason)
+	}
+	if resp.Usage != nil {
+		out.Usage = &ClaudeUsage{
+			InputTokens:  resp.Usage.PromptTokens,
+			OutputTokens: resp.Usage.CompletionTokens,
+		}
+	}
+	return out
+}
+
+func contentString(v any) string {
+	if b, err := MarshalJSON(v); err == nil {
+		return string(b)
+	}
+	return ""
+}
+
+// OpenAIResponseToGeminiResponse converts a non-stream OpenAI chat completion
+// into a native Gemini GenerateContent response. It is the response direction
+// for gemini-format relays routed to OpenAI-compatible channels.
+func OpenAIResponseToGeminiResponse(resp *ChatCompletionsResponse) *GeminiChatResponse {
+	if resp == nil {
+		return &GeminiChatResponse{}
+	}
+	out := &GeminiChatResponse{}
+	if len(resp.Choices) > 0 {
+		ch := resp.Choices[0]
+		cand := GeminiChatCandidate{Index: 0, FinishReason: openAIFinishReasonToGemini(ch.FinishReason)}
+		if ch.Message != nil {
+			content := &GeminiChatContent{Role: "model"}
+			if ch.Message.Content != nil {
+				switch text := ch.Message.Content.(type) {
+				case string:
+					if text != "" {
+						content.Parts = append(content.Parts, GeminiPart{Text: text})
+					}
+				case nil:
+				default:
+					content.Parts = append(content.Parts, GeminiPart{Text: contentString(text)})
+				}
+			}
+			for _, tc := range ch.Message.ToolCalls {
+				if tc.Function == nil {
+					continue
+				}
+				args := map[string]any{}
+				if tc.Function.Arguments != "" {
+					var parsed any
+					if UnmarshalJSON([]byte(tc.Function.Arguments), &parsed) == nil {
+						if m, ok := parsed.(map[string]any); ok {
+							args = m
+						}
+					}
+				}
+				content.Parts = append(content.Parts, GeminiPart{
+					FunctionCall: &FunctionCall{Name: tc.Function.Name, Args: args},
+				})
+			}
+			if len(content.Parts) > 0 {
+				cand.Content = content
+			}
+		}
+		out.Candidates = append(out.Candidates, cand)
+	}
+	if resp.Usage != nil {
+		out.UsageMetadata = &GeminiUsageMetadata{
+			PromptTokenCount:     resp.Usage.PromptTokens,
+			CandidatesTokenCount: resp.Usage.CompletionTokens,
+			TotalTokenCount:      resp.Usage.TotalTokens,
+		}
+	}
+	if resp.Error != nil {
+		out.Error = &GeminiError{Code: 500, Message: resp.Error.Message, Status: resp.Error.Code}
+	}
+	return out
+}
+
+// openAIFinishReasonToGemini maps an OpenAI finish reason to a Gemini one.
+func openAIFinishReasonToGemini(reason string) string {
+	switch reason {
+	case "stop":
+		return "STOP"
+	case "length":
+		return "MAX_TOKENS"
+	case "tool_calls", "function_call":
+		return "STOP"
+	case "content_filter":
+		return "SAFETY"
+	default:
+		return "STOP"
+	}
+}
