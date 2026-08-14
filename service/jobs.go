@@ -5,25 +5,29 @@ import (
 
 	"github.com/tokenrouter/tokenrouter/common"
 	"github.com/tokenrouter/tokenrouter/model"
-	"github.com/tokenrouter/tokenrouter/setting"
 )
 
 // Background task types.
 const (
 	TaskTypeSyncAbilityCache   = "sync_ability_cache"
-	TaskTypeSyncOptions        = "sync_options"
 	TaskTypeCleanupLogs        = "cleanup_logs"
 	TaskTypeCleanupAuthFlows   = "cleanup_auth_flows"
 	TaskTypeResetSubscriptions = "reset_subscriptions"
 	TaskTypeChannelHealth      = "channel_health"
-	TaskTypeInstanceHeartbeat = "instance_heartbeat"
+	TaskTypeInstanceHeartbeat  = "instance_heartbeat"
 )
 
 // StartBackgroundJobs launches the periodic background jobs in a goroutine.
-// Each job runs under a distributed lease so multiple nodes do not duplicate
-// work. The ticker interval is controlled by SYNC_FREQUENCY (default 60s).
+// Cluster-wide jobs use distributed leases; node-local option caches refresh on
+// every node. The ticker interval is controlled by SYNC_FREQUENCY (default 60s).
+// It also starts the system-task runner (channel test sweeps, log cleanup),
+// the permission-policy sync loop, and the quota-data histogram flusher.
 func StartBackgroundJobs() {
+	StartSystemTaskRunner()
+	StartQuotaDataFlusher()
+	StartPerfMetricFlusher()
 	interval := time.Duration(common.GetEnvInt("SYNC_FREQUENCY", 60)) * time.Second
+	StartPermissionPolicySync(int(interval.Seconds()))
 	go func() {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
@@ -34,11 +38,11 @@ func StartBackgroundJobs() {
 }
 
 func runPeriodicJobs() {
+	if err := SyncRuntimeOptions(); err != nil {
+		common.SysError("failed to synchronize runtime options: " + err.Error())
+	}
 	RunWithLease(TaskTypeSyncAbilityCache, 2*time.Minute, func() error {
 		return InitAbilityCache()
-	})
-	RunWithLease(TaskTypeSyncOptions, 2*time.Minute, func() error {
-		return setting.Sync()
 	})
 	RunWithLease(TaskTypeCleanupAuthFlows, 5*time.Minute, func() error {
 		cutoff := time.Now().Add(-24 * time.Hour)
@@ -46,7 +50,13 @@ func runPeriodicJobs() {
 			Delete(&model.AuthFlow{}).Error
 	})
 	RunWithLease(TaskTypeResetSubscriptions, 5*time.Minute, func() error {
-		return ResetDueSubscriptionQuotas()
+		if err := ResetDueSubscriptionQuotas(); err != nil {
+			return err
+		}
+		// Prune old pre-consume idempotency records alongside the reset sweep
+		// (default retention: seven days).
+		_, err := CleanupSubscriptionPreConsumeRecords(0)
+		return err
 	})
 	RunWithLease(TaskTypeCleanupLogs, 10*time.Minute, func() error {
 		return CleanupExpiredLogs()

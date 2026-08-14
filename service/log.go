@@ -17,13 +17,14 @@ const (
 )
 
 // RecordConsumeLog writes a consumption log to the log database.
-func RecordConsumeLog(userId int, tokenName, modelName string, promptTokens, completionTokens, quota, useTime int, isStream bool, channelId int, group, ip, requestId, upstreamRequestId string, tokenId int, other map[string]any) {
+func RecordConsumeLog(userId int, username, tokenName, modelName string, promptTokens, completionTokens, quota, useTime int, isStream bool, channelId int, group, ip, requestId, upstreamRequestId string, tokenId int, other map[string]any) {
 	otherJSON := ""
 	if other != nil {
 		if b, err := common.Marshal(other); err == nil {
 			otherJSON = string(b)
 		}
 	}
+	createdAt := common.NowTimestamp()
 	log := model.Log{
 		UserId:            userId,
 		Type:              LogTypeConsume,
@@ -42,9 +43,21 @@ func RecordConsumeLog(userId int, tokenName, modelName string, promptTokens, com
 		RequestId:         requestId,
 		UpstreamRequestId: upstreamRequestId,
 		Other:             otherJSON,
-		CreatedAt:         common.NowTimestamp(),
+		CreatedAt:         createdAt,
 	}
-	_ = model.LOG_DB.Create(&log).Error
+	if model.UsingClickHouseLog() {
+		// ClickHouse has no auto-increment; use a millisecond timestamp id.
+		log.Id = int(common.NowTimestamp() * 1000)
+		_ = model.InsertClickHouseLog(&log)
+	} else {
+		_ = model.LOG_DB.Create(&log).Error
+	}
+	// Per-hour usage histogram for the data dashboard (reference behavior:
+	// recorded at consume time, gated on DataExportEnabled).
+	if DataExportEnabled() {
+		LogQuotaData(userId, username, modelName, group, tokenId, channelId,
+			quota, promptTokens+completionTokens, createdAt)
+	}
 }
 
 // RecordSystemLog writes a system/management log.

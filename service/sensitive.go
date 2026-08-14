@@ -46,6 +46,14 @@ func CheckSensitiveContent(text string) bool {
 	return false
 }
 
+// ShouldCheckPromptSensitive reports whether prompt moderation is active:
+// both CheckSensitiveEnabled and CheckSensitiveOnPromptEnabled default to true
+// (matching the reference), so moderation is on whenever words are configured.
+func ShouldCheckPromptSensitive() bool {
+	return setting.GetOptionBool(setting.CheckSensitiveEnabledOption, true) &&
+		setting.GetOptionBool(setting.CheckSensitiveOnPromptEnabledOption, true)
+}
+
 // SensitiveWordCount returns the number of loaded sensitive words (test hook).
 func SensitiveWordCount() int {
 	return len(sensitiveWords)

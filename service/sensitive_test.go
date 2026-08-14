@@ -32,3 +32,24 @@ func TestSensitiveContentCheck(t *testing.T) {
 	assert.True(t, CheckSensitiveContent("this contains violence in it"))
 	assert.False(t, CheckSensitiveContent("this is a normal message"))
 }
+
+func TestSensitiveCheckGating(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(&model.Option{}))
+	model.DB = db
+	require.NoError(t, setting.Init())
+
+	// Both toggles default to true (reference defaults): check is active.
+	require.NoError(t, setting.UpdateOption("SensitiveWords", "violence"))
+	LoadSensitiveWords()
+	assert.True(t, ShouldCheckPromptSensitive())
+
+	// Disabling either toggle turns the prompt check off.
+	require.NoError(t, setting.UpdateOption(setting.CheckSensitiveEnabledOption, "false"))
+	assert.False(t, ShouldCheckPromptSensitive())
+	require.NoError(t, setting.UpdateOption(setting.CheckSensitiveEnabledOption, "true"))
+	require.NoError(t, setting.UpdateOption(setting.CheckSensitiveOnPromptEnabledOption, "false"))
+	assert.False(t, ShouldCheckPromptSensitive())
+	require.NoError(t, setting.UpdateOption(setting.CheckSensitiveOnPromptEnabledOption, "true"))
+}
