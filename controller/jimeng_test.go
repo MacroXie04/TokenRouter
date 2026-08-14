@@ -48,8 +48,12 @@ func TestJimengOfficialTaskContract(t *testing.T) {
 			seenMu.Lock()
 			submitPayload = payload
 			seenMu.Unlock()
-			if payload["prompt"] == "fail" {
+			if payload["prompt"] == "ambiguous" {
 				http.Error(writer, "provider unavailable", http.StatusServiceUnavailable)
+				return
+			}
+			if payload["prompt"] == "fail" {
+				_, _ = writer.Write([]byte(`{"code":50400,"message":"invalid request","request_id":"jimeng-rejected"}`))
 				return
 			}
 			_, _ = writer.Write([]byte(`{"code":10000,"message":"success","request_id":"jimeng-submit-request","data":{"task_id":"upstream-task-123"}}`))
@@ -111,7 +115,7 @@ func TestJimengOfficialTaskContract(t *testing.T) {
 		return response
 	}
 
-	submit := doBearer(`{"req_key":"jimeng_vgfm_t2v_l20","prompt":"animate this","frames":121,"seed":42,"aspect_ratio":"16:9","ignored":"not-forwarded"}`)
+	submit := doBearer(`{"req_key":"jimeng_vgfm_t2v_l20","prompt":"animate this","frames":121,"seed":42,"aspect_ratio":"16:9","recovery_token":"attacker-controlled","ignored":"not-forwarded"}`)
 	require.Equal(t, http.StatusOK, submit.Code, submit.Body.String())
 	submitBody := decodeBody(t, submit)
 	publicTaskID, ok := submitBody["id"].(string)
@@ -132,6 +136,7 @@ func TestJimengOfficialTaskContract(t *testing.T) {
 	assert.Equal(t, float64(42), submitPayload["seed"])
 	assert.Equal(t, "16:9", submitPayload["aspect_ratio"])
 	assert.NotContains(t, submitPayload, "ignored")
+	assert.NotContains(t, submitPayload, "recovery_token")
 	seenMu.Unlock()
 
 	var task model.Task
@@ -207,21 +212,58 @@ func TestJimengOfficialTaskContract(t *testing.T) {
 		Enabled: true, Priority: &backupPriority, Weight: 1,
 	}).Error)
 	require.NoError(t, service.InitAbilityCache())
+	require.NoError(t, model.DB.Model(&channel).Update("base_url", "not-a-valid-url").Error)
+	preDispatchFallback := doBearer(`{"req_key":"jimeng_vgfm_t2v_l20","prompt":"safe fallback","frames":121}`)
+	require.Equal(t, http.StatusOK, preDispatchFallback.Code, preDispatchFallback.Body.String())
+	assert.Equal(t, int32(2), submitCalls.Load(), "pre-dispatch configuration failure may use a backup channel")
+	require.NoError(t, model.DB.Model(&channel).Update("base_url", upstream.URL).Error)
+	require.NoError(t, model.DB.First(&user, userID).Error)
+	require.NoError(t, model.DB.First(&token, token.Id).Error)
 
 	beforeFailureUserQuota := user.Quota
+	beforeFailureUserUsed := user.UsedQuota
+	beforeFailureRequests := user.RequestCount
 	beforeFailureTokenQuota := token.RemainQuota
+	beforeFailureTokenUsed := token.UsedQuota
 	failed := doBearer(`{"req_key":"jimeng_vgfm_t2v_l20","prompt":"fail","frames":121}`)
-	require.Equal(t, http.StatusServiceUnavailable, failed.Code, failed.Body.String())
+	require.Equal(t, http.StatusInternalServerError, failed.Code, failed.Body.String())
 	failedBody := decodeBody(t, failed)
-	assert.Equal(t, "fail_to_fetch_task", failedBody["code"])
-	assert.Contains(t, failedBody["message"], "provider unavailable")
-	assert.Equal(t, int32(2), submitCalls.Load(), "a dispatched task submit must never retry")
+	assert.Equal(t, "50400", failedBody["code"])
+	assert.Contains(t, failedBody["message"], "invalid request")
+	assert.Equal(t, int32(3), submitCalls.Load(), "definitively rejected submits must never retry")
 	require.NoError(t, model.DB.First(&user, userID).Error)
 	require.NoError(t, model.DB.First(&token, token.Id).Error)
 	assert.Equal(t, beforeFailureUserQuota, user.Quota)
+	assert.Equal(t, beforeFailureUserUsed, user.UsedQuota)
+	assert.Equal(t, beforeFailureRequests, user.RequestCount)
 	assert.Equal(t, beforeFailureTokenQuota, token.RemainQuota)
-	assert.Equal(t, 5000, token.UsedQuota)
-	assert.Equal(t, 1, user.RequestCount)
+	assert.Equal(t, beforeFailureTokenUsed, token.UsedQuota)
+
+	ambiguous := doBearer(`{"req_key":"jimeng_vgfm_t2v_l20","prompt":"ambiguous","frames":121}`)
+	require.Equal(t, http.StatusBadGateway, ambiguous.Code, ambiguous.Body.String())
+	ambiguousBody := decodeBody(t, ambiguous)
+	assert.Equal(t, "submit_outcome_unknown", ambiguousBody["code"])
+	ambiguousData := ambiguousBody["data"].(map[string]any)
+	assert.Equal(t, "unknown", ambiguousData["status"])
+	ambiguousTaskID := ambiguousData["task_id"].(string)
+	assert.Equal(t, int32(4), submitCalls.Load(), "ambiguous submits must never retry")
+	require.NoError(t, model.DB.First(&user, userID).Error)
+	require.NoError(t, model.DB.First(&token, token.Id).Error)
+	assert.Equal(t, beforeFailureUserQuota-5000, user.Quota)
+	assert.Equal(t, beforeFailureUserUsed+5000, user.UsedQuota)
+	assert.Equal(t, beforeFailureRequests+1, user.RequestCount)
+	assert.Equal(t, beforeFailureTokenQuota-5000, token.RemainQuota)
+	assert.Equal(t, beforeFailureTokenUsed+5000, token.UsedQuota)
+
+	unknownFetchRequest := httptest.NewRequest(http.MethodPost, "/jimeng/?Action=CVSync2AsyncGetResult",
+		strings.NewReader(`{"task_id":"`+ambiguousTaskID+`"}`))
+	unknownFetchRequest.Header.Set("Content-Type", "application/json")
+	unknownFetchRequest.Header.Set("Authorization", "Bearer "+token.Key)
+	unknownFetchResponse := httptest.NewRecorder()
+	handler.ServeHTTP(unknownFetchResponse, unknownFetchRequest)
+	require.Equal(t, http.StatusOK, unknownFetchResponse.Code, unknownFetchResponse.Body.String())
+	assert.Equal(t, "unknown", decodeBody(t, unknownFetchResponse)["status"])
+	assert.Equal(t, int32(1), fetchCalls.Load(), "unknown outcome without an upstream ID must not poll")
 }
 
 func TestJimengMiddlewareAndOwnershipFailures(t *testing.T) {
@@ -326,13 +368,22 @@ func TestJimengPreAuthBodyIsRateLimited(t *testing.T) {
 	assert.False(t, secondBody.read.Load(), "rate-limited request body must not be read")
 }
 
-func TestJimengAcceptedTaskCommitFailureRetainsReservations(t *testing.T) {
+func TestJimengAcceptedTaskCommitFailureRecoversOnFetch(t *testing.T) {
 	t.Setenv("RETRY_TIMES", "2")
 	var submitCalls atomic.Int32
+	var fetchCalls atomic.Int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		submitCalls.Add(1)
 		writer.Header().Set("Content-Type", "application/json")
-		_, _ = writer.Write([]byte(`{"code":10000,"message":"success","request_id":"accepted-before-db-failure","data":{"task_id":"upstream-accepted"}}`))
+		switch request.URL.Query().Get("Action") {
+		case "CVSync2AsyncSubmitTask":
+			submitCalls.Add(1)
+			_, _ = writer.Write([]byte(`{"code":10000,"message":"success","request_id":"accepted-before-db-failure","data":{"task_id":"upstream-accepted"}}`))
+		case "CVSync2AsyncGetResult":
+			fetchCalls.Add(1)
+			_, _ = writer.Write([]byte(`{"code":10000,"message":"success","request_id":"recovered-fetch","data":{"status":"done","video_url":"https://cdn.example.test/recovered.mp4"}}`))
+		default:
+			http.Error(writer, "unexpected action", http.StatusBadRequest)
+		}
 	}))
 	defer upstream.Close()
 
@@ -368,11 +419,11 @@ func TestJimengAcceptedTaskCommitFailureRetainsReservations(t *testing.T) {
 		service.SetGroupRatios(previousRatios)
 	})
 	require.NoError(t, model.DB.Exec(`
-		CREATE TRIGGER reject_jimeng_accept
-		BEFORE UPDATE OF status ON tasks
-		WHEN NEW.status = 'SUBMITTED'
+		CREATE TRIGGER reject_jimeng_accounting
+		BEFORE UPDATE OF used_quota ON users
+		WHEN NEW.used_quota > OLD.used_quota
 		BEGIN
-			SELECT RAISE(FAIL, 'forced accepted-task commit failure');
+			SELECT RAISE(FAIL, 'forced accepted-task accounting failure');
 		END
 	`).Error)
 
@@ -388,12 +439,14 @@ func TestJimengAcceptedTaskCommitFailureRetainsReservations(t *testing.T) {
 	data := body["data"].(map[string]any)
 	publicTaskID := data["task_id"].(string)
 	assert.Equal(t, "accepted", data["status"])
+	assert.Equal(t, true, data["settlement_pending"])
 	assert.Equal(t, int32(1), submitCalls.Load(), "accepted submits must never be retried")
 
 	var task model.Task
 	require.NoError(t, model.DB.Where("task_id = ?", publicTaskID).First(&task).Error)
-	assert.Equal(t, model.TaskStatusNotStart, task.Status)
-	assert.NotContains(t, task.PrivateData, "upstream-accepted")
+	assert.Equal(t, model.TaskStatusSubmitted, task.Status)
+	assert.Contains(t, task.PrivateData, "upstream-accepted")
+	assert.Contains(t, task.PrivateData, `"settlement_pending":true`)
 	var user model.User
 	require.NoError(t, model.DB.First(&user, userID).Error)
 	require.NoError(t, model.DB.First(&token, token.Id).Error)
@@ -402,4 +455,157 @@ func TestJimengAcceptedTaskCommitFailureRetainsReservations(t *testing.T) {
 	assert.Zero(t, user.RequestCount)
 	assert.Equal(t, 95000, token.RemainQuota)
 	assert.Zero(t, token.UsedQuota)
+
+	require.NoError(t, model.DB.Exec("DROP TRIGGER reject_jimeng_accounting").Error)
+	pollToken := model.Token{
+		UserId: userID, Key: "sk-jimeng-recovery-poller", Name: "jimeng-recovery-poller",
+		Status: service.TokenStatusEnabled, UnlimitedQuota: true, Group: "default",
+	}
+	require.NoError(t, model.DB.Create(&pollToken).Error)
+	require.NoError(t, model.DB.Delete(&token).Error)
+	require.NoError(t, model.DB.Delete(&channel).Error)
+	fetch := func() *httptest.ResponseRecorder {
+		fetchRequest := httptest.NewRequest(http.MethodPost, "/jimeng/?Action=CVSync2AsyncGetResult",
+			strings.NewReader(`{"task_id":"`+publicTaskID+`"}`))
+		fetchRequest.Header.Set("Content-Type", "application/json")
+		fetchRequest.Header.Set("Authorization", "Bearer "+pollToken.Key)
+		fetchResponse := httptest.NewRecorder()
+		handler.ServeHTTP(fetchResponse, fetchRequest)
+		return fetchResponse
+	}
+	fetchResponse := fetch()
+	require.Equal(t, http.StatusOK, fetchResponse.Code, fetchResponse.Body.String())
+	assert.Equal(t, "completed", decodeBody(t, fetchResponse)["status"])
+	assert.Equal(t, int32(1), fetchCalls.Load())
+
+	require.NoError(t, model.DB.Where("task_id = ?", publicTaskID).First(&task).Error)
+	assert.Equal(t, model.TaskStatusSuccess, task.Status)
+	assert.NotContains(t, task.PrivateData, "settlement_pending")
+	require.NoError(t, model.DB.First(&user, userID).Error)
+	require.NoError(t, model.DB.Unscoped().First(&token, token.Id).Error)
+	assert.True(t, token.DeletedAt.Valid)
+	assert.Equal(t, 95000, user.Quota)
+	assert.Equal(t, 5000, user.UsedQuota)
+	assert.Equal(t, 1, user.RequestCount)
+	assert.Equal(t, 95000, token.RemainQuota)
+	assert.Equal(t, 5000, token.UsedQuota)
+
+	cached := fetch()
+	require.Equal(t, http.StatusOK, cached.Code, cached.Body.String())
+	assert.Equal(t, int32(1), fetchCalls.Load(), "settled terminal task must be cached")
+	require.NoError(t, model.DB.First(&user, userID).Error)
+	require.NoError(t, model.DB.Unscoped().First(&token, token.Id).Error)
+	assert.Equal(t, 5000, user.UsedQuota)
+	assert.Equal(t, 1, user.RequestCount)
+	assert.Equal(t, 5000, token.UsedQuota)
+}
+
+func TestJimengFallbackWriteFailureRecoversWithToken(t *testing.T) {
+	t.Setenv("RETRY_TIMES", "0")
+	var fetchCalls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		if request.URL.Query().Get("Action") == "CVSync2AsyncGetResult" {
+			fetchCalls.Add(1)
+			_, _ = writer.Write([]byte(`{"code":10000,"message":"success","data":{"status":"done","video_url":"https://cdn.example.test/recovery-token.mp4"}}`))
+			return
+		}
+		_, _ = writer.Write([]byte(`{"code":10000,"message":"success","request_id":"recovery-token-submit","data":{"task_id":"upstream-recovery-token"}}`))
+	}))
+	defer upstream.Close()
+
+	handler, _, userID := setupChannelRead(t, constant.RoleCommonUser)
+	require.NoError(t, model.DB.AutoMigrate(
+		&model.Task{}, &model.UserSubscription{}, &model.SubscriptionPlan{}, &model.SubscriptionPreConsumeRecord{},
+	))
+	require.NoError(t, model.DB.Model(&model.User{}).Where("id = ?", userID).
+		Updates(map[string]any{"quota": 100000, "group": "default"}).Error)
+	token := model.Token{UserId: userID, Key: "sk-jimeng-recovery-token", Name: "recovery-token",
+		Status: service.TokenStatusEnabled, RemainQuota: 100000, Group: "default"}
+	require.NoError(t, model.DB.Create(&token).Error)
+	priority := int64(10)
+	channel := model.Channel{Type: int(constant.ChannelTypeJimeng), Key: "access|secret", Name: "recovery-token",
+		Status: constant.ChannelStatusEnabled, BaseURL: upstream.URL, Models: "jimeng-recovery-model",
+		Group: "default", Priority: &priority}
+	require.NoError(t, model.DB.Create(&channel).Error)
+	require.NoError(t, model.DB.Create(&model.Ability{Group: "default", Model: "jimeng-recovery-model",
+		ChannelId: channel.Id, Enabled: true, Priority: &priority, Weight: 1}).Error)
+	require.NoError(t, service.InitAbilityCache())
+	previousPrices := service.ExportedModelPrices()
+	previousRatios := service.ExportedGroupRatios()
+	service.SetModelPriceRegistry(map[string]service.ModelPrice{"jimeng-recovery-model": {Prompt: 0.01}})
+	service.SetGroupRatios(map[string]float64{"default": 1})
+	t.Cleanup(func() {
+		service.SetModelPriceRegistry(previousPrices)
+		service.SetGroupRatios(previousRatios)
+	})
+	require.NoError(t, model.DB.Exec(`
+		CREATE TRIGGER reject_jimeng_task_acceptance
+		BEFORE UPDATE OF status ON tasks
+		WHEN NEW.status = 'SUBMITTED'
+		BEGIN
+			SELECT RAISE(FAIL, 'forced task acceptance write failure');
+		END
+	`).Error)
+
+	submitRequest := httptest.NewRequest(http.MethodPost, "/jimeng/?Action=CVSync2AsyncSubmitTask",
+		strings.NewReader(`{"req_key":"jimeng-recovery-model","prompt":"accepted"}`))
+	submitRequest.Header.Set("Content-Type", "application/json")
+	submitRequest.Header.Set("Authorization", "Bearer "+token.Key)
+	submitResponse := httptest.NewRecorder()
+	handler.ServeHTTP(submitResponse, submitRequest)
+	require.Equal(t, http.StatusInternalServerError, submitResponse.Code, submitResponse.Body.String())
+	submitBody := decodeBody(t, submitResponse)
+	data := submitBody["data"].(map[string]any)
+	publicTaskID := data["task_id"].(string)
+	recoveryToken, ok := data["recovery_token"].(string)
+	require.True(t, ok)
+	assert.NotEmpty(t, recoveryToken)
+	assert.NotContains(t, recoveryToken, "upstream-recovery-token")
+	assert.Equal(t, false, data["settlement_pending"])
+	var pendingLog model.Log
+	require.NoError(t, model.LOG_DB.Where("type = ?", service.LogTypeConsume).First(&pendingLog).Error)
+	assert.Contains(t, pendingLog.Other, `"billing_pending":true`)
+
+	var task model.Task
+	require.NoError(t, model.DB.Where("task_id = ?", publicTaskID).First(&task).Error)
+	assert.Equal(t, model.TaskStatusNotStart, task.Status)
+	assert.NotContains(t, task.PrivateData, "upstream-recovery-token")
+
+	tamperedRequest := httptest.NewRequest(http.MethodPost, "/jimeng/?Action=CVSync2AsyncGetResult",
+		strings.NewReader(`{"task_id":"`+publicTaskID+`","recovery_token":"`+recoveryToken+`x"}`))
+	tamperedRequest.Header.Set("Content-Type", "application/json")
+	tamperedRequest.Header.Set("Authorization", "Bearer "+token.Key)
+	tamperedResponse := httptest.NewRecorder()
+	handler.ServeHTTP(tamperedResponse, tamperedRequest)
+	require.Equal(t, http.StatusBadRequest, tamperedResponse.Code, tamperedResponse.Body.String())
+	assert.Equal(t, "task_recovery_failed", decodeBody(t, tamperedResponse)["code"])
+
+	require.NoError(t, model.DB.Exec("DROP TRIGGER reject_jimeng_task_acceptance").Error)
+
+	fetchRequest := httptest.NewRequest(http.MethodPost, "/jimeng/?Action=CVSync2AsyncGetResult",
+		strings.NewReader(`{"task_id":"`+publicTaskID+`","recovery_token":"`+recoveryToken+`"}`))
+	fetchRequest.Header.Set("Content-Type", "application/json")
+	fetchRequest.Header.Set("Authorization", "Bearer "+token.Key)
+	fetchResponse := httptest.NewRecorder()
+	handler.ServeHTTP(fetchResponse, fetchRequest)
+	require.Equal(t, http.StatusOK, fetchResponse.Code, fetchResponse.Body.String())
+	assert.Equal(t, "completed", decodeBody(t, fetchResponse)["status"])
+	assert.Equal(t, int32(1), fetchCalls.Load())
+
+	require.NoError(t, model.DB.Where("task_id = ?", publicTaskID).First(&task).Error)
+	assert.Equal(t, model.TaskStatusSuccess, task.Status)
+	assert.Contains(t, task.PrivateData, "upstream-recovery-token")
+	assert.NotContains(t, task.PrivateData, "settlement_pending")
+	var user model.User
+	require.NoError(t, model.DB.First(&user, userID).Error)
+	require.NoError(t, model.DB.First(&token, token.Id).Error)
+	assert.Equal(t, 95000, user.Quota)
+	assert.Equal(t, 5000, user.UsedQuota)
+	assert.Equal(t, 1, user.RequestCount)
+	assert.Equal(t, 95000, token.RemainQuota)
+	assert.Equal(t, 5000, token.UsedQuota)
+	var logCount int64
+	require.NoError(t, model.LOG_DB.Model(&model.Log{}).Where("type = ?", service.LogTypeConsume).Count(&logCount).Error)
+	assert.Equal(t, int64(1), logCount)
 }

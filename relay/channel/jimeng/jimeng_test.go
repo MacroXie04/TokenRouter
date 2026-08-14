@@ -87,6 +87,39 @@ func TestClientSignsDirectAndGatewayRequests(t *testing.T) {
 	assert.Empty(t, gatewayRequest.Header.Get("X-Date"))
 }
 
+func TestSubmitOutcomeClassification(t *testing.T) {
+	payload := Request{ReqKey: "jimeng-model", Prompt: "animate", Frames: DefaultFrames}
+
+	_, _, err := (&Client{}).Submit(t.Context(), "not-a-url", "access|secret", payload)
+	require.Error(t, err)
+	assert.False(t, SubmitWasDispatched(err))
+	assert.False(t, SubmitMayHaveBeenAccepted(err))
+
+	for _, test := range []struct {
+		name            string
+		response        *http.Response
+		dispatched      bool
+		mayHaveAccepted bool
+	}{
+		{name: "client rejection", response: jsonResponse(http.StatusBadRequest, `{"error":"bad request"}`), dispatched: true},
+		{name: "redirect", response: jsonResponse(http.StatusTemporaryRedirect, ""), dispatched: true, mayHaveAccepted: true},
+		{name: "server failure", response: jsonResponse(http.StatusServiceUnavailable, `{"error":"unavailable"}`), dispatched: true, mayHaveAccepted: true},
+		{name: "provider rejection", response: jsonResponse(http.StatusOK, `{"code":50400,"message":"invalid request"}`), dispatched: true},
+		{name: "malformed success", response: jsonResponse(http.StatusOK, `not-json`), dispatched: true, mayHaveAccepted: true},
+		{name: "missing task id", response: jsonResponse(http.StatusOK, `{"code":10000,"message":"success","data":{}}`), dispatched: true, mayHaveAccepted: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			client := &Client{HTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return test.response, nil
+			})}}
+			_, _, err := client.Submit(t.Context(), "https://visual.example.test", "access|secret", payload)
+			require.Error(t, err)
+			assert.Equal(t, test.dispatched, SubmitWasDispatched(err))
+			assert.Equal(t, test.mayHaveAccepted, SubmitMayHaveBeenAccepted(err))
+		})
+	}
+}
+
 func assertValidAuthorization(t *testing.T, request *http.Request, accessKey, secretKey string, now time.Time) {
 	t.Helper()
 	signedHeaders := "content-type;host;x-content-sha256;x-date"

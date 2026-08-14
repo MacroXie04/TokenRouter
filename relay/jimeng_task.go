@@ -36,14 +36,25 @@ type jimengTaskProperties struct {
 }
 
 type jimengTaskPrivateData struct {
-	UpstreamTaskID    string `json:"upstream_task_id,omitempty"`
-	ResultURL         string `json:"result_url,omitempty"`
-	BillingSource     string `json:"billing_source,omitempty"`
-	SubscriptionID    int    `json:"subscription_id,omitempty"`
-	FundingReserved   int    `json:"funding_reserved,omitempty"`
-	TokenID           int    `json:"token_id,omitempty"`
-	TokenReserved     bool   `json:"token_reserved,omitempty"`
-	SettlementPending bool   `json:"settlement_pending,omitempty"`
+	UpstreamTaskID      string `json:"upstream_task_id,omitempty"`
+	ResultURL           string `json:"result_url,omitempty"`
+	BillingSource       string `json:"billing_source,omitempty"`
+	SubscriptionID      int    `json:"subscription_id,omitempty"`
+	FundingReserved     int    `json:"funding_reserved,omitempty"`
+	TokenID             int    `json:"token_id,omitempty"`
+	TokenReserved       bool   `json:"token_reserved,omitempty"`
+	ChannelBaseURL      string `json:"channel_base_url,omitempty"`
+	EncryptedChannelKey string `json:"encrypted_channel_key,omitempty"`
+	SettlementPending   bool   `json:"settlement_pending,omitempty"`
+}
+
+type jimengRecoveryEnvelope struct {
+	UserID      int    `json:"user_id"`
+	TaskID      string `json:"task_id"`
+	ChannelID   int    `json:"channel_id"`
+	PrivateData string `json:"private_data"`
+	Status      string `json:"status"`
+	FailReason  string `json:"fail_reason,omitempty"`
 }
 
 type jimengVideoResponse struct {
@@ -222,17 +233,30 @@ func relayJimengSubmit(c *gin.Context, request jimeng.Request, rawBody []byte) {
 			break
 		}
 		baseURL := jimengChannelBaseURL(channel)
+		channelKey := service.GetChannelKey(channel)
+		encryptedChannelKey, encryptErr := common.EncryptByAES(channelKey)
+		if encryptErr != nil {
+			lastErr = encryptErr
+			break
+		}
+		privateData.ChannelBaseURL = baseURL
+		privateData.EncryptedChannelKey = encryptedChannelKey
 		selected = channel
-		upstreamResult, upstreamRaw, lastErr = client.Submit(c.Request.Context(), baseURL, service.GetChannelKey(channel), payload)
+		upstreamResult, upstreamRaw, lastErr = client.Submit(c.Request.Context(), baseURL, channelKey, payload)
 		if lastErr == nil {
 			providerMayHaveAccepted = true
 			break
 		}
 		if isAmbiguousJimengSubmitError(lastErr) {
 			providerMayHaveAccepted = true
+			break
 		}
-		// Jimeng exposes no idempotency key, so retrying after dispatch could
-		// create a second billable provider task even when this response failed.
+		if !jimeng.SubmitWasDispatched(lastErr) {
+			ignore[channel.Id] = struct{}{}
+			continue
+		}
+		// Jimeng exposes no idempotency key, so a dispatched submit is never
+		// retried even when the provider explicitly rejects it.
 		break
 	}
 	reservedTokenID := 0
@@ -253,10 +277,41 @@ func relayJimengSubmit(c *gin.Context, request jimeng.Request, rawBody []byte) {
 				)
 			}
 			if marshalErr != nil {
+				privateData.SettlementPending = true
+				pendingJSON, pendingErr := marshalJimengTaskPrivateData(privateData)
+				if pendingErr == nil {
+					pendingErr = persistJimengPendingSettlement(
+						&task, selected.Id, pendingJSON, upstreamRaw, model.TaskStatusUnknown, message,
+					)
+				}
 				common.SysError("persist ambiguous Jimeng task " + task.TaskID + ": " + marshalErr.Error())
+				data := gin.H{"task_id": task.TaskID, "status": "unknown", "settlement_pending": pendingErr == nil}
+				if pendingErr != nil {
+					recoveryToken, recoveryErr := newJimengRecoveryToken(jimengRecoveryEnvelope{
+						UserID: userID, TaskID: task.TaskID, ChannelID: selected.Id,
+						PrivateData: pendingJSON,
+						Status:      model.TaskStatusUnknown, FailReason: message,
+					})
+					if recoveryErr != nil {
+						common.SysError("create ambiguous Jimeng recovery token for " + task.TaskID + ": " + recoveryErr.Error())
+					} else {
+						data["recovery_token"] = recoveryToken
+					}
+				}
+				logOther := funding.BillingLogFields()
+				logOther["task_id"] = task.TaskID
+				logOther["task_platform"] = jimengTaskPlatform
+				logOther["task_billing_units"] = billingUnits
+				logOther["provider_outcome"] = "unknown"
+				logOther["billing_pending"] = true
+				service.RecordConsumeLog(
+					userID, common.GetUsername(c), common.GetString(c, common.ContextKeyTokenName), originModel,
+					0, 0, quota, int(time.Since(start).Milliseconds()), false, selected.Id, group,
+					c.ClientIP(), common.GetRequestId(c), "", common.GetInt(c, common.ContextKeyTokenId), logOther,
+				)
+				service.RecordChannelAffinity(c, initialChannelID, selected.Id)
 				writeJimengTaskErrorData(c, http.StatusInternalServerError, "task_commit_failed",
-					"Jimeng may have accepted the task, but local accounting could not be committed",
-					gin.H{"task_id": task.TaskID, "status": "unknown"})
+					"Jimeng may have accepted the task, but local accounting could not be committed", data)
 				return
 			}
 			service.CheckAndSendQuotaReminder(userID)
@@ -265,14 +320,20 @@ func relayJimengSubmit(c *gin.Context, request jimeng.Request, rawBody []byte) {
 			logOther["task_platform"] = jimengTaskPlatform
 			logOther["task_billing_units"] = billingUnits
 			logOther["provider_outcome"] = "unknown"
+			if privateData.SettlementPending {
+				logOther["billing_pending"] = true
+			}
 			service.RecordConsumeLog(
 				userID, common.GetUsername(c), common.GetString(c, common.ContextKeyTokenName), originModel,
 				0, 0, quota, int(time.Since(start).Milliseconds()), false, selected.Id, group,
 				c.ClientIP(), common.GetRequestId(c), "", common.GetInt(c, common.ContextKeyTokenId), logOther,
 			)
 			service.RecordChannelAffinity(c, initialChannelID, selected.Id)
-			writeJimengTaskErrorData(c, http.StatusBadGateway, "submit_outcome_unknown", message,
-				gin.H{"task_id": task.TaskID, "status": "unknown"})
+			responseData := gin.H{"task_id": task.TaskID, "status": "unknown"}
+			if privateData.SettlementPending {
+				responseData["settlement_pending"] = true
+			}
+			writeJimengTaskErrorData(c, http.StatusBadGateway, "submit_outcome_unknown", message, responseData)
 			return
 		}
 		_ = model.DB.Model(&task).Updates(map[string]any{
@@ -308,20 +369,29 @@ func relayJimengSubmit(c *gin.Context, request jimeng.Request, rawBody []byte) {
 			common.SysError("unrecovered Jimeng upstream task " + upstreamResult.Data.TaskID +
 				" for " + task.TaskID + ": " + marshalErr.Error())
 			data["provider_request_id"] = upstreamResult.RequestID
-		} else {
-			logOther := funding.BillingLogFields()
-			logOther["task_id"] = task.TaskID
-			logOther["task_platform"] = jimengTaskPlatform
-			logOther["task_billing_units"] = billingUnits
-			logOther["billing_pending"] = true
-			service.RecordConsumeLog(
-				userID, common.GetUsername(c), common.GetString(c, common.ContextKeyTokenName), originModel,
-				0, 0, quota, int(time.Since(start).Milliseconds()), false, selected.Id, group,
-				c.ClientIP(), common.GetRequestId(c), upstreamResult.RequestID,
-				common.GetInt(c, common.ContextKeyTokenId), logOther,
-			)
-			service.RecordChannelAffinity(c, initialChannelID, selected.Id)
+			recoveryToken, recoveryErr := newJimengRecoveryToken(jimengRecoveryEnvelope{
+				UserID: userID, TaskID: task.TaskID, ChannelID: selected.Id,
+				PrivateData: pendingJSON,
+				Status:      model.TaskStatusSubmitted,
+			})
+			if recoveryErr != nil {
+				common.SysError("create Jimeng recovery token for " + task.TaskID + ": " + recoveryErr.Error())
+			} else {
+				data["recovery_token"] = recoveryToken
+			}
 		}
+		logOther := funding.BillingLogFields()
+		logOther["task_id"] = task.TaskID
+		logOther["task_platform"] = jimengTaskPlatform
+		logOther["task_billing_units"] = billingUnits
+		logOther["billing_pending"] = true
+		service.RecordConsumeLog(
+			userID, common.GetUsername(c), common.GetString(c, common.ContextKeyTokenName), originModel,
+			0, 0, quota, int(time.Since(start).Milliseconds()), false, selected.Id, group,
+			c.ClientIP(), common.GetRequestId(c), upstreamResult.RequestID,
+			common.GetInt(c, common.ContextKeyTokenId), logOther,
+		)
+		service.RecordChannelAffinity(c, initialChannelID, selected.Id)
 		writeJimengTaskErrorData(c, http.StatusInternalServerError, "task_commit_failed",
 			"Jimeng accepted the task, but local accounting could not be committed", data)
 		return
@@ -483,16 +553,63 @@ func settlePendingJimengTask(task *model.Task, privateData *jimengTaskPrivateDat
 	return nil
 }
 
+func newJimengRecoveryToken(envelope jimengRecoveryEnvelope) (string, error) {
+	encoded, err := common.Marshal(envelope)
+	if err != nil {
+		return "", err
+	}
+	return common.EncryptByAES(string(encoded))
+}
+
+func restoreJimengRecoveryToken(task *model.Task, userID int, recoveryToken string) (jimengTaskPrivateData, error) {
+	plaintext, err := common.DecryptByAES(recoveryToken)
+	if err != nil {
+		return jimengTaskPrivateData{}, errors.New("invalid Jimeng recovery token")
+	}
+	var envelope jimengRecoveryEnvelope
+	if err := common.UnmarshalJsonStr(plaintext, &envelope); err != nil {
+		return jimengTaskPrivateData{}, errors.New("invalid Jimeng recovery token")
+	}
+	if envelope.UserID != userID || envelope.TaskID != task.TaskID || envelope.ChannelID <= 0 ||
+		(task.ChannelId != 0 && envelope.ChannelID != task.ChannelId) {
+		return jimengTaskPrivateData{}, errors.New("Jimeng recovery token does not match this task")
+	}
+	if envelope.Status != model.TaskStatusSubmitted && envelope.Status != model.TaskStatusUnknown {
+		return jimengTaskPrivateData{}, errors.New("invalid Jimeng recovery status")
+	}
+	_, privateData := decodeJimengTaskMetadata(model.Task{PrivateData: envelope.PrivateData})
+	if !privateData.SettlementPending ||
+		(envelope.Status == model.TaskStatusSubmitted && privateData.UpstreamTaskID == "") {
+		return jimengTaskPrivateData{}, errors.New("invalid Jimeng recovery metadata")
+	}
+	if err := persistJimengPendingSettlement(
+		task, envelope.ChannelID, envelope.PrivateData, nil,
+		envelope.Status, envelope.FailReason,
+	); err != nil {
+		return jimengTaskPrivateData{}, err
+	}
+	return privateData, nil
+}
+
+func resolveJimengTaskChannel(task model.Task, privateData jimengTaskPrivateData) (string, string, error) {
+	if privateData.ChannelBaseURL != "" && privateData.EncryptedChannelKey != "" {
+		key, err := common.DecryptByAES(privateData.EncryptedChannelKey)
+		if err == nil && key != "" {
+			return privateData.ChannelBaseURL, key, nil
+		}
+	}
+	var channel model.Channel
+	if err := model.DB.First(&channel, task.ChannelId).Error; err != nil {
+		return "", "", errors.New("task channel not found and its credential snapshot is unavailable")
+	}
+	if channel.Type != int(constant.ChannelTypeJimeng) {
+		return "", "", errors.New("task channel is not a Jimeng channel")
+	}
+	return jimengChannelBaseURL(&channel), service.GetChannelKey(&channel), nil
+}
+
 func isAmbiguousJimengSubmitError(err error) bool {
-	if err == nil {
-		return false
-	}
-	var upstream *relaycommon.UpstreamError
-	if errors.As(err, &upstream) {
-		return false
-	}
-	var provider *jimeng.ProviderError
-	return !errors.As(err, &provider)
+	return jimeng.SubmitMayHaveBeenAccepted(err)
 }
 
 func relayJimengFetch(c *gin.Context, request jimeng.Request) {
@@ -511,6 +628,15 @@ func relayJimengFetch(c *gin.Context, request jimeng.Request) {
 		return
 	}
 	properties, privateData := decodeJimengTaskMetadata(task)
+	if request.RecoveryToken != "" && task.Status != model.TaskStatusSuccess && task.Status != model.TaskStatusFailure &&
+		(task.Status == model.TaskStatusNotStart || privateData.UpstreamTaskID == "") {
+		recoveredPrivate, err := restoreJimengRecoveryToken(&task, userID, request.RecoveryToken)
+		if err != nil {
+			writeJimengTaskError(c, http.StatusBadRequest, "task_recovery_failed", err.Error())
+			return
+		}
+		privateData = recoveredPrivate
+	}
 	if privateData.SettlementPending {
 		if err := settlePendingJimengTask(&task, &privateData); err != nil {
 			writeJimengTaskErrorData(c, http.StatusInternalServerError, "task_settlement_failed",
@@ -524,25 +650,24 @@ func relayJimengFetch(c *gin.Context, request jimeng.Request) {
 		return
 	}
 	if privateData.UpstreamTaskID == "" {
+		if task.Status == model.TaskStatusUnknown {
+			c.JSON(http.StatusOK, newJimengVideoResponse(task, properties.OriginModelName))
+			return
+		}
 		writeJimengTaskError(c, http.StatusInternalServerError, "task_data_invalid", "task is missing upstream_task_id")
 		return
 	}
-	var channel model.Channel
-	if err := model.DB.First(&channel, task.ChannelId).Error; err != nil {
-		writeJimengTaskError(c, http.StatusBadRequest, "channel_not_found", "task channel not found")
-		return
-	}
-	if channel.Status != constant.ChannelStatusEnabled || channel.Type != int(constant.ChannelTypeJimeng) {
-		writeJimengTaskError(c, http.StatusBadRequest, "task_channel_disable", "the channel of the origin task is disabled")
+	baseURL, channelKey, err := resolveJimengTaskChannel(task, privateData)
+	if err != nil {
+		writeJimengTaskError(c, http.StatusBadRequest, "channel_not_found", err.Error())
 		return
 	}
 	mappedModel := properties.UpstreamModelName
 	if mappedModel == "" {
-		mappedModel = relaycommon.GetMappedModel(&channel, properties.OriginModelName)
+		mappedModel = properties.OriginModelName
 	}
 	result, raw, err := (&jimeng.Client{}).Fetch(
-		c.Request.Context(), jimengChannelBaseURL(&channel), service.GetChannelKey(&channel),
-		mappedModel, privateData.UpstreamTaskID,
+		c.Request.Context(), baseURL, channelKey, mappedModel, privateData.UpstreamTaskID,
 	)
 	if err != nil {
 		writeJimengUpstreamError(c, err)

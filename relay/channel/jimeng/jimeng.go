@@ -12,9 +12,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/tokenrouter/tokenrouter/common"
@@ -41,6 +43,7 @@ type Request struct {
 	AspectRatio      string   `json:"aspect_ratio"`
 	Frames           int      `json:"frames,omitempty"`
 	TaskID           string   `json:"task_id,omitempty"`
+	RecoveryToken    string   `json:"recovery_token,omitempty"`
 }
 
 type SubmitResult struct {
@@ -79,6 +82,37 @@ func (e *ProviderError) Error() string {
 	return e.Message
 }
 
+type SubmitError struct {
+	Err             error
+	Dispatched      bool
+	MayHaveAccepted bool
+}
+
+func (e *SubmitError) Error() string {
+	return e.Err.Error()
+}
+
+func (e *SubmitError) Unwrap() error {
+	return e.Err
+}
+
+func SubmitMayHaveBeenAccepted(err error) bool {
+	var submitErr *SubmitError
+	return errors.As(err, &submitErr) && submitErr.MayHaveAccepted
+}
+
+func SubmitWasDispatched(err error) bool {
+	var submitErr *SubmitError
+	return errors.As(err, &submitErr) && submitErr.Dispatched
+}
+
+func submitError(err error, dispatched, mayHaveAccepted bool) error {
+	if err == nil {
+		return nil
+	}
+	return &SubmitError{Err: err, Dispatched: dispatched, MayHaveAccepted: mayHaveAccepted}
+}
+
 type Client struct {
 	HTTPClient *http.Client
 	Now        func() time.Time
@@ -99,6 +133,9 @@ func NewHTTPClient() *http.Client {
 			ResponseHeaderTimeout: 30 * time.Second,
 		},
 		Timeout: 60 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
 	}
 }
 
@@ -149,31 +186,38 @@ func PrepareSubmitRequest(request Request, mappedModel string) (Request, error) 
 		}
 	}
 	request.TaskID = ""
+	request.RecoveryToken = ""
 	return request, nil
 }
 
 func (c *Client) Submit(ctx context.Context, baseURL, apiKey string, payload Request) (*SubmitResult, []byte, error) {
 	body, err := common.Marshal(payload)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, submitError(err, false, false)
 	}
 	request, err := c.newRequest(ctx, baseURL, apiKey, SubmitAction, body)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, submitError(err, false, false)
 	}
-	raw, err := c.do(request)
+	raw, requestWritten, responseReceived, err := c.do(request)
 	if err != nil {
-		return nil, raw, err
+		mayHaveAccepted := requestWritten || responseReceived
+		var upstream *relaycommon.UpstreamError
+		if errors.As(err, &upstream) {
+			mayHaveAccepted = upstream.StatusCode == http.StatusRequestTimeout ||
+				(upstream.StatusCode >= 300 && upstream.StatusCode < 400) || upstream.StatusCode >= 500
+		}
+		return nil, raw, submitError(err, requestWritten || responseReceived, mayHaveAccepted)
 	}
 	var result SubmitResult
 	if err := common.Unmarshal(raw, &result); err != nil {
-		return nil, raw, fmt.Errorf("decode Jimeng submit response: %w", err)
+		return nil, raw, submitError(fmt.Errorf("decode Jimeng submit response: %w", err), true, true)
 	}
 	if result.Code != providerSuccessCode {
-		return nil, raw, &ProviderError{Code: result.Code, Message: result.Message}
+		return nil, raw, submitError(&ProviderError{Code: result.Code, Message: result.Message}, true, false)
 	}
 	if strings.TrimSpace(result.Data.TaskID) == "" {
-		return nil, raw, errors.New("Jimeng submit response is missing task_id")
+		return nil, raw, submitError(errors.New("Jimeng submit response is missing task_id"), true, true)
 	}
 	return &result, raw, nil
 }
@@ -191,7 +235,7 @@ func (c *Client) Fetch(ctx context.Context, baseURL, apiKey, modelName, upstream
 	if err != nil {
 		return nil, nil, err
 	}
-	raw, err := c.do(request)
+	raw, _, _, err := c.do(request)
 	if err != nil {
 		return nil, raw, err
 	}
@@ -248,27 +292,35 @@ func (c *Client) newRequest(ctx context.Context, baseURL, apiKey, action string,
 	return request, nil
 }
 
-func (c *Client) do(request *http.Request) ([]byte, error) {
+func (c *Client) do(request *http.Request) ([]byte, bool, bool, error) {
 	client := c.HTTPClient
 	if client == nil {
 		client = NewHTTPClient()
 	}
+	var requestWritten atomic.Bool
+	trace := &httptrace.ClientTrace{WroteRequest: func(httptrace.WroteRequestInfo) {
+		requestWritten.Store(true)
+	}}
+	request = request.WithContext(httptrace.WithClientTrace(request.Context(), trace))
 	response, err := client.Do(request)
 	if err != nil {
-		return nil, err
+		if response != nil && response.Body != nil {
+			_ = response.Body.Close()
+		}
+		return nil, requestWritten.Load(), response != nil, err
 	}
 	defer response.Body.Close()
 	raw, err := io.ReadAll(io.LimitReader(response.Body, maxResponseBytes+1))
 	if err != nil {
-		return nil, err
+		return nil, requestWritten.Load(), true, err
 	}
 	if len(raw) > maxResponseBytes {
-		return nil, errors.New("Jimeng response exceeds 1 MiB")
+		return nil, requestWritten.Load(), true, errors.New("Jimeng response exceeds 1 MiB")
 	}
 	if response.StatusCode != http.StatusOK {
-		return raw, &relaycommon.UpstreamError{StatusCode: response.StatusCode, Body: string(raw)}
+		return raw, requestWritten.Load(), true, &relaycommon.UpstreamError{StatusCode: response.StatusCode, Body: string(raw)}
 	}
-	return raw, nil
+	return raw, requestWritten.Load(), true, nil
 }
 
 func signRequest(request *http.Request, body []byte, accessKey, secretKey string, now time.Time) {
