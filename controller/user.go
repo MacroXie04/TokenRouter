@@ -1,0 +1,279 @@
+package controller
+
+import (
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/gin-gonic/gin"
+
+	"github.com/tokenrouter/tokenrouter/common"
+	"github.com/tokenrouter/tokenrouter/constant"
+	"github.com/tokenrouter/tokenrouter/dto"
+	"github.com/tokenrouter/tokenrouter/model"
+	"github.com/tokenrouter/tokenrouter/service"
+	"github.com/tokenrouter/tokenrouter/setting"
+)
+
+const (
+	accessCookie  = "access_token"
+	refreshCookie = "refresh_token"
+)
+
+func setAuthCookies(c *gin.Context, sid, access, refresh string) {
+	secure := common.GetEnvBool("SESSION_COOKIE_SECURE", false)
+	c.SetCookie(accessCookie, access, int(service.AccessTokenTTL.Seconds()), "/", "", secure, true)
+	c.SetCookie(refreshCookie, sid+"."+refresh, int(service.RefreshTokenTTL.Seconds()), "/", "", secure, true)
+}
+
+func clearAuthCookies(c *gin.Context) {
+	c.SetCookie(accessCookie, "", -1, "/", "", false, true)
+	c.SetCookie(refreshCookie, "", -1, "/", "", false, true)
+}
+
+// Register handles user sign-up.
+func Register(c *gin.Context) {
+	if !setting.GetOptionBool(setting.RegistrationEnabledOption, true) {
+		c.JSON(http.StatusForbidden, dto.Fail("注册已关闭"))
+		return
+	}
+	var req dto.RegisterRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, dto.Fail("参数错误: "+err.Error()))
+		return
+	}
+	if _, err := service.GetUserByUsername(req.Username); err == nil {
+		c.JSON(http.StatusBadRequest, dto.Fail("用户名已存在"))
+		return
+	}
+	hash, err := common.PasswordHash(req.Password)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, dto.Fail("密码加密失败"))
+		return
+	}
+	user := model.User{
+		Username:    req.Username,
+		Password:    hash,
+		DisplayName: req.Username,
+		Role:        constant.RoleCommonUser,
+		Status:      model.UserStatusEnabled,
+		Email:       req.Email,
+		Group:       setting.GetOptionOrDefault(setting.DefaultGroupOption, service.GroupDefault),
+		Quota:       setting.GetOptionIntOrDefault(setting.InitialQuotaOption, 500000),
+		CreatedAt:   common.NowTimestamp(),
+		AuthVersion: 1,
+	}
+	if req.AffCode != "" {
+		user.AffCode = common.RandomAlphanumeric(8)
+	}
+	if err := model.DB.Create(&user).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, dto.Fail("注册失败: "+err.Error()))
+		return
+	}
+	c.JSON(http.StatusOK, dto.OkMessage("注册成功"))
+}
+
+// Login handles password sign-in.
+func Login(c *gin.Context) {
+	var req dto.LoginRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, dto.Fail("参数错误: "+err.Error()))
+		return
+	}
+	user, err := service.AuthenticatePassword(req.Username, req.Password)
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, dto.Fail(err.Error()))
+		return
+	}
+	if service.TwoFAStatus(user.Id) {
+		flowToken, err := service.CreateAuthFlow(service.AuthFlowPurposeLogin2FA, "password", "", user.Id, "", "", 5*time.Minute)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, dto.Fail("登录失败"))
+			return
+		}
+		c.JSON(http.StatusOK, dto.Ok(gin.H{"twofa_required": true, "flow_token": flowToken}))
+		return
+	}
+	sid, access, refresh, err := service.CompleteLogin(user, c.ClientIP(), c.GetHeader("User-Agent"), "password")
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, dto.Fail("登录失败"))
+		return
+	}
+	setAuthCookies(c, sid, access, refresh)
+	c.JSON(http.StatusOK, dto.Ok(userResponse(user)))
+}
+
+// Login2FA completes a two-step login with a TOTP or backup code.
+func Login2FA(c *gin.Context) {
+	var req dto.Login2FARequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, dto.Fail("参数错误"))
+		return
+	}
+	user, sid, access, refresh, err := service.Login2FA(req.FlowToken, req.Code, c.ClientIP(), c.GetHeader("User-Agent"))
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, dto.Fail(err.Error()))
+		return
+	}
+	setAuthCookies(c, sid, access, refresh)
+	c.JSON(http.StatusOK, dto.Ok(userResponse(user)))
+}
+
+// RefreshAuth rotates the refresh token and issues a new access token.
+func RefreshAuth(c *gin.Context) {
+	cookie, err := c.Cookie(refreshCookie)
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, dto.Fail("缺少刷新令牌"))
+		return
+	}
+	parts := strings.SplitN(cookie, ".", 2)
+	if len(parts) != 2 {
+		c.JSON(http.StatusUnauthorized, dto.Fail("刷新令牌格式错误"))
+		return
+	}
+	access, newRefresh, user, err := service.RefreshSession(parts[0], parts[1])
+	if err != nil {
+		clearAuthCookies(c)
+		c.JSON(http.StatusUnauthorized, dto.Fail("会话已失效"))
+		return
+	}
+	setAuthCookies(c, parts[0], access, newRefresh)
+	c.JSON(http.StatusOK, dto.Ok(userResponse(user)))
+}
+
+// AuthLogout revokes the current session.
+func AuthLogout(c *gin.Context) {
+	if cookie, err := c.Cookie(refreshCookie); err == nil {
+		parts := strings.SplitN(cookie, ".", 2)
+		if len(parts) == 2 {
+			_ = service.RevokeSession(parts[0])
+		}
+	}
+	clearAuthCookies(c)
+	c.JSON(http.StatusOK, dto.OkMessage("已退出登录"))
+}
+
+// GetSelf returns the authenticated user's profile.
+func GetSelf(c *gin.Context) {
+	user, err := service.GetUserByID(common.GetUserId(c))
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, dto.Fail("用户不存在"))
+		return
+	}
+	c.JSON(http.StatusOK, dto.Ok(userResponse(user)))
+}
+
+// DeleteSelf soft-deletes the authenticated user's account.
+func DeleteSelf(c *gin.Context) {
+	userId := common.GetUserId(c)
+	if err := service.DeleteUser(userId); err != nil {
+		c.JSON(http.StatusInternalServerError, dto.Fail("删除失败"))
+		return
+	}
+	clearAuthCookies(c)
+	c.JSON(http.StatusOK, dto.OkMessage("账户已删除"))
+}
+
+// UpdateSelf updates profile fields.
+func UpdateSelf(c *gin.Context) {
+	var req dto.UpdateUserRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, dto.Fail("参数错误: "+err.Error()))
+		return
+	}
+	userId := common.GetUserId(c)
+	updates := map[string]any{}
+	if req.DisplayName != "" {
+		updates["display_name"] = req.DisplayName
+	}
+	if req.Email != "" {
+		updates["email"] = req.Email
+	}
+	if req.Password != "" {
+		if req.OldPassword == "" {
+			c.JSON(http.StatusBadRequest, dto.Fail("请输入原密码"))
+			return
+		}
+		user, err := service.GetUserByID(userId)
+		if err != nil || !common.PasswordVerify(req.OldPassword, user.Password) {
+			c.JSON(http.StatusBadRequest, dto.Fail("原密码错误"))
+			return
+		}
+		hash, _ := common.PasswordHash(req.Password)
+		updates["password"] = hash
+	}
+	if len(updates) > 0 {
+		if err := service.UpdateUser(userId, updates); err != nil {
+			c.JSON(http.StatusInternalServerError, dto.Fail("更新失败"))
+			return
+		}
+	}
+	c.JSON(http.StatusOK, dto.OkMessage("更新成功"))
+}
+
+// GetSelfTokens lists the user's relay tokens.
+func GetSelfTokens(c *gin.Context) {
+	var tokens []model.Token
+	model.DB.Where("user_id = ?", common.GetUserId(c)).Order("id desc").Find(&tokens)
+	c.JSON(http.StatusOK, dto.Ok(tokens))
+}
+
+// AddToken creates a new relay token for the user.
+func AddToken(c *gin.Context) {
+	var req dto.TokenRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, dto.Fail("参数错误: "+err.Error()))
+		return
+	}
+	key := "sk-" + common.RandomAlphanumeric(48)
+	token := model.Token{
+		UserId:         common.GetUserId(c),
+		Key:            key,
+		Status:         service.TokenStatusEnabled,
+		Name:           req.Name,
+		CreatedTime:    common.NowTimestamp(),
+		ExpiredTime:    req.ExpiredTime,
+		UnlimitedQuota: !req.ModelLimitsEnabled && req.RemainQuota == 0,
+		RemainQuota:    req.RemainQuota,
+		ModelLimitsEnabled: req.ModelLimitsEnabled,
+		ModelLimits:    strings.Join(req.ModelLimits, ","),
+		AllowIps:       req.AllowIps,
+		Group:          req.Group,
+		CrossGroupRetry: req.CrossGroupRetry,
+		AutoGroups:     strings.Join(req.AutoGroups, ","),
+	}
+	if token.UnlimitedQuota {
+		token.RemainQuota = -1
+	}
+	if err := model.DB.Create(&token).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, dto.Fail("创建失败"))
+		return
+	}
+	c.JSON(http.StatusOK, dto.Ok(token))
+}
+
+// DeleteToken soft-deletes a relay token.
+func DeleteToken(c *gin.Context) {
+	id := common.Str2Int(c.Param("id"))
+	if err := model.DB.Where("id = ? AND user_id = ?", id, common.GetUserId(c)).Delete(&model.Token{}).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, dto.Fail("删除失败"))
+		return
+	}
+	c.JSON(http.StatusOK, dto.OkMessage("删除成功"))
+}
+
+func userResponse(u *model.User) gin.H {
+	return gin.H{
+		"id":           u.Id,
+		"username":     u.Username,
+		"display_name": u.DisplayName,
+		"role":         u.Role,
+		"status":       u.Status,
+		"email":        u.Email,
+		"group":        u.Group,
+		"quota":        u.Quota,
+		"used_quota":   u.UsedQuota,
+		"request_count": u.RequestCount,
+		"created_at":   u.CreatedAt,
+	}
+}
