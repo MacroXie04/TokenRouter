@@ -1,0 +1,69 @@
+package service
+
+import (
+	"errors"
+
+	"github.com/tokenrouter/tokenrouter/common"
+	"github.com/tokenrouter/tokenrouter/model"
+)
+
+// TopUp status constants.
+const (
+	TopUpStatusPending   = "pending"
+	TopUpStatusSuccess   = "success"
+	TopUpStatusFailed    = "failed"
+	TopUpStatusCancelled = "cancelled"
+)
+
+// ErrTopUpNotFound is returned when a trade number does not resolve.
+var ErrTopUpNotFound = errors.New("充值订单不存在")
+
+// CreateTopUp creates a wallet recharge order.
+func CreateTopUp(userId int, amount int64, money float64, paymentMethod, paymentProvider string) (*model.TopUp, error) {
+	t := model.TopUp{
+		UserId:          userId,
+		Amount:          amount,
+		Money:           money,
+		TradeNo:         common.RandomAlphanumeric(32),
+		PaymentMethod:   paymentMethod,
+		PaymentProvider: paymentProvider,
+		CreateTime:      common.NowTimestamp(),
+		Status:          TopUpStatusPending,
+	}
+	if err := model.DB.Create(&t).Error; err != nil {
+		return nil, err
+	}
+	return &t, nil
+}
+
+// CompleteTopUp idempotently marks an order successful and credits the user's
+// quota exactly once (guarded by the pending->success transition).
+func CompleteTopUp(userId int, tradeNo string, amount int64) error {
+	res := model.DB.Model(&model.TopUp{}).
+		Where("trade_no = ? AND user_id = ? AND status = ?", tradeNo, userId, TopUpStatusPending).
+		Updates(map[string]any{
+			"status":        TopUpStatusSuccess,
+			"complete_time": common.NowTimestamp(),
+		})
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		// Already completed or unknown; treat as idempotent success.
+		return nil
+	}
+	if err := IncreaseUserQuota(userId, int(amount)); err != nil {
+		return err
+	}
+	RecordTopupLog(userId, int(amount), 0, tradeNo)
+	return nil
+}
+
+// GetTopUpByTradeNo loads a top-up order by trade number.
+func GetTopUpByTradeNo(tradeNo string) (*model.TopUp, error) {
+	var t model.TopUp
+	if err := model.DB.Where("trade_no = ?", tradeNo).First(&t).Error; err != nil {
+		return nil, ErrTopUpNotFound
+	}
+	return &t, nil
+}
