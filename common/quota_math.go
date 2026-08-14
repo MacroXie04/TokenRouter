@@ -1,6 +1,7 @@
 package common
 
 import (
+	"fmt"
 	"math"
 
 	"github.com/shopspring/decimal"
@@ -24,6 +25,18 @@ type QuotaClamp struct {
 	Reason string `json:"reason"`
 	// Value is the raw input that triggered the clamp (may be lossy for floats).
 	Value string `json:"value,omitempty"`
+}
+
+// Error lets a clamp double as the fail-fast error returned by strict
+// conversions, so purchase-style paths can refuse to bill a saturated value.
+func (c *QuotaClamp) Error() string {
+	if c == nil {
+		return ""
+	}
+	if c.Value != "" {
+		return fmt.Sprintf("quota conversion clamped (%s): %s", c.Reason, c.Value)
+	}
+	return fmt.Sprintf("quota conversion clamped (%s)", c.Reason)
 }
 
 // clampInt32 saturates a signed 64-bit value into the int32 range.
@@ -51,19 +64,25 @@ func QuotaFromFloatChecked(f float64) (int, *QuotaClamp) {
 	return int(q), clamp
 }
 
+func setQuotaClamp(outClamp **QuotaClamp, clamp *QuotaClamp) {
+	if outClamp != nil {
+		*outClamp = clamp
+	}
+}
+
 func quotaFromFloat(f float64, outClamp **QuotaClamp) int64 {
 	if math.IsNaN(f) {
-		*outClamp = &QuotaClamp{Reason: "nan"}
+		setQuotaClamp(outClamp, &QuotaClamp{Reason: "nan"})
 		SysError("quota: NaN input in QuotaFromFloat")
 		return 0
 	}
 	if math.IsInf(f, 1) {
-		*outClamp = &QuotaClamp{Reason: "inf"}
+		setQuotaClamp(outClamp, &QuotaClamp{Reason: "inf"})
 		SysError("quota: +Inf input in QuotaFromFloat")
 		return MaxQuota
 	}
 	if math.IsInf(f, -1) {
-		*outClamp = &QuotaClamp{Reason: "inf"}
+		setQuotaClamp(outClamp, &QuotaClamp{Reason: "inf"})
 		SysError("quota: -Inf input in QuotaFromFloat")
 		return MinQuota
 	}
@@ -71,7 +90,7 @@ func quotaFromFloat(f float64, outClamp **QuotaClamp) int64 {
 	t := int64(f)
 	clamped := clampInt32(t)
 	if clamped != t {
-		*outClamp = &QuotaClamp{Reason: "overflow"}
+		setQuotaClamp(outClamp, &QuotaClamp{Reason: "overflow"})
 		SysError("quota: overflow clamped in QuotaFromFloat")
 	}
 	return clamped
@@ -92,17 +111,17 @@ func QuotaRoundChecked(f float64) (int, *QuotaClamp) {
 
 func quotaRound(f float64, outClamp **QuotaClamp) int64 {
 	if math.IsNaN(f) {
-		*outClamp = &QuotaClamp{Reason: "nan"}
+		setQuotaClamp(outClamp, &QuotaClamp{Reason: "nan"})
 		SysError("quota: NaN input in QuotaRound")
 		return 0
 	}
 	if math.IsInf(f, 1) {
-		*outClamp = &QuotaClamp{Reason: "inf"}
+		setQuotaClamp(outClamp, &QuotaClamp{Reason: "inf"})
 		SysError("quota: +Inf input in QuotaRound")
 		return MaxQuota
 	}
 	if math.IsInf(f, -1) {
-		*outClamp = &QuotaClamp{Reason: "inf"}
+		setQuotaClamp(outClamp, &QuotaClamp{Reason: "inf"})
 		SysError("quota: -Inf input in QuotaRound")
 		return MinQuota
 	}
@@ -110,7 +129,7 @@ func quotaRound(f float64, outClamp **QuotaClamp) int64 {
 	r := int64(math.Round(f))
 	clamped := clampInt32(r)
 	if clamped != r {
-		*outClamp = &QuotaClamp{Reason: "overflow"}
+		setQuotaClamp(outClamp, &QuotaClamp{Reason: "overflow"})
 		SysError("quota: overflow clamped in QuotaRound")
 	}
 	return clamped
@@ -129,14 +148,33 @@ func QuotaFromDecimalChecked(d decimal.Decimal) (int, *QuotaClamp) {
 	return int(q), clamp
 }
 
-func quotaFromDecimal(d decimal.Decimal, outClamp **QuotaClamp) int64 {
-	part := d.IntPart()
-	clamped := clampInt32(part)
-	if clamped != part {
-		*outClamp = &QuotaClamp{Reason: "overflow"}
-		SysError("quota: overflow clamped in QuotaFromDecimal")
+// QuotaFromDecimalStrict converts an in-range decimal quota and rejects a
+// value that would otherwise saturate at the int32 boundary. Charging paths
+// (subscription purchase, top-up style conversions) must use this instead of
+// the clamping variants so an oversized amount fails instead of billing the
+// clamp.
+func QuotaFromDecimalStrict(d decimal.Decimal) (int, error) {
+	q, clamp := QuotaFromDecimalChecked(d)
+	if clamp != nil {
+		return 0, clamp
 	}
-	return clamped
+	return q, nil
+}
+
+func quotaFromDecimal(d decimal.Decimal, outClamp **QuotaClamp) int64 {
+	maxExclusive := decimal.NewFromInt(MaxQuota).Add(decimal.NewFromInt(1))
+	minInclusive := decimal.NewFromInt(MinQuota).Sub(decimal.NewFromInt(1))
+	if d.GreaterThanOrEqual(maxExclusive) {
+		setQuotaClamp(outClamp, &QuotaClamp{Reason: "overflow", Value: d.String()})
+		SysError("quota: decimal overflow clamped in QuotaFromDecimal")
+		return MaxQuota
+	}
+	if d.LessThanOrEqual(minInclusive) {
+		setQuotaClamp(outClamp, &QuotaClamp{Reason: "overflow", Value: d.String()})
+		SysError("quota: decimal underflow clamped in QuotaFromDecimal")
+		return MinQuota
+	}
+	return d.IntPart()
 }
 
 // QuotaToFloat converts quota to a float, safe for display.

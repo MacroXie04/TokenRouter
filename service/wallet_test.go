@@ -29,10 +29,11 @@ func TestRedeemCreditsOnce(t *testing.T) {
 	initWalletDB(t)
 	u := newUser(t, 0)
 
-	r, err := CreateRedemption(1, "test", 500, 0)
+	keys, err := CreateRedemptionBatch(1, "test", 500, 0, 1)
 	require.NoError(t, err)
+	require.Len(t, keys, 1)
 
-	quota, err := Redeem(u.Id, r.Key)
+	quota, err := Redeem(u.Id, keys[0])
 	require.NoError(t, err)
 	assert.Equal(t, 500, quota)
 
@@ -41,7 +42,7 @@ func TestRedeemCreditsOnce(t *testing.T) {
 	assert.Equal(t, 500, got.Quota)
 
 	// Second redeem of the same code fails.
-	_, err = Redeem(u.Id, r.Key)
+	_, err = Redeem(u.Id, keys[0])
 	assert.Equal(t, ErrInvalidRedemption, err)
 	assert.Equal(t, 500, got.Quota)
 }
@@ -49,8 +50,9 @@ func TestRedeemCreditsOnce(t *testing.T) {
 func TestConcurrentRedeemCreditsExactlyOnce(t *testing.T) {
 	initWalletDB(t)
 	u := newUser(t, 0)
-	r, err := CreateRedemption(1, "test", 100, 0)
+	keys, err := CreateRedemptionBatch(1, "test", 100, 0, 1)
 	require.NoError(t, err)
+	require.Len(t, keys, 1)
 
 	const n = 10
 	var wg sync.WaitGroup
@@ -59,7 +61,7 @@ func TestConcurrentRedeemCreditsExactlyOnce(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, err := Redeem(u.Id, r.Key)
+			_, err := Redeem(u.Id, keys[0])
 			successes <- err == nil
 		}()
 	}

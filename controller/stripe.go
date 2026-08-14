@@ -4,6 +4,8 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -38,7 +40,12 @@ func StripeWebhook(c *gin.Context) {
 		Type string `json:"type"`
 		Data struct {
 			Object struct {
-				Metadata map[string]string `json:"metadata"`
+				Metadata          map[string]string `json:"metadata"`
+				ClientReferenceID string            `json:"client_reference_id"`
+				Status            string            `json:"status"`
+				Customer          string            `json:"customer"`
+				AmountTotal       any               `json:"amount_total"`
+				Currency          string            `json:"currency"`
 			} `json:"object"`
 		} `json:"data"`
 	}
@@ -49,12 +56,49 @@ func StripeWebhook(c *gin.Context) {
 
 	switch event.Type {
 	case "checkout.session.completed":
+		referenceId := event.Data.Object.ClientReferenceID
+		if referenceId != "" {
+			// Subscription orders carry the client reference id; legacy
+			// top-up orders fall back to the metadata path below.
+			payload, _ := common.Marshal(gin.H{
+				"customer":     event.Data.Object.Customer,
+				"amount_total": event.Data.Object.AmountTotal,
+				"currency":     strings.ToUpper(event.Data.Object.Currency),
+				"event_type":   event.Type,
+			})
+			err := service.CompleteSubscriptionOrder(referenceId, string(payload),
+				service.PaymentProviderStripe, "")
+			if err == nil {
+				break
+			}
+			if !errors.Is(err, service.ErrSubscriptionOrderNotFound) {
+				common.SysLog(fmt.Sprintf("Stripe 订阅订单处理失败 trade_no=%s event_type=%s error=%v", referenceId, event.Type, err))
+				break
+			}
+		}
 		userId := common.Str2Int(event.Data.Object.Metadata["user_id"])
 		tradeNo := event.Data.Object.Metadata["trade_no"]
 		quota := common.Str2Int(event.Data.Object.Metadata["quota"])
 		if userId > 0 && tradeNo != "" && quota > 0 {
 			// CompleteTopUp is idempotent: a duplicate delivery does not double-credit.
 			_ = service.CompleteTopUp(userId, tradeNo, int64(quota))
+		}
+	case "checkout.session.expired":
+		if event.Data.Object.Status != "expired" {
+			break
+		}
+		referenceId := event.Data.Object.ClientReferenceID
+		if referenceId == "" {
+			break
+		}
+		if err := service.ExpireSubscriptionOrder(referenceId, service.PaymentProviderStripe); err == nil {
+			break
+		} else if !errors.Is(err, service.ErrSubscriptionOrderNotFound) {
+			common.SysLog(fmt.Sprintf("Stripe 订阅订单过期处理失败 trade_no=%s error=%v", referenceId, err))
+			break
+		}
+		if err := service.UpdatePendingTopUpStatus(referenceId, service.PaymentProviderStripe, service.TopUpStatusExpired); err != nil && !errors.Is(err, service.ErrTopUpNotFound) {
+			common.SysLog(fmt.Sprintf("Stripe 充值订单过期标记失败 trade_no=%s error=%v", referenceId, err))
 		}
 	}
 

@@ -79,3 +79,47 @@ func TestQuotaMathNeverNegativeOnOverflow(t *testing.T) {
 		assert.True(t, q <= 0 || clamp != nil, "input %v produced %d", f, q)
 	}
 }
+
+func TestQuotaFromDecimalStrict(t *testing.T) {
+	// In-range values convert exactly.
+	q, err := QuotaFromDecimalStrict(decimal.RequireFromString("4995000"))
+	require.NoError(t, err)
+	assert.Equal(t, 4995000, q)
+
+	// Zero is valid (free plans).
+	q, err = QuotaFromDecimalStrict(decimal.Zero)
+	require.NoError(t, err)
+	assert.Equal(t, 0, q)
+
+	// A value past the int32 boundary must error, never bill the clamp.
+	_, err = QuotaFromDecimalStrict(decimal.NewFromInt(MaxQuota + 1))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "overflow")
+
+	_, err = QuotaFromDecimalStrict(decimal.NewFromInt(MinQuota - 1))
+	require.Error(t, err)
+}
+
+func TestQuotaConversionsHandleExtremeUncheckedInputs(t *testing.T) {
+	assert.NotPanics(t, func() {
+		assert.Equal(t, int(MaxQuota), QuotaFromFloat(math.Inf(1)))
+		assert.Equal(t, int(MinQuota), QuotaRound(math.Inf(-1)))
+	})
+
+	huge := decimal.RequireFromString("1e100")
+	negativeHuge := decimal.RequireFromString("-1e100")
+	assert.Equal(t, int(MaxQuota), QuotaFromDecimal(huge))
+	assert.Equal(t, int(MinQuota), QuotaFromDecimal(negativeHuge))
+	_, err := QuotaFromDecimalStrict(huge)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "overflow")
+	_, err = QuotaFromDecimalStrict(negativeHuge)
+	require.Error(t, err)
+
+	q, err := QuotaFromDecimalStrict(decimal.RequireFromString("2147483647.9"))
+	require.NoError(t, err)
+	assert.Equal(t, int(MaxQuota), q)
+	q, err = QuotaFromDecimalStrict(decimal.RequireFromString("-2147483648.9"))
+	require.NoError(t, err)
+	assert.Equal(t, int(MinQuota), q)
+}

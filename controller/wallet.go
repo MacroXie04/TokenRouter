@@ -2,6 +2,7 @@ package controller
 
 import (
 	"net/http"
+	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
 
@@ -13,28 +14,65 @@ import (
 
 // --- Redemption codes ---
 
-// CreateRedemption creates a redemption code (admin).
+// CreateRedemption generates a batch of redemption codes (reference
+// contract): compliance-gated, name 1-20 runes, count 1-100, future expiry
+// only, one row per code with a UUID key, keys returned in data.
 func CreateRedemption(c *gin.Context) {
+	if !service.PaymentComplianceConfirmed() {
+		c.JSON(http.StatusOK, gin.H{"success": false, "message": service.ErrPaymentComplianceRequired.Error()})
+		return
+	}
 	var req struct {
-		Name        string `json:"name" binding:"required"`
-		Quota       int    `json:"quota" binding:"required"`
+		Name        string `json:"name"`
+		Quota       int    `json:"quota"`
 		ExpiredTime int64  `json:"expired_time"`
+		Count       int    `json:"count"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, dto.Fail("参数错误"))
+		c.JSON(http.StatusOK, gin.H{"success": false, "message": err.Error()})
 		return
 	}
-	r, err := service.CreateRedemption(common.GetUserId(c), req.Name, req.Quota, req.ExpiredTime)
+	if n := utf8.RuneCountInString(req.Name); n == 0 || n > 20 {
+		c.JSON(http.StatusOK, gin.H{"success": false, "message": "兑换码名称长度必须在1-20之间"})
+		return
+	}
+	if req.Count <= 0 {
+		c.JSON(http.StatusOK, gin.H{"success": false, "message": "兑换码个数必须大于0"})
+		return
+	}
+	if req.Count > 100 {
+		c.JSON(http.StatusOK, gin.H{"success": false, "message": "一次兑换码批量生成的个数不能大于 100"})
+		return
+	}
+	if req.ExpiredTime != 0 && req.ExpiredTime < common.NowTimestamp() {
+		c.JSON(http.StatusOK, gin.H{"success": false, "message": "过期时间不能早于当前时间"})
+		return
+	}
+	keys, err := service.CreateRedemptionBatch(common.GetUserId(c), req.Name, req.Quota, req.ExpiredTime, req.Count)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, dto.Fail("创建失败"))
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"message": "创建兑换码失败，请稍后重试",
+			"data":    keys,
+		})
 		return
 	}
-	c.JSON(http.StatusOK, dto.Ok(r))
+	service.RecordSystemLog(common.GetUserId(c), service.LogTypeManage,
+		"redemption.create name="+req.Name+" count="+common.Int2Str(req.Count))
+	c.JSON(http.StatusOK, gin.H{"success": true, "message": "", "data": keys})
 }
 
-// GetRedemptions lists redemption codes (admin).
+// GetRedemptions lists redemption codes with the reference pageInfo paging.
 func GetRedemptions(c *gin.Context) {
-	c.JSON(http.StatusOK, dto.Ok(service.GetRedemptions(common.GetUserId(c), true)))
+	pi := getPageQuery(c)
+	items, total, err := service.GetPagedRedemptions((pi.Page-1)*pi.PageSize, pi.PageSize)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"success": false, "message": err.Error()})
+		return
+	}
+	pi.Total = int(total)
+	pi.Items = items
+	c.JSON(http.StatusOK, gin.H{"success": true, "message": "", "data": pi})
 }
 
 // Redeem redeems a code for the authenticated user.
