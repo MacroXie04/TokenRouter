@@ -51,7 +51,7 @@ Channel types and provider adapters in the reference system.
 | 45 | ChannelTypeXai | Channel type 48; maps to APITypeXai -> relay/channel/xai.Adaptor | NOT_STARTED |  |
 | 46 | ChannelTypeCoze | Channel type 49; maps to APITypeCoze -> relay/channel/coze.Adaptor | NOT_STARTED |  |
 | 47 | ChannelTypeKling | Channel type 50; Kling video, task-based -> relay/channel/task/kling.TaskAdaptor | NOT_STARTED |  |
-| 48 | ChannelTypeJimeng | Channel type 51; maps to APITypeJimeng -> relay/channel/jimeng.Adaptor (also task/jimeng) | NOT_STARTED |  |
+| 48 | ChannelTypeJimeng | Channel type 51; maps to APITypeJimeng -> relay/channel/jimeng.Adaptor (also task/jimeng) | PASS | `constant/channel.go` (`ChannelTypeJimeng=47`, numbering adaptation in deviation #24) + `relay/jimeng_task.go`; `go test ./controller/ -run TestJimeng -count=1` |
 | 49 | ChannelTypeVidu | Channel type 52; Vidu video, task-based -> relay/channel/task/vidu.TaskAdaptor | NOT_STARTED |  |
 | 50 | ChannelTypeSubmodel | Channel type 53; maps to APITypeSubmodel -> relay/channel/submodel.Adaptor | NOT_STARTED |  |
 | 51 | ChannelTypeDoubaoVideo | Channel type 54; Doubao video, task-based -> relay/channel/task/doubao.TaskAdaptor | NOT_STARTED |  |
@@ -145,7 +145,7 @@ Channel types and provider adapters in the reference system.
 | 139 | adapter/task/doubao | Task adaptor relay/channel/task/doubao (Doubao video) | NOT_STARTED |  |
 | 140 | adapter/task/gemini | Task adaptor relay/channel/task/gemini (Gemini video/task) | NOT_STARTED |  |
 | 141 | adapter/task/hailuo | Task adaptor relay/channel/task/hailuo (MiniMax Hailuo video) | NOT_STARTED |  |
-| 142 | adapter/task/jimeng | Task adaptor relay/channel/task/jimeng (Jimeng task) | NOT_STARTED |  |
+| 142 | adapter/task/jimeng | Task adaptor relay/channel/task/jimeng (Jimeng task) | PASS | `relay/channel/jimeng/jimeng.go` + `relay/jimeng_task.go`; HMAC/gateway contract tests in `relay/channel/jimeng/jimeng_test.go`, lifecycle/accounting/ownership tests in `controller/jimeng_test.go` |
 | 143 | adapter/task/kling | Task adaptor relay/channel/task/kling (Kling video) | NOT_STARTED |  |
 | 144 | adapter/task/sora | Task adaptor relay/channel/task/sora (Sora video) | NOT_STARTED |  |
 | 145 | adapter/task/suno | Task adaptor relay/channel/task/suno (Suno music) | NOT_STARTED |  |
@@ -163,7 +163,7 @@ Channel types and provider adapters in the reference system.
 | 157 | RelayFormatOpenAIRealtime | RelayFormat string "openai_realtime" | NOT_STARTED |  |
 | 158 | RelayFormatRerank | RelayFormat string "rerank" | NOT_STARTED |  |
 | 159 | RelayFormatEmbedding | RelayFormat string "embedding" | NOT_STARTED |  |
-| 160 | RelayFormatTask | RelayFormat string "task" | NOT_STARTED |  |
+| 160 | RelayFormatTask | RelayFormat string "task" | PASS | `constant/api_type.go` + official Jimeng submit/fetch lifecycle in `relay/jimeng_task.go`; `go test ./controller/ -run TestJimeng -count=1` |
 | 161 | RelayFormatMjProxy | RelayFormat string "mj_proxy" | NOT_STARTED |  |
 | 162 | EndpointTypeOpenAI | EndpointType string "openai" | NOT_STARTED |  |
 | 163 | EndpointTypeOpenAIResponse | EndpointType string "openai-response" | NOT_STARTED |  |
