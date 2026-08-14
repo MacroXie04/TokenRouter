@@ -223,7 +223,9 @@ func (s *FundingSession) CommitAcceptedPerCall(
 		case BillingSourceSubscription:
 			if delta != 0 {
 				if err := postConsumeUserSubscriptionDeltaTx(tx, s.subscriptionId, delta, common.NowTimestamp()); err != nil {
-					return err
+					if !(delta < 0 && errors.Is(err, gorm.ErrRecordNotFound)) {
+						return err
+					}
 				}
 			}
 		case BillingSourceWallet:
@@ -262,7 +264,8 @@ func (s *FundingSession) CommitAcceptedPerCall(
 			return fmt.Errorf("user %d not found", s.userId)
 		}
 		if tokenId > 0 && actual > 0 {
-			tokenResult := tx.Model(&model.Token{}).Where("id = ?", tokenId).
+			tokenResult := tx.Unscoped().Model(&model.Token{}).
+				Where("id = ? AND user_id = ?", tokenId, s.userId).
 				UpdateColumn("used_quota", gormExpr("used_quota + ?", actual))
 			if tokenResult.Error != nil {
 				return tokenResult.Error

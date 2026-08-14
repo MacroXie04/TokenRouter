@@ -129,4 +129,35 @@ func TestCommitAcceptedPerCallIsAtomicAndIdempotent(t *testing.T) {
 	assert.Zero(t, freeUser.UsedQuota)
 	assert.Equal(t, 1, freeUser.RequestCount)
 	assert.Equal(t, int64(-1), freeFunding.postDelta)
+
+	deletedTokenUser := model.User{Username: "deleted-token-task", Quota: 100, Status: model.UserStatusEnabled}
+	require.NoError(t, db.Create(&deletedTokenUser).Error)
+	deletedToken := model.Token{UserId: deletedTokenUser.Id, Key: "sk-deleted-token-task",
+		Status: TokenStatusEnabled, RemainQuota: 100}
+	require.NoError(t, db.Create(&deletedToken).Error)
+	deletedTokenFunding, err := NewFundingSession(deletedTokenUser.Id, 60)
+	require.NoError(t, err)
+	require.NoError(t, ReserveTokenQuota(deletedToken.Id, 60))
+	require.NoError(t, db.Delete(&deletedToken).Error)
+	require.NoError(t, deletedTokenFunding.CommitAcceptedPerCall(60, deletedToken.Id, nil))
+	require.NoError(t, db.Unscoped().First(&deletedToken, deletedToken.Id).Error)
+	require.NoError(t, db.First(&deletedTokenUser, deletedTokenUser.Id).Error)
+	assert.True(t, deletedToken.DeletedAt.Valid)
+	assert.Equal(t, 60, deletedToken.UsedQuota)
+	assert.Equal(t, 60, deletedTokenUser.UsedQuota)
+	assert.Equal(t, 1, deletedTokenUser.RequestCount)
+
+	deletedSubUser := model.User{Username: "deleted-subscription-task", Status: model.UserStatusEnabled}
+	require.NoError(t, db.Create(&deletedSubUser).Error)
+	deletedSubscription := model.UserSubscription{UserId: deletedSubUser.Id, AmountTotal: 10, AmountUsed: 1}
+	require.NoError(t, db.Create(&deletedSubscription).Error)
+	require.NoError(t, db.Delete(&deletedSubscription).Error)
+	deletedSubFunding := &FundingSession{
+		userId: deletedSubUser.Id, source: BillingSourceSubscription,
+		reserved: 1, subscriptionId: deletedSubscription.Id,
+	}
+	require.NoError(t, deletedSubFunding.CommitAcceptedPerCall(0, 0, nil))
+	require.NoError(t, db.First(&deletedSubUser, deletedSubUser.Id).Error)
+	assert.Zero(t, deletedSubUser.UsedQuota)
+	assert.Equal(t, 1, deletedSubUser.RequestCount)
 }
