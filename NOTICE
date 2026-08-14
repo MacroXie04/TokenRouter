@@ -1,0 +1,17 @@
+TokenRouter Notices
+
+TokenRouter
+Copyright (c) 2026 TokenRouter contributors.
+
+This project is licensed under the MIT License. See LICENSE for the full terms.
+
+TokenRouter is an independent implementation and is not affiliated with, endorsed
+by, or derived from any other AI gateway project. It does not incorporate source
+code from any AGPL-licensed project.
+
+==== Third-Party Notices ====
+
+This product includes third-party open source software. Copyright notices and
+license terms for direct third-party dependencies are listed in
+THIRD-PARTY-LICENSES.md. Preserve this file with Docker images, standalone
+binaries, and frontend bundles distributed to users.

@@ -1,0 +1,26 @@
+# Binaries
+/tokenrouter
+*.exe
+
+# Databases / data
+*.db
+*.db-journal
+/data/
+
+# Environment / secrets
+.env
+*.local
+
+# Frontend
+web/node_modules/
+web/dist/
+web/.rsbuild/
+
+# Go
+vendor/
+
+# Acceptance artifacts
+.artifacts/
+
+# Logs
+*.log

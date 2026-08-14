@@ -1,0 +1,46 @@
+# TokenRouter Docker Compose.
+# Quick start: docker compose up -d  then open http://localhost:3000
+# IMPORTANT: change all default passwords before deploying to production.
+
+services:
+  tokenrouter:
+    image: tokenrouter/tokenrouter:latest
+    container_name: tokenrouter
+    restart: always
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./data:/data
+    environment:
+      - SQL_DSN=postgresql://tokenrouter:change-me@postgres:5432/tokenrouter
+      - REDIS_CONN_STRING=redis://:change-me@redis:6379
+      - SESSION_SECRET=change-me-to-a-random-string
+      - TZ=Asia/Shanghai
+    depends_on:
+      - redis
+      - postgres
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://localhost:3000/api/status | grep -o '\"success\":[[:space:]]*true' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  redis:
+    image: redis:7
+    container_name: tokenrouter-redis
+    restart: always
+    command: ["redis-server", "--requirepass", "change-me"]
+
+  postgres:
+    image: postgres:15
+    container_name: tokenrouter-postgres
+    restart: always
+    environment:
+      POSTGRES_USER: tokenrouter
+      POSTGRES_PASSWORD: change-me
+      POSTGRES_DB: tokenrouter
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+
+volumes:
+  pg_data:
