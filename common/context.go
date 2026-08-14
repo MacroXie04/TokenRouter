@@ -4,13 +4,15 @@ import "github.com/gin-gonic/gin"
 
 // Context keys stored on the gin.Context for the duration of a request.
 const (
-	RequestIdKey      = "X-Request-Id"
-	ContextKeyUserId  = "user_id"
-	ContextKeyRole    = "role"
-	ContextKeyTokenId = "token_id"
-	ContextKeyTokenName = "token_name"
-	ContextKeyGroup   = "group"
-	ContextKeyChannelId = "channel_id"
+	RequestIdKey             = "X-Request-Id"
+	ContextKeyUserId         = "user_id"
+	ContextKeyUsername       = "username"
+	ContextKeyRole           = "role"
+	ContextKeyTokenId        = "token_id"
+	ContextKeyTokenName      = "token_name"
+	ContextKeyGroup          = "group"
+	ContextKeyToken          = "token"
+	ContextKeyChannelId      = "channel_id"
 	ContextKeyIsAdminRequest = "is_admin_request"
 )
 
@@ -27,6 +29,21 @@ func GetUserId(c *gin.Context) int {
 		}
 	}
 	return 0
+}
+
+// SetUsername stores the authenticated username on the context.
+func SetUsername(c *gin.Context, username string) {
+	c.Set(ContextKeyUsername, username)
+}
+
+// GetUsername returns the authenticated username ("" if absent).
+func GetUsername(c *gin.Context) string {
+	if v, ok := c.Get(ContextKeyUsername); ok {
+		if s, ok := v.(string); ok {
+			return s
+		}
+	}
+	return ""
 }
 
 // SetRole stores the user role on the context.

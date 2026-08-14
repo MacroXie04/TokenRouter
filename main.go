@@ -48,10 +48,15 @@ func main() {
 	if err := service.InitCasbin(); err != nil {
 		common.SysError("failed to init authorization engine: " + err.Error())
 	}
+	if err := service.InitPermissionAuthz(); err != nil {
+		common.SysError("failed to init permission engine: " + err.Error())
+	}
 	if err := service.InitWebAuthn(); err != nil {
 		common.SysError("failed to init WebAuthn: " + err.Error())
 	}
-	loadPricing()
+	if err := service.ReloadPricingOptions(); err != nil {
+		common.SysError("failed to load pricing options: " + err.Error())
+	}
 	if err := service.RegisterSystemInstance(); err != nil {
 		common.SysError("failed to register system instance: " + err.Error())
 	}
@@ -90,22 +95,6 @@ func main() {
 	common.SysLog("shutdown complete")
 }
 
-// loadPricing loads model prices and group ratios from options into memory.
-func loadPricing() {
-	if raw := setting.GetOption("ModelPrice"); raw != "" {
-		var prices map[string]service.ModelPrice
-		if err := common.UnmarshalJsonStr(raw, &prices); err == nil {
-			service.SetModelPriceRegistry(prices)
-		}
-	}
-	if raw := setting.GetOption("GroupRatio"); raw != "" {
-		var ratios map[string]float64
-		if err := common.UnmarshalJsonStr(raw, &ratios); err == nil {
-			service.SetGroupRatios(ratios)
-		}
-	}
-}
-
 // serveEmbedded serves the embedded frontend, falling back to index.html for
 // client-side routes, and injects analytics (Google Analytics / Umami) into the
 // served index.html.
@@ -118,6 +107,12 @@ func serveEmbedded(r *gin.Engine) {
 	fileServer := http.FileServer(http.FS(dist))
 	r.NoRoute(func(c *gin.Context) {
 		path := c.Request.URL.Path
+		// Relay/dashboard/api paths never fall back to the SPA: unknown
+		// endpoints under these prefixes return the structured RelayNotFound.
+		if strings.HasPrefix(path, "/v1") || strings.HasPrefix(path, "/api") || strings.HasPrefix(path, "/assets") {
+			controller.RelayNotFound(c)
+			return
+		}
 		if path != "/" && fileExists(dist, path) {
 			fileServer.ServeHTTP(c.Writer, c.Request)
 			return
