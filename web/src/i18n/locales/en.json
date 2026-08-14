@@ -43,5 +43,17 @@
   "Add channel": "Add channel",
   "Delete": "Delete",
   "Redemption codes": "Redemption codes",
-  "Create": "Create"
+  "Create": "Create",
+  "Continue with WeChat": "Continue with WeChat",
+  "WeChat login": "WeChat login",
+  "Scan the QR code with WeChat, then enter the code you receive.": "Scan the QR code with WeChat, then enter the code you receive.",
+  "Authorization code": "Authorization code",
+  "Authorize": "Authorize",
+  "Close": "Close",
+  "Bind WeChat": "Bind WeChat",
+  "Bind": "Bind",
+  "WeChat bound ✓": "WeChat bound ✓",
+  "External sign-in failed. Please try again.": "External sign-in failed. Please try again.",
+  "Linked accounts": "Linked accounts",
+  "Unbind": "Unbind"
 }

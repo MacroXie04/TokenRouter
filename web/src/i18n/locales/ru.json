@@ -43,5 +43,17 @@
   "Add channel": "Добавить канал",
   "Delete": "Удалить",
   "Redemption codes": "Промокоды",
-  "Create": "Создать"
+  "Create": "Создать",
+  "Continue with WeChat": "Войти через WeChat",
+  "WeChat login": "Вход через WeChat",
+  "Scan the QR code with WeChat, then enter the code you receive.": "Отсканируйте QR-код в WeChat и введите полученный код.",
+  "Authorization code": "Код авторизации",
+  "Authorize": "Авторизоваться",
+  "Close": "Закрыть",
+  "Bind WeChat": "Привязать WeChat",
+  "Bind": "Привязать",
+  "WeChat bound ✓": "WeChat привязан ✓",
+  "External sign-in failed. Please try again.": "Внешний вход не выполнен. Попробуйте ещё раз.",
+  "Linked accounts": "Привязанные аккаунты",
+  "Unbind": "Отвязать"
 }

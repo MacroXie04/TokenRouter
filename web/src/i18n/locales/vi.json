@@ -43,5 +43,17 @@
   "Add channel": "Thêm kênh",
   "Delete": "Xóa",
   "Redemption codes": "Mã đổi thưởng",
-  "Create": "Tạo"
+  "Create": "Tạo",
+  "Continue with WeChat": "Tiếp tục với WeChat",
+  "WeChat login": "Đăng nhập WeChat",
+  "Scan the QR code with WeChat, then enter the code you receive.": "Quét mã QR bằng WeChat, sau đó nhập mã bạn nhận được.",
+  "Authorization code": "Mã xác thực",
+  "Authorize": "Xác thực",
+  "Close": "Đóng",
+  "Bind WeChat": "Liên kết WeChat",
+  "Bind": "Liên kết",
+  "WeChat bound ✓": "Đã liên kết WeChat ✓",
+  "External sign-in failed. Please try again.": "Đăng nhập ngoài thất bại. Vui lòng thử lại.",
+  "Linked accounts": "Tài khoản đã liên kết",
+  "Unbind": "Hủy liên kết"
 }

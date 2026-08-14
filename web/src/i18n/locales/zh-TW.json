@@ -43,5 +43,17 @@
   "Add channel": "新增渠道",
   "Delete": "刪除",
   "Redemption codes": "兌換碼",
-  "Create": "建立"
+  "Create": "建立",
+  "Continue with WeChat": "使用微信登入",
+  "WeChat login": "微信登入",
+  "Scan the QR code with WeChat, then enter the code you receive.": "使用微信掃描QR碼，然後輸入收到的驗證碼。",
+  "Authorization code": "驗證碼",
+  "Authorize": "授權",
+  "Close": "關閉",
+  "Bind WeChat": "綁定微信",
+  "Bind": "綁定",
+  "WeChat bound ✓": "微信綁定成功 ✓",
+  "External sign-in failed. Please try again.": "外部登入失敗，請重試。",
+  "Linked accounts": "已連結帳號",
+  "Unbind": "解除綁定"
 }

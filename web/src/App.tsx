@@ -89,7 +89,7 @@ export default function App() {
     <>
       <div className="langbar"><LanguageSwitcher /></div>
       {isAdmin
-        ? <AdminConsole onLogout={() => { setUser(null); setView('login'); }} />
+        ? <AdminConsole user={user!} onLogout={() => { setUser(null); setView('login'); }} />
         : <ConsoleView user={user} onLogout={() => { setUser(null); setView('login'); }} />}
     </>
   );

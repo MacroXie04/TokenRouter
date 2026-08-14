@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { api, getData, postData, type User } from '../api';
+import { api, getData, postData, putData, type ApiResponse, type User } from '../api';
 import { SETTINGS_GROUPS } from '../lib/settings-groups';
 
 interface Channel {
@@ -22,6 +22,13 @@ interface DashboardStats {
 interface Option {
   key: string;
   value: string;
+}
+
+interface PaymentComplianceStatus {
+  confirmed: boolean;
+  terms_version: string;
+  confirmed_at: number;
+  confirmed_by: number;
 }
 
 interface LogRow {
@@ -73,9 +80,29 @@ interface Instance {
   last_seen_at: number;
 }
 
-type Tab = 'overview' | 'channels' | 'abilities' | 'users' | 'tokens' | 'models' | 'plans' | 'options' | 'logs' | 'redemptions';
+interface AffinityCacheStats {
+  enabled: boolean;
+  total: number;
+  unknown: number;
+  by_rule_name: Record<string, number>;
+  cache_capacity: number;
+  cache_algo: string;
+}
 
-export function AdminConsole({ onLogout }: { onLogout: () => void }) {
+interface PrefillGroup {
+  id: number;
+  name: string;
+  type: string;
+  items: unknown;
+  description?: string;
+  created_time: number;
+  updated_time: number;
+}
+
+type Tab = 'overview' | 'channels' | 'abilities' | 'users' | 'tokens' | 'models' | 'prefill' | 'plans' | 'options' | 'logs' | 'redemptions';
+
+export function AdminConsole({ user, onLogout }: { user: User; onLogout: () => void }) {
+  const isRoot = user.role >= 100;
   const [tab, setTab] = useState<Tab>('overview');
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [channels, setChannels] = useState<Channel[]>([]);
@@ -114,13 +141,13 @@ export function AdminConsole({ onLogout }: { onLogout: () => void }) {
   const refresh = useCallback(async () => {
     try {
       const [s, c, u, o, l, a, pl, tk, md, ins] = await Promise.all([
-        getData<DashboardStats>('/data'),
+        getData<DashboardStats>('/dashboard/stats'),
         getData<{ items: Channel[] }>('/channel').then((r) => r.items),
         getData<{ items: User[] }>('/user').then((r) => r.items),
-        getData<Option[]>('/option'),
+        isRoot ? getData<Option[]>('/option/') : Promise.resolve([] as Option[]),
         getData<{ items: LogRow[] }>('/log', { page: 1, page_size: 50 }).then((r) => r.items),
         getData<Ability[]>('/ability'),
-        getData<Plan[]>('/subscription/plans'),
+        getData<{ plan: Plan }[]>('/subscription/admin/plans').then((rows) => rows.map((r) => r.plan)),
         getData<{ items: TokenRow[] }>('/token').then((r) => r.items),
         getData<ModelRow[]>('/models'),
         getData<Instance[]>('/instance'),
@@ -138,7 +165,7 @@ export function AdminConsole({ onLogout }: { onLogout: () => void }) {
     } catch {
       /* ignore */
     }
-  }, []);
+  }, [isRoot]);
 
   useEffect(() => {
     refresh();
@@ -218,7 +245,9 @@ export function AdminConsole({ onLogout }: { onLogout: () => void }) {
       </header>
 
       <nav className="tabs">
-        {(['overview', 'channels', 'abilities', 'users', 'tokens', 'models', 'plans', 'options', 'logs', 'redemptions'] as Tab[]).map((t) => (
+        {(['overview', 'channels', 'abilities', 'users', 'tokens', 'models', 'prefill', 'plans', 'options', 'logs', 'redemptions'] as Tab[])
+          .filter((t) => t !== 'options' || isRoot)
+          .map((t) => (
           <button key={t} className={tab === t ? 'tab active' : 'tab'} onClick={() => setTab(t)}>
             {t[0].toUpperCase() + t.slice(1)}
           </button>
@@ -350,6 +379,8 @@ export function AdminConsole({ onLogout }: { onLogout: () => void }) {
         </section>
       )}
 
+      {tab === 'prefill' && <PrefillGroupPanel />}
+
       {tab === 'plans' && (
         <section className="card">
           <h2>Subscription plans</h2>
@@ -372,9 +403,12 @@ export function AdminConsole({ onLogout }: { onLogout: () => void }) {
         </section>
       )}
 
-      {tab === 'options' && (
+      {tab === 'options' && isRoot && (
         <section className="card">
           <h2>Settings</h2>
+          <PaymentCompliancePanel options={options} onConfirmed={refresh} />
+          <PricingResetPanel onReset={refresh} />
+          <AffinityCachePanel />
           <NewOptionForm onSaved={refresh} />
           {SETTINGS_GROUPS.map((g) => (
             <div key={g.name} style={{ marginBottom: '0.9rem' }}>
@@ -387,6 +421,7 @@ export function AdminConsole({ onLogout }: { onLogout: () => void }) {
           ))}
           <h3 style={{ fontSize: '0.95rem', margin: '0 0 0.4rem' }}>Other</h3>
           {options
+            .filter((o) => !o.key.startsWith('payment_setting.compliance_'))
             .filter((o) => !SETTINGS_GROUPS.some((g) => g.settings.some((s) => s.key === o.key)))
             .map((o) => <OptionRow key={o.key} option={o} onSaved={refresh} />)}
         </section>
@@ -422,21 +457,304 @@ export function AdminConsole({ onLogout }: { onLogout: () => void }) {
   );
 }
 
-function OptionRow({ option, onSaved, label }: { option: Option; onSaved: () => void; label?: string }) {
-  const [value, setValue] = useState(option.value);
-  async function save() {
+function PrefillGroupPanel() {
+  const [groups, setGroups] = useState<PrefillGroup[]>([]);
+  const [filter, setFilter] = useState('');
+  const [editingId, setEditingId] = useState<number | null>(null);
+  const [name, setName] = useState('');
+  const [type, setType] = useState('model');
+  const [items, setItems] = useState('');
+  const [description, setDescription] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState('');
+
+  const refreshGroups = useCallback(async () => {
     try {
-      await api.put('/option', { [option.key]: value });
-      onSaved();
-    } catch {
-      /* ignore */
+      setGroups(await getData<PrefillGroup[]>('/prefill_group/', filter ? { type: filter } : undefined));
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : 'Could not load prefill groups');
+    }
+  }, [filter]);
+
+  useEffect(() => { void refreshGroups(); }, [refreshGroups]);
+
+  function resetForm() {
+    setEditingId(null);
+    setName('');
+    setType('model');
+    setItems('');
+    setDescription('');
+  }
+
+  function editGroup(group: PrefillGroup) {
+    setEditingId(group.id);
+    setName(group.name);
+    setType(group.type);
+    setDescription(group.description ?? '');
+    if (typeof group.items === 'string') setItems(group.items);
+    else if (Array.isArray(group.items)) setItems(group.items.join('\n'));
+    else setItems(JSON.stringify(group.items ?? {}, null, 2));
+    setMessage('');
+  }
+
+  async function saveGroup(event: React.FormEvent) {
+    event.preventDefault();
+    if (busy) return;
+    let payloadItems: string | string[];
+    if (type === 'endpoint') {
+      try {
+        JSON.parse(items || '{}');
+      } catch {
+        setMessage('Endpoint items must contain valid JSON.');
+        return;
+      }
+      payloadItems = items || '{}';
+    } else {
+      payloadItems = items.split(/[\n,]/).map((item) => item.trim()).filter(Boolean);
+    }
+    setBusy(true);
+    setMessage('');
+    try {
+      const payload = { id: editingId ?? undefined, name, type, items: payloadItems, description };
+      if (editingId) await putData<PrefillGroup>('/prefill_group/', payload);
+      else await postData<PrefillGroup>('/prefill_group/', payload);
+      setMessage(editingId ? 'Prefill group updated.' : 'Prefill group created.');
+      resetForm();
+      await refreshGroups();
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : 'Could not save prefill group');
+    } finally {
+      setBusy(false);
     }
   }
+
+  async function deleteGroup(group: PrefillGroup) {
+    if (busy || !window.confirm(`Delete prefill group “${group.name}”?`)) return;
+    setBusy(true);
+    setMessage('');
+    try {
+      const response = await api.delete<ApiResponse<null>>(`/prefill_group/${group.id}`);
+      if (!response.data.success) throw new Error(response.data.message || 'Delete failed');
+      if (editingId === group.id) resetForm();
+      setMessage('Prefill group deleted.');
+      await refreshGroups();
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : 'Could not delete prefill group');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="card">
+      <h2>Prefill groups</h2>
+      <p className="muted">Manage reusable model, tag, and endpoint sets used by channel forms.</p>
+      <label>
+        Filter by type
+        <select value={filter} onChange={(event) => setFilter(event.target.value)}>
+          <option value="">All types</option>
+          <option value="model">Model</option>
+          <option value="tag">Tag</option>
+          <option value="endpoint">Endpoint</option>
+        </select>
+      </label>
+      <form className="grid-form" onSubmit={saveGroup}>
+        <label>Name<input value={name} maxLength={64} onChange={(event) => setName(event.target.value)} required /></label>
+        <label>Type
+          <select value={type} onChange={(event) => setType(event.target.value)}>
+            <option value="model">Model</option>
+            <option value="tag">Tag</option>
+            <option value="endpoint">Endpoint</option>
+          </select>
+        </label>
+        <label>Description<input value={description} maxLength={255} onChange={(event) => setDescription(event.target.value)} /></label>
+        <label>
+          {type === 'endpoint' ? 'Endpoint JSON' : 'Items (one per line or comma-separated)'}
+          <textarea rows={6} value={items} onChange={(event) => setItems(event.target.value)} />
+        </label>
+        <div className="inline-form">
+          <button type="submit" disabled={busy}>{busy ? 'Saving…' : editingId ? 'Update group' : 'Create group'}</button>
+          {editingId && <button type="button" className="link" disabled={busy} onClick={resetForm}>Cancel edit</button>}
+        </div>
+      </form>
+      {message && <p className={message.includes('created') || message.includes('updated') || message.includes('deleted') ? 'success' : 'error'}>{message}</p>}
+      {groups.length === 0 ? <p className="muted">No prefill groups.</p> : (
+        <ul className="key-list">
+          {groups.map((group) => (
+            <li key={group.id}>
+              <strong>{group.name}</strong>
+              <span className="muted">{group.type}</span>
+              <span className="muted">{group.description || 'No description'}</span>
+              <button type="button" className="link" disabled={busy} onClick={() => editGroup(group)}>Edit</button>
+              <button type="button" className="link" disabled={busy} onClick={() => void deleteGroup(group)}>Delete</button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+function PricingResetPanel({ onReset }: { onReset: () => Promise<void> | void }) {
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState('');
+
+  async function resetPricing() {
+    if (busy || !window.confirm('Reset all model prices to the built-in TokenRouter defaults?')) return;
+    setBusy(true);
+    setMessage('');
+    try {
+      await postData<void>('/option/rest_model_ratio');
+      setMessage('Model pricing defaults restored.');
+      await onReset();
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : 'Pricing reset failed');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div style={{ border: '1px solid var(--border)', borderRadius: '0.65rem', padding: '0.8rem', marginBottom: '1rem' }}>
+      <h3 style={{ margin: '0 0 0.4rem' }}>Model pricing</h3>
+      <p className="muted">Restore the built-in USD-per-million model prices and apply them to live billing immediately.</p>
+      <button type="button" disabled={busy} onClick={resetPricing}>{busy ? 'Resetting…' : 'Reset model pricing'}</button>
+      {message && <p className={message.startsWith('Model pricing') ? 'success' : 'error'}>{message}</p>}
+    </div>
+  );
+}
+
+function AffinityCachePanel() {
+  const [stats, setStats] = useState<AffinityCacheStats | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState('');
+
+  const refreshStats = useCallback(async () => {
+    try {
+      setStats(await getData<AffinityCacheStats>('/option/channel_affinity_cache'));
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : 'Could not load affinity cache');
+    }
+  }, []);
+
+  useEffect(() => { void refreshStats(); }, [refreshStats]);
+
+  async function clearCache(ruleName?: string) {
+    const target = ruleName ? `entries for rule “${ruleName}”` : 'all channel-affinity entries';
+    if (busy || !window.confirm(`Clear ${target}?`)) return;
+    setBusy(true);
+    setMessage('');
+    try {
+      const response = await api.delete<ApiResponse<{ deleted: number }>>('/option/channel_affinity_cache', {
+        params: ruleName ? { rule_name: ruleName } : { all: true },
+      });
+      if (!response.data.success) throw new Error(response.data.message || 'Cache clear failed');
+      setMessage(`Cleared ${response.data.data.deleted} affinity cache entries.`);
+      await refreshStats();
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : 'Cache clear failed');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div style={{ border: '1px solid var(--border)', borderRadius: '0.65rem', padding: '0.8rem', marginBottom: '1rem' }}>
+      <h3 style={{ margin: '0 0 0.4rem' }}>Channel affinity cache</h3>
+      <p className="muted">Inspect live rule-based routing entries. Cache keys use fingerprints; raw affinity values are not exposed.</p>
+      {stats && (
+        <>
+          <p className="muted">
+            {stats.enabled ? 'Enabled' : 'Disabled'} · {stats.total} / {stats.cache_capacity} entries · {stats.cache_algo}
+            {stats.unknown > 0 ? ` · ${stats.unknown} unknown` : ''}
+          </p>
+          {Object.entries(stats.by_rule_name).map(([rule, count]) => (
+            <div key={rule} className="inline-form" style={{ marginBottom: '0.35rem' }}>
+              <span>{rule}: {count}</span>
+              <button type="button" disabled={busy || count === 0} onClick={() => void clearCache(rule)}>Clear rule</button>
+            </div>
+          ))}
+        </>
+      )}
+      <button type="button" disabled={busy || !stats || stats.total === 0} onClick={() => void clearCache()}>
+        {busy ? 'Clearing…' : 'Clear all affinity entries'}
+      </button>
+      {message && <p className={message.startsWith('Cleared') ? 'success' : 'error'}>{message}</p>}
+    </div>
+  );
+}
+
+function PaymentCompliancePanel({ options, onConfirmed }: { options: Option[]; onConfirmed: () => Promise<void> | void }) {
+  const [accepted, setAccepted] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState('');
+  const confirmed = options.find((o) => o.key === 'payment_setting.compliance_confirmed')?.value === 'true';
+  const termsVersion = options.find((o) => o.key === 'payment_setting.compliance_terms_version')?.value ?? '';
+  const confirmedAt = Number(options.find((o) => o.key === 'payment_setting.compliance_confirmed_at')?.value ?? 0);
+  const current = confirmed && termsVersion === 'v1';
+
+  async function confirmCompliance() {
+    if (!accepted || busy) return;
+    setBusy(true);
+    setMessage('');
+    try {
+      const status = await postData<PaymentComplianceStatus>('/option/payment_compliance', { confirmed: true });
+      setMessage(`Confirmed terms ${status.terms_version}.`);
+      setAccepted(false);
+      await onConfirmed();
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : 'Confirmation failed');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div style={{ border: '1px solid var(--border)', borderRadius: '0.65rem', padding: '0.8rem', marginBottom: '1rem' }}>
+      <h3 style={{ margin: '0 0 0.4rem' }}>Payment compliance</h3>
+      <p className="muted">
+        {current
+          ? `Current terms ${termsVersion} confirmed${confirmedAt ? ` on ${new Date(confirmedAt * 1000).toLocaleString()}` : ''}.`
+          : 'Payment, redemption, subscriptions, and affiliate rewards remain disabled until the current terms are confirmed.'}
+      </p>
+      <label>
+        <input type="checkbox" checked={accepted} onChange={(e) => setAccepted(e.target.checked)} />
+        I confirm the current payment compliance statement and accept responsibility for enabling payment-related features.
+      </label>
+      <div><button type="button" disabled={!accepted || busy} onClick={confirmCompliance}>{busy ? 'Confirming…' : 'Confirm compliance'}</button></div>
+      {message && <p className={message.startsWith('Confirmed') ? 'success' : 'error'}>{message}</p>}
+    </div>
+  );
+}
+
+function OptionRow({ option, onSaved, label }: { option: Option; onSaved: () => void; label?: string }) {
+  const [value, setValue] = useState(option.value);
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState('');
+  useEffect(() => setValue(option.value), [option.value]);
+
+  async function save() {
+    setBusy(true);
+    setMessage('');
+    try {
+      await putData('/option/', { key: option.key, value });
+      setMessage('Saved.');
+      onSaved();
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : 'Save failed');
+    } finally {
+      setBusy(false);
+    }
+  }
+  const isRulesJSON = option.key === 'channel_affinity_setting.rules';
   return (
     <div className="option-row">
       <strong>{label ?? option.key}</strong>
-      <input value={value} onChange={(e) => setValue(e.target.value)} />
-      <button className="link" onClick={save}>Save</button>
+      {isRulesJSON
+        ? <textarea rows={8} value={value} onChange={(e) => setValue(e.target.value)} aria-label={label ?? option.key} />
+        : <input value={value} onChange={(e) => setValue(e.target.value)} />}
+      <button className="link" disabled={busy} onClick={save}>{busy ? 'Saving…' : 'Save'}</button>
+      {message && <span className={message === 'Saved.' ? 'success' : 'error'}>{message}</span>}
     </div>
   );
 }
@@ -447,7 +765,7 @@ function NewOptionForm({ onSaved }: { onSaved: () => void }) {
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     try {
-      await api.put('/option', { [key]: value });
+      await putData('/option/', { key, value });
       setKey(''); setValue('');
       onSaved();
     } catch {

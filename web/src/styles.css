@@ -72,7 +72,9 @@ label {
   color: var(--muted);
 }
 
-input {
+input,
+textarea,
+select {
   display: block;
   width: 100%;
   margin-top: 0.35rem;
@@ -82,6 +84,10 @@ input {
   background: rgba(0, 0, 0, 0.2);
   color: var(--text);
   font: inherit;
+}
+
+textarea {
+  resize: vertical;
 }
 
 button {
@@ -260,8 +266,43 @@ button.link {
   font-size: 0.85rem;
 }
 
-.option-row input {
+.option-row input,
+.option-row textarea {
   flex: 1;
   margin-top: 0;
   padding: 0.35rem 0.5rem;
+}
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+
+.modal {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 1.25rem;
+  width: min(24rem, 92vw);
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.modal img {
+  align-self: center;
+  max-width: 12rem;
+  max-height: 12rem;
+  border-radius: 8px;
+}
+
+.modal-actions {
+  display: flex;
+  gap: 0.5rem;
+  justify-content: flex-end;
 }

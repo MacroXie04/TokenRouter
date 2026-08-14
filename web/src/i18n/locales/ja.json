@@ -43,5 +43,17 @@
   "Add channel": "チャネルを追加",
   "Delete": "削除",
   "Redemption codes": "引き換えコード",
-  "Create": "作成"
+  "Create": "作成",
+  "Continue with WeChat": "WeChatで続行",
+  "WeChat login": "WeChatログイン",
+  "Scan the QR code with WeChat, then enter the code you receive.": "WeChatでQRコードをスキャンし、受信したコードを入力してください。",
+  "Authorization code": "認証コード",
+  "Authorize": "認証",
+  "Close": "閉じる",
+  "Bind WeChat": "WeChatを連携",
+  "Bind": "連携",
+  "WeChat bound ✓": "WeChat連携完了 ✓",
+  "External sign-in failed. Please try again.": "外部サインインに失敗しました。もう一度お試しください。",
+  "Linked accounts": "連携済みアカウント",
+  "Unbind": "連携解除"
 }

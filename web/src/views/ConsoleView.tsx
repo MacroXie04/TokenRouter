@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { api, getData, postData, type Token, type User } from '../api';
+import { api, getData, postData, putData, type Token, type User } from '../api';
 import { prepareCreationOptions, serializeCredential } from '../lib/webauthn';
 
 interface Plan {
@@ -13,6 +13,34 @@ interface Plan {
   duration_value: number;
 }
 
+interface SubscriptionRow {
+  subscription: {
+    id: number;
+    plan_id: number;
+    amount_total: number;
+    amount_used: number;
+    end_time: number;
+    status: string;
+    allow_wallet_overflow: boolean;
+  };
+}
+
+interface SubscriptionSelf {
+  billing_preference: string;
+  subscriptions: SubscriptionRow[];
+  all_subscriptions: SubscriptionRow[];
+}
+
+const BILLING_PREFERENCES = ['subscription_first', 'wallet_first', 'subscription_only', 'wallet_only'];
+
+interface OAuthBinding {
+  provider_id: number;
+  provider_name: string;
+  provider_slug: string;
+  provider_icon: string;
+  provider_user_id: string;
+}
+
 export function ConsoleView({ user, onLogout }: { user: User | null; onLogout: () => void }) {
   const { t } = useTranslation();
   const [tokens, setTokens] = useState<Token[]>([]);
@@ -21,6 +49,7 @@ export function ConsoleView({ user, onLogout }: { user: User | null; onLogout: (
   const [checkinMsg, setCheckinMsg] = useState('');
   const [redeemKey, setRedeemKey] = useState('');
   const [plans, setPlans] = useState<Plan[]>([]);
+  const [subSelf, setSubSelf] = useState<SubscriptionSelf | null>(null);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
 
@@ -36,11 +65,19 @@ export function ConsoleView({ user, onLogout }: { user: User | null; onLogout: (
   const [profileOld, setProfileOld] = useState('');
   const [profilePass, setProfilePass] = useState('');
 
+  // WeChat bind state.
+  const [wechatEnabled, setWechatEnabled] = useState(false);
+  const [wechatQrcode, setWechatQrcode] = useState('');
+  const [wechatCode, setWechatCode] = useState('');
+
   // Login sessions.
   const [sessions, setSessions] = useState<{ sid: string; ip: string; user_agent: string; created_at: string; status: string }[]>([]);
 
   // Passkey state.
   const [passkeyEnabled, setPasskeyEnabled] = useState(false);
+
+  // Custom OAuth bindings.
+  const [oauthBindings, setOauthBindings] = useState<OAuthBinding[]>([]);
 
   // Playground state.
   const [playModel, setPlayModel] = useState('gpt-4');
@@ -50,7 +87,16 @@ export function ConsoleView({ user, onLogout }: { user: User | null; onLogout: (
 
   const refreshTokens = useCallback(async () => {
     try {
-      setTokens(await getData<Token[]>('/user/token'));
+      const page = await getData<{ items: Token[] }>('/token/');
+      setTokens(page.items);
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  const refreshSubscriptions = useCallback(async () => {
+    try {
+      setSubSelf(await getData<SubscriptionSelf>('/subscription/self'));
     } catch {
       /* ignore */
     }
@@ -58,17 +104,24 @@ export function ConsoleView({ user, onLogout }: { user: User | null; onLogout: (
 
   useEffect(() => {
     refreshTokens();
-    getData<Plan[]>('/subscription/plans').then(setPlans).catch(() => {});
+    refreshSubscriptions();
+    getData<{ plan: Plan }[]>('/subscription/plans')
+      .then((rows) => setPlans(rows.map((r) => r.plan)))
+      .catch(() => {});
     getData<{ enabled: boolean }>('/user/2fa/status').then((r) => setTwofaEnabled(r.enabled)).catch(() => {});
     getData<{ sid: string; ip: string; user_agent: string; created_at: string; status: string }[]>('/user/sessions').then(setSessions).catch(() => {});
     getData<{ enabled: boolean }>('/user/passkey/status').then((r) => setPasskeyEnabled(r.enabled)).catch(() => {});
-  }, [refreshTokens]);
+    getData<OAuthBinding[]>('/user/oauth/bindings').then(setOauthBindings).catch(() => {});
+    getData<{ wechat_login: boolean; wechat_qrcode: string }>('/status')
+      .then((s) => { setWechatEnabled(s.wechat_login); setWechatQrcode(s.wechat_qrcode); })
+      .catch(() => {});
+  }, [refreshTokens, refreshSubscriptions]);
 
   async function createToken(e: React.FormEvent) {
     e.preventDefault();
     setError('');
     try {
-      await postData<Token>('/user/token', { name: tokenName || 'default' });
+      await postData<Token>('/token/', { name: tokenName || 'default' });
       setTokenName('');
       await refreshTokens();
     } catch (err) {
@@ -112,8 +165,19 @@ export function ConsoleView({ user, onLogout }: { user: User | null; onLogout: (
   async function purchasePlan(planId: number) {
     setError('');
     try {
-      await postData('/user/subscription/purchase', { plan_id: planId });
+      await postData('/subscription/balance/pay', { plan_id: planId });
       setMessage('订阅成功 ✓');
+      await refreshSubscriptions();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Error');
+    }
+  }
+
+  async function changeBillingPreference(pref: string) {
+    setError('');
+    try {
+      const res = await putData<{ billing_preference: string }>('/subscription/self/preference', { billing_preference: pref });
+      setSubSelf((prev) => (prev ? { ...prev, billing_preference: res.billing_preference } : prev));
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Error');
     }
@@ -168,6 +232,28 @@ export function ConsoleView({ user, onLogout }: { user: User | null; onLogout: (
       await api.put('/user/self', payload);
       setProfilePass(''); setProfileOld('');
       setMessage('Profile updated ✓');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Error');
+    }
+  }
+
+  async function bindWeChat(e: React.FormEvent) {
+    e.preventDefault();
+    setError('');
+    try {
+      await postData('/oauth/wechat/bind', { code: wechatCode });
+      setWechatCode('');
+      setMessage(t('WeChat bound ✓'));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Error');
+    }
+  }
+
+  async function unbindOAuth(providerId: number) {
+    setError('');
+    try {
+      await api.delete(`/user/oauth/bindings/${providerId}`);
+      setOauthBindings((prev) => prev.filter((b) => b.provider_id !== providerId));
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Error');
     }
@@ -270,6 +356,16 @@ export function ConsoleView({ user, onLogout }: { user: User | null; onLogout: (
           <label>New password<input type="password" value={profilePass} onChange={(e) => setProfilePass(e.target.value)} /></label>
           <button type="submit">Save</button>
         </form>
+        {wechatEnabled && (
+          <form className="inline-form" onSubmit={bindWeChat} style={{ marginTop: '0.75rem' }}>
+            {wechatQrcode && <img src={wechatQrcode} alt={t('Bind WeChat')} style={{ width: '7rem', height: '7rem', borderRadius: 8 }} />}
+            <label>
+              {t('Bind WeChat')}
+              <input value={wechatCode} onChange={(e) => setWechatCode(e.target.value)} placeholder={t('Authorization code')} required />
+            </label>
+            <button type="submit">{t('Bind')}</button>
+          </form>
+        )}
       </section>
 
       <section className="card">
@@ -303,9 +399,37 @@ export function ConsoleView({ user, onLogout }: { user: User | null; onLogout: (
         {message && <p className="muted">{message}</p>}
       </section>
 
-      {plans.length > 0 && (
+      {(plans.length > 0 || (subSelf?.subscriptions.length ?? 0) > 0) && (
         <section className="card">
           <h2>Subscriptions</h2>
+          {(subSelf?.subscriptions.length ?? 0) > 0 && (
+            <ul className="key-list">
+              {subSelf!.subscriptions.map((row) => (
+                <li key={row.subscription.id}>
+                  <strong>#{row.subscription.id}</strong>
+                  <span className="muted">
+                    {row.subscription.amount_total > 0
+                      ? `${row.subscription.amount_used} / ${row.subscription.amount_total} quota`
+                      : 'unlimited quota'}
+                  </span>
+                  <span className="muted">until {new Date(row.subscription.end_time * 1000).toLocaleDateString()}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+          {subSelf && (
+            <label>
+              Billing preference
+              <select
+                value={subSelf.billing_preference}
+                onChange={(e) => changeBillingPreference(e.target.value)}
+              >
+                {BILLING_PREFERENCES.map((p) => (
+                  <option key={p} value={p}>{p}</option>
+                ))}
+              </select>
+            </label>
+          )}
           <ul className="key-list">
             {plans.map((p) => (
               <li key={p.id}>
@@ -352,6 +476,22 @@ export function ConsoleView({ user, onLogout }: { user: User | null; onLogout: (
         </p>
         {!passkeyEnabled && <button className="link" onClick={registerPasskey}>Register passkey</button>}
       </section>
+
+      {oauthBindings.length > 0 && (
+        <section className="card">
+          <h2>{t('Linked accounts')}</h2>
+          <ul className="key-list">
+            {oauthBindings.map((b) => (
+              <li key={b.provider_id}>
+                {b.provider_icon && <img src={b.provider_icon} alt="" style={{ width: '1rem', height: '1rem' }} />}
+                <strong>{b.provider_name}</strong>
+                <span className="muted">{b.provider_user_id}</span>
+                <button className="link" onClick={() => unbindOAuth(b.provider_id)}>{t('Unbind')}</button>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
 
       <section className="card">
         <h2>Login sessions</h2>

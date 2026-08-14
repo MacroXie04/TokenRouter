@@ -13,10 +13,19 @@ interface Price {
   completion: number;
 }
 
+interface PerfSummary {
+  model_name: string;
+  avg_latency_ms: number;
+  success_rate: number;
+  avg_tps: number;
+  recent_success_rates?: number[];
+}
+
 export function HomeView({ onSignIn }: { onSignIn: () => void }) {
   const { t } = useTranslation();
   const [rankings, setRankings] = useState<Rank[]>([]);
   const [prices, setPrices] = useState<Record<string, Price>>({});
+  const [performance, setPerformance] = useState<PerfSummary[]>([]);
   const [about, setAbout] = useState('');
   const [agreement, setAgreement] = useState('');
   const [privacy, setPrivacy] = useState('');
@@ -25,6 +34,9 @@ export function HomeView({ onSignIn }: { onSignIn: () => void }) {
     getData<Rank[]>('/rankings').then(setRankings).catch(() => {});
     getData<{ model_prices: Record<string, Price> }>('/ratio_config')
       .then((r) => setPrices(r.model_prices ?? {}))
+      .catch(() => {});
+    getData<{ models: PerfSummary[] }>('/perf-metrics/summary')
+      .then((r) => setPerformance(r.models ?? []))
       .catch(() => {});
     getData<{ about?: string }>('/about').then((r) => setAbout(r.about ?? '')).catch(() => {});
     getData<string>('/user-agreement').then(setAgreement).catch(() => {});
@@ -59,6 +71,22 @@ export function HomeView({ onSignIn }: { onSignIn: () => void }) {
           </ul>
         )}
       </section>
+
+      {performance.length > 0 && (
+        <section className="card">
+          <h2>Model performance (24h)</h2>
+          <ul className="key-list">
+            {performance.slice(0, 20).map((metric) => (
+              <li key={metric.model_name}>
+                <strong>{metric.model_name}</strong>
+                <span className="muted">{metric.avg_latency_ms} ms average latency</span>
+                <span className="muted">{metric.success_rate.toFixed(2)}% success</span>
+                <span className="muted">{metric.avg_tps.toFixed(2)} tokens/s</span>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
 
       <section className="card">
         <h2>Top models</h2>

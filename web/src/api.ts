@@ -54,3 +54,11 @@ export async function postData<T>(url: string, body?: unknown): Promise<T> {
   }
   return res.data.data;
 }
+
+export async function putData<T>(url: string, body?: unknown): Promise<T> {
+  const res = await api.put<ApiResponse<T>>(url, body);
+  if (!res.data.success) {
+    throw new Error(res.data.message || 'Request failed');
+  }
+  return res.data.data;
+}
