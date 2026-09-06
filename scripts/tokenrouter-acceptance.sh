@@ -160,8 +160,10 @@ log "Backend: go test (all packages)"
 check_logged "go test" "$ARTIFACTS/go-test.log" go test ./...
 
 log "Backend: race tests (all internal packages)"
+# Match CI's bounded allowance for the full router integration package under
+# race instrumentation; the default 10m is insufficient on hosted runners.
 check_logged "race: security+routing+accounting+async" "$ARTIFACTS/go-race.log" \
-  go test -race ./internal/...
+  go test -race -timeout 20m ./internal/...
 
 # ------------------------------------------------------ Independent module
 log "Protocol conversion module (GOWORK=off)"

@@ -191,3 +191,12 @@ strict missing, skipped, failed, duplicate and malformed-event rejection.
 Runner regression coverage is included in both CI and local acceptance. This
 follow-up changes validation scripts, not application behavior; the snapshot
 fingerprint above remains evidence for the original reorganization validation.
+
+The same run reached Go's default ten-minute **whole-package** timeout during
+the router race suite. Its active test had run for only three seconds and the
+log showed continued request/test progress; no data race was reported. CI and
+local acceptance now both give the complete internal race suite a bounded
+twenty-minute per-package timeout. No test selectors, assertions, provider
+timeouts, production configuration, or concurrency checks were removed or
+relaxed. The published CI run remains the source of truth for hosted-runner
+validation, separately from the local snapshot above.

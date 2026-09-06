@@ -84,7 +84,9 @@ jobs:
       - name: Test
         run: go test ./...
       - name: Race tests
-        run: go test -race ./internal/...
+        # The complete router integration package exceeds Go's default 10m
+        # under race instrumentation on hosted runners; retain all tests.
+        run: go test -race -timeout 20m ./internal/...
       - name: Protocol module (standalone)
         run: |
           cd protocolkit
