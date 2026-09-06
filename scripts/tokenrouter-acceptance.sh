@@ -119,6 +119,7 @@ check "Go source formatting" verify_go_format
 check "repository layout verifier self-test" node scripts/verify-repository-layout.mjs --self-test
 check "repository layout and exact test inventory" node scripts/verify-repository-layout.mjs
 check "Go test manifest verifier self-test" node scripts/verify-go-test-manifest.mjs --self-test
+check "Go test manifest runner regression" node scripts/test-go-test-manifest-runner.mjs
 check "repository secret scanner self-test" bash scripts/scan-repository-secrets.sh --self-test
 
 # ---------------------------------------------------------------- Frontend

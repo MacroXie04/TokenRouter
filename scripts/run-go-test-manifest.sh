@@ -55,7 +55,10 @@ cleanup() { rm -f -- "$json_log"; }
 trap cleanup EXIT
 
 set +e
-go test -json -p 1 -count=1 -run "$test_pattern" "${packages[@]}" 2>&1 | tee "$json_log"
+# Go emits dependency downloads and build diagnostics on stderr even with
+# -json. Leave those visible on stderr; only stdout is the test-event stream.
+# Preserve both command statuses so build failures cannot pass verification.
+go test -json -p 1 -count=1 -run "$test_pattern" "${packages[@]}" | tee "$json_log"
 pipeline_status=("${PIPESTATUS[@]}")
 set -e
 go_status="${pipeline_status[0]}"

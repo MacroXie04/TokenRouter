@@ -132,11 +132,11 @@ explicit async/video shapes; and database migration schema families.
 Validation was performed on an uncommitted source snapshot based on the baseline
 named above, not on the assumption that the baseline's acceptance evidence
 transfers to the new layout. Subsequent publication is a separate step.
-The current source and its clean export have the same SHA-256:
+The reorganization validation snapshot and its clean export had the same SHA-256:
 
 `84fcb8c56500efd88a2d7d248ad96ebf0a051fcfd08c66bc6bf9c2778ab2665b`
 
-The fingerprint covers 1,220 current Git-scoped files from
+The fingerprint covers the 1,220 Git-scoped files in that snapshot from
 `scripts/list-source-files.mjs`, excluding `docs/` and root Markdown documents
 so validation narratives can be completed after a run. Files are sorted by path;
 each hash input is UTF-8 path, NUL, decimal byte length, NUL, then file bytes.
@@ -144,7 +144,7 @@ Ignored build outputs, dependency directories, local configuration, binaries and
 run artifacts are not inputs. The clean-export-only verification binary is
 also excluded. Historical fingerprints remain untouched.
 
-| Check | Current result |
+| Check | Reorganization validation result |
 | --- | --- |
 | Source-only clean build | PASS: copied only current non-ignored source into a new temporary directory; verified `.env`, `web/node_modules`, and `web/dist` were absent; installed locked npm dependencies; rebuilt assets; built all root packages and `cmd/tokenrouter` with the new version symbol; independently vetted, built and tested protocolkit. |
 | Exact test inventory | PASS: 2,287 runnable root tests + 23 protocolkit tests; `TestMain` is a lifecycle hook, not a test; all 12 unique CI selectors resolve exactly once; stale/missing/duplicate/legacy-path verifier self-tests pass. |
@@ -169,7 +169,7 @@ The final manifest refinement excludes `TestMain` and shares fail-closed source
 enumeration with formatting/secret scanning. It was rechecked independently
 with its self-tests, the clean source export, and compiled discovery; the initial
 2,288 declaration count included that one lifecycle hook. No runnable test was
-removed. The implementation source is the same snapshot covered by the full
+removed. The implementation source was the same snapshot covered by the full
 acceptance and concurrency run.
 
 Local generated logs are under `.artifacts/reorganization/` (acceptance, clean
@@ -178,3 +178,16 @@ build, preservation audit, external-store event logs and cleanup records) and
 checks cover the reorganized implementation, deterministic mock-provider
 behavior, embedded build and disposable stores; they do not claim live-provider,
 production-data or credential-gated external parity.
+
+## Publication and CI follow-up
+
+The reorganization was published as `6626fdc` after a separate user request.
+Its [first GitHub CI run](https://github.com/MacroXie04/TokenRouter/actions/runs/34009061448)
+exposed a cold-cache test-runner issue: all nine MySQL tests passed, but three
+dependency-download diagnostics were merged into the JSON event log and rejected
+by its strict verifier. The runner now leaves Go diagnostics on stderr and
+verifies only stdout events, while retaining command/pipeline exit checks and
+strict missing, skipped, failed, duplicate and malformed-event rejection.
+Runner regression coverage is included in both CI and local acceptance. This
+follow-up changes validation scripts, not application behavior; the snapshot
+fingerprint above remains evidence for the original reorganization validation.

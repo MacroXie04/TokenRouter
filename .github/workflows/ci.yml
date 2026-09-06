@@ -74,6 +74,7 @@ jobs:
           node scripts/verify-repository-layout.mjs --self-test
           node scripts/verify-repository-layout.mjs
           node scripts/verify-go-test-manifest.mjs --self-test
+          node scripts/test-go-test-manifest-runner.mjs
           bash scripts/scan-repository-secrets.sh --self-test
           bash scripts/scan-repository-secrets.sh
       - name: Vet
@@ -153,7 +154,9 @@ jobs:
         with:
           node-version: "22"
       - name: Exact-test manifest verifier regression
-        run: node scripts/verify-go-test-manifest.mjs --self-test
+        run: |
+          node scripts/verify-go-test-manifest.mjs --self-test
+          node scripts/test-go-test-manifest-runner.mjs
       - name: MySQL migration, accounting, scheduler, retention, outbox, and async-task lifecycle
         env:
           TOKENROUTER_TEST_SQL_DSN: root:tokenrouter-ci@tcp(127.0.0.1:3306)/tokenrouter_ci?charset=utf8mb4&parseTime=True&loc=UTC
