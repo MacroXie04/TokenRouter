@@ -1,4 +1,4 @@
-import { api } from '../../api';
+import { api } from '../../shared/api/client';
 
 const MAX_RESPONSE_BYTES = 512 * 1024;
 const MAX_SAFE_ID = 2_147_483_647;

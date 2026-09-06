@@ -8,9 +8,9 @@ import {
   applyUpstreamUpdates,
   copyChannel,
   createChannel,
-  deleteDisabledChannels,
-  deleteChannels,
   deleteChannel,
+  deleteChannels,
+  deleteDisabledChannels,
   deleteOllamaModel,
   detectAllUpstreamUpdates,
   detectUpstreamUpdates,
@@ -35,10 +35,10 @@ import {
   setChannelsTag,
   setChannelStatus,
   setTagChannelsStatus,
-  testChannel,
   testAllChannels,
-  updateTagChannels,
+  testChannel,
   updateChannel,
+  updateTagChannels,
 } from './channel-api';
 import { ChannelAdminView, type ChannelAdminViewProps } from './ChannelAdminView';
 

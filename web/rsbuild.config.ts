@@ -3,6 +3,9 @@ import { pluginReact } from '@rsbuild/plugin-react';
 
 export default defineConfig({
   plugins: [pluginReact()],
+  source: {
+    entry: { index: './src/app/bootstrap.tsx' },
+  },
   html: {
     title: 'TokenRouter',
     favicon: false,

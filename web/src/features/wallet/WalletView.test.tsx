@@ -3,7 +3,7 @@
 import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { User } from '../../api';
+import type { User } from '../../shared/api/client';
 import {
   calculatePaymentAmount,
   checkIn,
@@ -22,13 +22,13 @@ import {
   redeemTopUpCode,
   signOutWallet,
   transferAffiliateQuota,
+  TurnstileRequiredError,
   updateBillingPreference,
   type AffiliateSummary,
   type SubscriptionPlan,
   type SubscriptionSummary,
   type WalletOrderPage,
   type WalletTopUpInfo,
-  TurnstileRequiredError,
 } from './wallet-api';
 import { WalletView } from './WalletView';
 

@@ -103,7 +103,7 @@ check "acceptance artifact directory" mkdir -p "$ARTIFACTS"
 verify_go_format() {
   local unformatted
   local status=0
-  unformatted="$(git ls-files -z --cached --others --exclude-standard -- '*.go' | xargs -0 gofmt -l)" || status=$?
+  unformatted="$(node scripts/list-source-files.mjs . --go | xargs -0 gofmt -l)" || status=$?
   if [ "$status" -ne 0 ]; then
     return "$status"
   fi
@@ -116,6 +116,8 @@ verify_go_format() {
 
 log "Release metadata and scanner regressions"
 check "Go source formatting" verify_go_format
+check "repository layout verifier self-test" node scripts/verify-repository-layout.mjs --self-test
+check "repository layout and exact test inventory" node scripts/verify-repository-layout.mjs
 check "Go test manifest verifier self-test" node scripts/verify-go-test-manifest.mjs --self-test
 check "repository secret scanner self-test" bash scripts/scan-repository-secrets.sh --self-test
 
@@ -156,9 +158,9 @@ check "go build" go build ./...
 log "Backend: go test (all packages)"
 check_logged "go test" "$ARTIFACTS/go-test.log" go test ./...
 
-log "Backend: targeted race tests (security, routing, accounting, async tasks)"
+log "Backend: race tests (all internal packages)"
 check_logged "race: security+routing+accounting+async" "$ARTIFACTS/go-race.log" \
-  go test -race ./common/... ./middleware/... ./relay/... ./router/... ./service/...
+  go test -race ./internal/...
 
 # ------------------------------------------------------ Independent module
 log "Protocol conversion module (GOWORK=off)"
@@ -262,7 +264,7 @@ log "Databases: SQLite empty migration + status"
 check "create temporary smoke workspace" create_smoke_workspace
 if [ "$SMOKE_TMP_CREATED" = true ]; then
   check_logged "build temporary smoke binary" "$ARTIFACTS/smoke-build.log" \
-    go build -o "$SMOKE_BINARY" .
+    go build -o "$SMOKE_BINARY" ./cmd/tokenrouter
   if [ -x "$SMOKE_BINARY" ]; then
     check "start temporary smoke binary" start_smoke_server
     sleep 3

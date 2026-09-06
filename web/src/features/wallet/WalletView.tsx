@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
-import type { User } from '../../api';
+import type { User } from '../../shared/api/client';
 import {
   TURNSTILE_DISABLED,
   TurnstileWidget,
   type TurnstileConfig,
 } from '../security/TurnstileWidget';
+import { CheckoutControl } from './CheckoutControl';
+import { SubscriptionRecordItem } from './SubscriptionRecordItem';
 import {
   calculatePaymentAmount,
   checkIn,
@@ -24,327 +26,28 @@ import {
   redeemTopUpCode,
   signOutWallet,
   transferAffiliateQuota,
-  updateBillingPreference,
   TurnstileRequiredError,
+  updateBillingPreference,
   type AffiliateSummary,
   type BillingPreference,
   type CheckoutRequest,
   type CheckoutResult,
-  type PaymentKind,
+  type SubscriptionCheckoutRequest,
   type SubscriptionPlan,
   type SubscriptionSummary,
-  type SubscriptionCheckoutRequest,
   type UserSubscription,
   type WalletOrderPage,
-  type WalletTopUpInfo,
+  type WalletTopUpInfo
 } from './wallet-api';
+import { dateTime, durationUnitKeys, formatCreditForDisplay, formatQuotaForDisplay, HISTORY_PAGE_SIZES, integerInput, money, number, orderProviderText, paymentOptions, quotaDisplayUnit, resetPeriodKeys, subscriptionBalanceCost, transferInputToQuota, type Notice, type PaymentOption } from './wallet-presentation';
 
-const HISTORY_PAGE_SIZES = [10, 20, 50, 100] as const;
-
-const subscriptionStatusKeys: Record<UserSubscription['status'], string> = {
-  active: 'Active',
-  expired: 'Expired',
-  cancelled: 'Cancelled',
-};
-
-const durationUnitKeys: Record<SubscriptionPlan['durationUnit'], string> = {
-  year: 'Year',
-  month: 'Month',
-  day: 'Day',
-  hour: 'Hour',
-  custom: 'Custom',
-};
-
-const resetPeriodKeys: Record<SubscriptionPlan['quotaResetPeriod'], string> = {
-  never: 'Never',
-  daily: 'Daily',
-  weekly: 'Weekly',
-  monthly: 'Monthly',
-  custom: 'Custom',
-};
-
-type Notice = { kind: 'success' | 'error'; text: string } | null;
-
-interface PaymentOption {
-  id: string;
-  label: string;
-  kind: PaymentKind;
-  minimum: number;
-  paymentMethod?: string;
-  payMethodIndex?: number;
-}
-
-interface WalletViewProps {
+export interface WalletViewProps {
   user: User;
   onNavigate: (target: string) => void;
   onUserChange?: (user: User) => void;
   onLogout: () => void;
   turnstileConfig?: TurnstileConfig;
   initialShowHistory?: boolean;
-}
-
-function integerInput(value: string): number | null {
-  if (!/^[1-9]\d*$/.test(value)) return null;
-  const parsed = Number(value);
-  return Number.isSafeInteger(parsed) ? parsed : null;
-}
-
-function dateTime(timestamp: number, language: string): string {
-  if (timestamp === 0) return '—';
-  return new Intl.DateTimeFormat(language, { dateStyle: 'medium', timeStyle: 'short' })
-    .format(new Date(timestamp * 1_000));
-}
-
-function number(value: number, language: string): string {
-  return new Intl.NumberFormat(language).format(value);
-}
-
-function decimalNumber(value: number, language: string): string {
-  return new Intl.NumberFormat(language, { maximumFractionDigits: 6 }).format(value);
-}
-
-function money(value: number, language: string): string {
-  return new Intl.NumberFormat(language, { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(value);
-}
-
-function quotaDisplayUnit(info: WalletTopUpInfo): string {
-  if (info.quotaDisplayType === 'currency') return 'USD';
-  if (info.quotaDisplayType === 'cny') return 'CNY';
-  return info.currencySymbol;
-}
-
-function quotaToDisplayAmount(quota: number, info: WalletTopUpInfo): number {
-  if (info.quotaDisplayType === 'tokens') return quota;
-  const usd = quota / info.quotaPerUnit;
-  return usd * info.currencyExchangeRate;
-}
-
-function formatQuotaForDisplay(quota: number, info: WalletTopUpInfo, language: string): string {
-  const amount = quotaToDisplayAmount(quota, info);
-  if (!Number.isFinite(amount)) return '—';
-  return `${decimalNumber(amount, language)} ${quotaDisplayUnit(info)}`;
-}
-
-function formatCreditForDisplay(amount: number, info: WalletTopUpInfo, language: string): string {
-  const displayed = info.quotaDisplayType === 'tokens'
-    ? amount * info.quotaPerUnit
-    : amount * info.currencyExchangeRate;
-  if (!Number.isFinite(displayed) || !Number.isSafeInteger(displayed) && info.quotaDisplayType === 'tokens') return '—';
-  return `${decimalNumber(displayed, language)} ${quotaDisplayUnit(info)}`;
-}
-
-function positiveDecimalFraction(value: string): { numerator: bigint; denominator: bigint } | null {
-  const match = /^(\d+)(?:\.(\d+))?(?:e([+-]?\d+))?$/i.exec(value);
-  if (!match) return null;
-  const fraction = match[2] ?? '';
-  const exponent = Number(match[3] ?? '0');
-  if (!Number.isSafeInteger(exponent) || Math.abs(exponent) > 1_000) return null;
-  const digits = `${match[1]}${fraction}`.replace(/^0+(?=\d)/, '');
-  let numerator = BigInt(digits);
-  let denominator = 1n;
-  const decimalPlaces = fraction.length - exponent;
-  if (decimalPlaces > 0) denominator = 10n ** BigInt(decimalPlaces);
-  if (decimalPlaces < 0) numerator *= 10n ** BigInt(-decimalPlaces);
-  return numerator > 0n ? { numerator, denominator } : null;
-}
-
-function transferInputToQuota(value: string, info: WalletTopUpInfo): number | null {
-  if (info.quotaDisplayType === 'tokens') return integerInput(value);
-  if (!/^(?:0|[1-9]\d*)(?:\.\d{1,6})?$/.test(value)) return null;
-  const amount = positiveDecimalFraction(value);
-  const exchangeRate = positiveDecimalFraction(
-    info.currencyExchangeRate.toString(),
-  );
-  if (!amount || !exchangeRate) return null;
-  const numerator = amount.numerator * exchangeRate.denominator * BigInt(info.quotaPerUnit);
-  const denominator = amount.denominator * exchangeRate.numerator;
-  const rounded = (2n * numerator + denominator) / (2n * denominator);
-  return rounded > 0n && rounded <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(rounded) : null;
-}
-
-function subscriptionBalanceCost(plan: SubscriptionPlan, info: WalletTopUpInfo): number | null {
-  const [whole, fraction = ''] = plan.priceAmount.split('.');
-  try {
-    const scale = 10n ** BigInt(fraction.length);
-    const numerator = BigInt(whole) * scale + BigInt(fraction || '0');
-    const exact = numerator * BigInt(info.quotaPerUnit);
-    const rounded = (exact + scale - 1n) / scale;
-    return rounded <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(rounded) : null;
-  } catch {
-    return null;
-  }
-}
-
-function knownProviderName(value: string): string {
-  switch (value.toLowerCase()) {
-    case 'stripe': return 'Stripe';
-    case 'creem': return 'Creem';
-    case 'waffo': return 'Waffo';
-    case 'waffo_pancake':
-    case 'waffo-pancake': return 'Waffo Pancake';
-    case 'epay': return 'Epay';
-    case 'balance': return 'Balance';
-    default: return value;
-  }
-}
-
-function orderProviderText(
-  order: WalletOrderPage['items'][number],
-  info: WalletTopUpInfo | null,
-): string {
-  const provider = order.paymentProvider === '' ? '' : knownProviderName(order.paymentProvider);
-  const configuredMethod = info?.paymentMethods.find((method) => method.type === order.paymentMethod)?.name
-    ?? info?.waffoMethods.find((method) => (
-      method.payMethodType === order.paymentMethod || method.payMethodName === order.paymentMethod
-    ))?.name;
-  const method = configuredMethod
-    ?? (order.paymentMethod === '' ? '' : knownProviderName(order.paymentMethod));
-  if (provider !== '' && method !== '' && provider.toLowerCase() !== method.toLowerCase()) {
-    return `${provider} · ${method}`;
-  }
-  return provider || method || '—';
-}
-
-function SubscriptionRecordItem({
-  subscription,
-  plan,
-  info,
-}: {
-  subscription: UserSubscription;
-  plan: SubscriptionPlan | undefined;
-  info: WalletTopUpInfo | null;
-}) {
-  const { t, i18n } = useTranslation();
-  const now = Date.now() / 1_000;
-  const effectiveStatus = subscription.status === 'active' && subscription.endTime <= now
-    ? 'expired'
-    : subscription.status;
-  const finiteQuota = subscription.amountTotal > 0;
-  const remainingQuota = finiteQuota
-    ? Math.max(0, subscription.amountTotal - subscription.amountUsed)
-    : 0;
-  const usagePercent = finiteQuota
-    ? Math.min(100, Math.max(0, Math.round((subscription.amountUsed / subscription.amountTotal) * 100)))
-    : 0;
-  const remainingDays = effectiveStatus === 'active'
-    ? Math.max(0, Math.ceil((subscription.endTime - now) / 86_400))
-    : 0;
-  const endLabel = effectiveStatus === 'active'
-    ? t('Until')
-    : effectiveStatus === 'cancelled' ? t('Cancelled at') : t('Expired at');
-  const quotaText = (value: number) => info
-    ? formatQuotaForDisplay(value, info, i18n.language)
-    : number(value, i18n.language);
-  return (
-    <li>
-      <div className="wallet-subscription-heading">
-        <strong>
-          {plan?.title && <span>{plan.title} · </span>}
-          <span>{t('Subscription {{id}}', { id: subscription.id })}</span>
-        </strong>
-        <span className={`status status-${effectiveStatus}`}>{t(subscriptionStatusKeys[effectiveStatus])}</span>
-      </div>
-      {effectiveStatus === 'active' && (
-        <span className="muted">{t('{{count}} days remaining', { count: remainingDays })}</span>
-      )}
-      <span>{!finiteQuota
-        ? t('Unlimited quota')
-        : t('{{used}} of {{total}} used', {
-          used: quotaText(subscription.amountUsed),
-          total: quotaText(subscription.amountTotal),
-        })}</span>
-      {finiteQuota && (
-        <>
-          <span className="muted">{t('Remaining quota')}: {quotaText(remainingQuota)} · {t('Used {{percent}}%', { percent: usagePercent })}</span>
-          {effectiveStatus === 'active' && (
-            <progress
-              className="wallet-subscription-progress"
-              aria-label={t('Quota usage for subscription {{id}}', { id: subscription.id })}
-              max={100}
-              value={usagePercent}
-            />
-          )}
-        </>
-      )}
-      <span className="muted">{t('Started')}: {dateTime(subscription.startTime, i18n.language)}</span>
-      <span className="muted">{endLabel}: {dateTime(subscription.endTime, i18n.language)}</span>
-      {effectiveStatus === 'active' && subscription.nextResetTime > 0 && (
-        <span className="muted">{t('Next reset')}: {dateTime(subscription.nextResetTime, i18n.language)}</span>
-      )}
-      {subscription.lastResetTime > 0 && (
-        <span className="muted">{t('Last reset')}: {dateTime(subscription.lastResetTime, i18n.language)}</span>
-      )}
-      {subscription.upgradeGroup !== '' && (
-        <span className="muted">{t('Upgrade group')}: {subscription.upgradeGroup}</span>
-      )}
-      {subscription.downgradeGroup !== '' && (
-        <span className="muted">{t('Downgrade group')}: {subscription.downgradeGroup}</span>
-      )}
-      <span className="muted">{t('Wallet overflow')}: {subscription.allowWalletOverflow ? t('Enabled') : t('Disabled')}</span>
-      {subscription.source !== '' && <span className="muted">{t('Source')}: {knownProviderName(subscription.source)}</span>}
-    </li>
-  );
-}
-
-function CheckoutControl({ checkout, label }: { checkout: CheckoutResult; label: string }) {
-  if (checkout.method === 'POST') {
-    return (
-      <form
-        aria-label={label}
-        action={checkout.action}
-        method="post"
-        acceptCharset="UTF-8"
-      >
-        {checkout.fields.map((field) => (
-          <input key={field.name} type="hidden" name={field.name} value={field.value} />
-        ))}
-        <button type="submit" className="button">{label}</button>
-      </form>
-    );
-  }
-  return (
-    <a className="button" href={checkout.action} target="_blank" rel="noopener noreferrer">{label}</a>
-  );
-}
-
-function paymentOptions(info: WalletTopUpInfo | null): PaymentOption[] {
-  if (!info || !info.complianceConfirmed || info.complianceVersion !== 'v1') return [];
-  const result: PaymentOption[] = [];
-  if (info.onlineEnabled) {
-    for (const method of info.paymentMethods) {
-      if (method.type === 'stripe' || method.type === 'waffo' || method.type === 'waffo_pancake') continue;
-      result.push({
-        id: `epay:${method.type}`,
-        label: method.name,
-        kind: 'epay',
-        minimum: Math.max(method.minimum ?? 0, info.minimum),
-        paymentMethod: method.type,
-      });
-    }
-  }
-  if (info.stripeEnabled) {
-    result.push({ id: 'stripe', label: 'Stripe', kind: 'stripe', minimum: info.stripeMinimum });
-  }
-  if (info.waffoPancakeEnabled) {
-    result.push({
-      id: 'waffo-pancake',
-      label: 'Waffo Pancake',
-      kind: 'waffo-pancake',
-      minimum: info.waffoPancakeMinimum,
-    });
-  }
-  if (info.waffoEnabled) {
-    info.waffoMethods.forEach((method, index) => {
-      result.push({
-        id: `waffo:${index}`,
-        label: method.name,
-        kind: 'waffo',
-        minimum: info.waffoMinimum,
-        payMethodIndex: index,
-      });
-    });
-  }
-  return result;
 }
 
 export function WalletView({

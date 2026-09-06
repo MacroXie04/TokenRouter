@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { api } from '../../api';
+import { api } from '../../shared/api/client';
 import {
   USER_ROLE_ADMIN,
   USER_ROLE_COMMON,
@@ -14,8 +14,8 @@ import {
   loadPermissionCatalog,
   loadUserBindingDetails,
   loadUserDetails,
-  loadUserPermissionState,
   loadUserGroups,
+  loadUserPermissionState,
   manageUser,
   parseCustomOAuthBindingsResponse,
   parsePermissionCatalogResponse,
@@ -32,7 +32,7 @@ import {
   updateUserPermissions,
 } from './user-api';
 
-vi.mock('../../api', () => ({
+vi.mock('../../shared/api/client', () => ({
   api: {
     get: vi.fn(),
     post: vi.fn(),

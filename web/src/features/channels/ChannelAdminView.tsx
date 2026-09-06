@@ -2,7 +2,6 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   applyAllUpstreamUpdates,
-  CHANNEL_AUTO_DISABLED,
   CHANNEL_ENABLED,
   CHANNEL_MANUALLY_DISABLED,
   CHANNEL_PAGE_SIZE,
@@ -10,13 +9,13 @@ import {
   CHANNEL_TYPE_OLLAMA,
   copyChannel,
   createChannel,
-  deleteDisabledChannels,
-  deleteChannels,
   deleteChannel,
+  deleteChannels,
+  deleteDisabledChannels,
   detectAllUpstreamUpdates,
-  fetchChannelModels,
-  fetchChannelDetail,
   discoverDraftModels,
+  fetchChannelDetail,
+  fetchChannelModels,
   loadEnabledModels,
   loadTagModels,
   normalizeChannelTag,
@@ -28,117 +27,26 @@ import {
   setChannelsTag,
   setChannelStatus,
   setTagChannelsStatus,
-  testChannel,
   testAllChannels,
-  updateTagChannels,
+  testChannel,
   updateChannel,
+  updateTagChannels,
   type ChannelCreateInput,
   type ChannelDetail,
   type ChannelProviderSettings,
   type ChannelSearchInput,
   type ChannelSummary,
   type ChannelUpdateInput,
-  type TagUpdateInput,
+  type TagUpdateInput
 } from './channel-api';
-import { CodexPanel, MultiKeyPanel, OllamaPanel, UpstreamUpdatesPanel } from './ChannelWorkflowPanels';
-import { ChannelKeyRevealPanel } from './ChannelKeyRevealPanel';
+import { applyDiscoveredModels, channelStatusLabel, EMPTY_CREATE, EMPTY_SEARCH, modelSummary, modelValues, providerOtherLabel, supportsBalance, UPSTREAM_DISCOVERY_TYPES, type CopyPanel, type DiscoveryTarget, type DraftDiscovery, type Notice, type SearchDraft, type TagPanel } from './channel-editor-model';
 import {
   CHANNEL_PROVIDER_OPTIONS,
   channelProviderLabel,
   isChannelProviderType,
 } from './channel-providers';
-
-type SearchDraft = Pick<
-  ChannelSearchInput,
-  'keyword' | 'group' | 'model' | 'status' | 'type' | 'tagMode' | 'idSort' | 'sortBy' | 'sortOrder'
->;
-type Notice = { kind: 'success' | 'error'; text: string } | null;
-type DiscoveryTarget = 'edit' | 'create';
-type DraftDiscovery = { target: DiscoveryTarget; models: string[] };
-
-type CopyPanel = { channel: ChannelSummary; suffix: string; resetBalance: boolean };
-type TagPanel = {
-  tag: string;
-  newTag: string;
-  models: string;
-  groups: string;
-  modelMapping: string;
-  priority: string;
-  weight: string;
-  paramOverride: string;
-  headerOverride: string;
-  modelsDirty: boolean;
-  modelMappingDirty: boolean;
-  paramOverrideDirty: boolean;
-  headerOverrideDirty: boolean;
-};
-
-const EMPTY_SEARCH: SearchDraft = {
-  keyword: '',
-  group: '',
-  model: '',
-  status: '',
-  type: null,
-  tagMode: false,
-  idSort: false,
-  sortBy: '',
-  sortOrder: 'desc',
-};
-const EMPTY_CREATE: ChannelCreateInput = {
-  mode: 'single',
-  multi_key_mode: 'random',
-  batch_add_set_key_prefix_2_name: false,
-  name: '',
-  type: 1,
-  key: '',
-  base_url: '',
-  models: '',
-  group: 'default',
-};
-
-// Mirrors the target backend's model-discovery capability gate.
-const UPSTREAM_DISCOVERY_TYPES = new Set([
-  1, 3, 4, 6, 7, 8, 9, 10, 12, 13, 14, 17, 19, 20, 22, 24, 25, 26, 27, 31,
-  40, 42, 43, 45, 47, 48, 57, 58, 59, 60,
-]);
-
-function modelSummary(models: string): string {
-  const values = models.split(',').map((value) => value.trim()).filter(Boolean);
-  if (values.length === 0) return '—';
-  const visible = values.slice(0, 3).join(', ');
-  return values.length > 3 ? `${visible} +${values.length - 3}` : visible;
-}
-
-function modelValues(models: string): string[] {
-  return [...new Set(models.split(',').map((value) => value.trim()).filter(Boolean))];
-}
-
-function applyDiscoveredModels(current: string, discovered: string[], merge: boolean): string {
-  return (merge ? [...new Set([...modelValues(current), ...discovered])] : discovered).join(',');
-}
-
-function providerOtherLabel(type: number, t: (key: string) => string): string {
-  if (type === 3) return t('Default API version');
-  if (type === 18) return t('Model version');
-  if (type === 21) return t('Knowledge base ID');
-  if (type === 39) return t('Account ID');
-  if (type === 41) return t('Deployment region');
-  if (type === 49) return t('Agent ID');
-  return t('Provider-specific value');
-}
-
-function channelStatusLabel(status: number, t: (key: string) => string): string {
-  if (status === CHANNEL_ENABLED) return t('Enabled');
-  if (status === CHANNEL_AUTO_DISABLED) return t('Automatically disabled');
-  if (status === CHANNEL_MANUALLY_DISABLED) return t('Manually disabled');
-  return t('Disabled');
-}
-
-const BALANCE_PROVIDER_TYPES = new Set([1, 8, 10, 12, 13, 20, 25, 40, 43]);
-
-function supportsBalance(channel: ChannelSummary): boolean {
-  return BALANCE_PROVIDER_TYPES.has(channel.type) && !channel.isMultiKey;
-}
+import { ChannelKeyRevealPanel } from './ChannelKeyRevealPanel';
+import { CodexPanel, MultiKeyPanel, OllamaPanel, UpstreamUpdatesPanel } from './ChannelWorkflowPanels';
 
 export interface ChannelAdminViewProps {
   canRead: boolean;

@@ -1,5 +1,3 @@
-export { DashboardView } from './DashboardView';
-export type { DashboardViewProps } from './DashboardView';
 export {
   DASHBOARD_MAX_RANGE_SECONDS,
   DASHBOARD_SECTIONS,
@@ -24,7 +22,7 @@ export {
   parseDashboardPerformanceResponse,
   parseDashboardResponse,
   parseDashboardSearch,
-  parseDashboardUptimeResponse,
+  parseDashboardUptimeResponse
 } from './dashboard-api';
 export type {
   DashboardAggregate,
@@ -43,5 +41,7 @@ export type {
   DashboardTimelinePoint,
   DashboardUptimeGroup,
   DashboardUptimeMonitor,
-  DashboardUserRow,
+  DashboardUserRow
 } from './dashboard-api';
+export { DashboardView } from './DashboardView';
+export type { DashboardViewProps } from './DashboardView';

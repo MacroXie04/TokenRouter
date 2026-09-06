@@ -1,4 +1,4 @@
-import { api } from '../../api';
+import { api } from '../../shared/api/client';
 import { parsePricingCatalogResponse, type PricingCatalog } from './catalog';
 
 const CATALOG_RESPONSE_BYTES = 8 * 1024 * 1024;

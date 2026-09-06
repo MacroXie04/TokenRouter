@@ -1,4 +1,4 @@
-import { api } from '../../api';
+import { api } from '../../shared/api/client';
 
 export const SUBSCRIPTION_ADMIN_ROLE = 10;
 export const SUBSCRIPTION_ROOT_ROLE = 100;

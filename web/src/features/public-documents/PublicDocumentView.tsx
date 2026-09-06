@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState } from 'react';
-import ReactMarkdown from 'react-markdown';
 import { useTranslation } from 'react-i18next';
+import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { getData } from '../../api';
+import { getData } from '../../shared/api/client';
 import {
   documentFormat,
   documentText,

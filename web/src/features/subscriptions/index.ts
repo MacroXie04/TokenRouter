@@ -1,6 +1,6 @@
-export { SubscriptionAdminView } from './SubscriptionAdminView';
 export type {
   ManagedSubscriptionPlan,
   ManagedUserSubscription,
-  SubscriptionPlanInput,
+  SubscriptionPlanInput
 } from './subscription-api';
+export { SubscriptionAdminView } from './SubscriptionAdminView';

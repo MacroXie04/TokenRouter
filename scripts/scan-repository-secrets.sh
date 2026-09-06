@@ -66,7 +66,7 @@ scan_repository() {
     return 1
   fi
   scan_tmp="$(mktemp -d "${TMPDIR:-/tmp}/tokenrouter-secret-scan.XXXXXX")"
-  if ! git -C "$scan_root" ls-files -z --cached --others --exclude-standard >"$scan_tmp/files"; then
+  if ! node "$REPO_ROOT/scripts/list-source-files.mjs" "$scan_root" >"$scan_tmp/files"; then
     echo "secret scan could not enumerate repository files" >&2
     rm -rf -- "$scan_tmp"
     return 1
@@ -74,7 +74,7 @@ scan_repository() {
 
   scan_pattern "$scan_root" 'sk-[A-Za-z0-9]{24,}' 'API key' '' '' "$scan_tmp/files" "$scan_tmp/api" || result=1
   scan_pattern "$scan_root" 'AKIA[0-9A-Z]{16}' 'AWS access key' \
-    'common/logger_test.go' "$known_aws_fixture" "$scan_tmp/files" "$scan_tmp/aws" || result=1
+    'internal/platform/logging/logger_test.go' "$known_aws_fixture" "$scan_tmp/files" "$scan_tmp/aws" || result=1
   scan_pattern "$scan_root" 'ghp_[A-Za-z0-9]{36}' 'GitHub token' '' '' "$scan_tmp/files" "$scan_tmp/github" || result=1
   scan_pattern "$scan_root" '-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----' 'private key' '' '' "$scan_tmp/files" "$scan_tmp/private-key" || result=1
 
@@ -89,9 +89,9 @@ run_self_test() {
   local result=0
   test_root="$(mktemp -d "${TMPDIR:-/tmp}/tokenrouter-secret-scan-test.XXXXXX")"
   git -C "$test_root" init -q
-  mkdir -p "$test_root/common"
+  mkdir -p "$test_root/internal/platform/logging"
   printf '%s\n' 'ordinary source text' >"$test_root/clean.txt"
-  printf '%s\n' "$known_aws_fixture" >"$test_root/common/logger_test.go"
+  printf '%s\n' "$known_aws_fixture" >"$test_root/internal/platform/logging/logger_test.go"
   if ! scan_repository "$test_root"; then
     echo "secret scanner rejected its exact public test fixture" >&2
     result=1

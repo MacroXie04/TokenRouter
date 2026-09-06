@@ -1,16 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { api } from '../../api';
+import { api } from '../../shared/api/client';
 import {
-  SystemSettingsAccessError,
-  SystemSettingsContractError,
-  SystemSettingsRequestError,
   assertSystemSettingsRoot,
   cleanupPerformanceLogFiles,
   clearAffinityCache,
   confirmPaymentCompliance,
   isCurrentTokenRouterRelease,
-  loadCurrentLogCleanupTask,
   loadAffinityCacheStats,
+  loadCurrentLogCleanupTask,
   loadLatestTokenRouterRelease,
   loadLogCleanupTask,
   loadPerformanceLogSummary,
@@ -24,11 +21,14 @@ import {
   redactProvidedSystemOptions,
   resetModelPricing,
   startLogCleanupTask,
+  SystemSettingsAccessError,
+  SystemSettingsContractError,
+  SystemSettingsRequestError,
   TOKENROUTER_LATEST_RELEASE_URL,
   updateSystemOption,
 } from './system-settings-api';
 
-vi.mock('../../api', () => ({ api: { get: vi.fn(), post: vi.fn(), put: vi.fn(), delete: vi.fn() } }));
+vi.mock('../../shared/api/client', () => ({ api: { get: vi.fn(), post: vi.fn(), put: vi.fn(), delete: vi.fn() } }));
 
 const mockedGet = vi.mocked(api.get);
 const mockedPost = vi.mocked(api.post);

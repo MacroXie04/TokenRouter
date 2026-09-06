@@ -1,7 +1,5 @@
 import { useEffect, useId, useMemo, useRef, useState, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
-import type { SystemOption } from './system-settings-api';
-import { isAbortError } from './system-settings-api';
 import {
   SMTPSettingsValidationError,
   updateSMTPSettings,
@@ -9,6 +7,8 @@ import {
   type SMTPSettingsData,
   type SMTPSettingsUpdate,
 } from './smtp-settings-api';
+import type { SystemOption } from './system-settings-api';
+import { isAbortError } from './system-settings-api';
 
 type TransportMode = 'none' | 'implicit' | 'starttls';
 

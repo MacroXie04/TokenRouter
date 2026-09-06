@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { postData } from '../../api';
+import { postData } from '../../shared/api/client';
 import {
   buildSetupPayload,
   initialSetupUsageMode,

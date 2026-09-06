@@ -10,6 +10,7 @@ import {
   type ManagedSubscriptionPlan,
   type ManagedUserSubscription,
 } from '../subscriptions/subscription-api';
+import './user-admin-dialogs.css';
 import {
   USER_ROLE_ADMIN,
   USER_ROLE_ROOT,
@@ -27,7 +28,6 @@ import {
   type PermissionCatalog,
   type PermissionMatrix,
 } from './user-api';
-import './user-admin-dialogs.css';
 
 interface GuardedDialogProps {
   user: ManagedUser;

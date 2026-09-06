@@ -1,22 +1,22 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { WaffoPancakeAdminPanel } from '../wallet/WaffoPancakeAdminPanel';
 import { CustomOAuthPanel } from './CustomOAuthPanel';
-import { OAuthCallbackGuidance } from './OAuthCallbackGuidance';
+import { LogMaintenancePanel } from './LogMaintenancePanel';
 import {
   HeaderNavigationSettingsPanel,
   SidebarModulesSettingsPanel,
 } from './NavigationSettingsPanels';
-import { SystemSettingsEditor } from './SystemSettingsEditor';
+import { OAuthCallbackGuidance } from './OAuthCallbackGuidance';
 import { SMTPSettingsPanel } from './SMTPSettingsPanel';
-import { LogMaintenancePanel } from './LogMaintenancePanel';
-import { UpdateCheckerPanel } from './UpdateCheckerPanel';
-import { WaffoPancakeAdminPanel } from '../wallet/WaffoPancakeAdminPanel';
+import { SystemSettingsEditor } from './SystemSettingsEditor';
 import {
   AffinityCachePanel,
   DeploymentConnectionPanel,
   PaymentCompliancePanel,
   PricingResetPanel,
 } from './SystemSettingsTools';
+import { UpdateCheckerPanel } from './UpdateCheckerPanel';
 import {
   SYSTEM_SETTINGS_ROOT_ROLE,
   isAbortError,

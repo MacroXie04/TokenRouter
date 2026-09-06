@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { api } from '../../api';
+import { api } from '../../shared/api/client';
 import {
   buildUsageLogParams,
   drawingGatewayContentURL,
@@ -10,7 +10,7 @@ import {
   UsageLogContractError,
 } from './usage-logs-api';
 
-vi.mock('../../api', () => ({ api: { get: vi.fn() } }));
+vi.mock('../../shared/api/client', () => ({ api: { get: vi.fn() } }));
 
 const mockedGet = vi.mocked(api.get);
 

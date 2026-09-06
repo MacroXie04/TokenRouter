@@ -1,4 +1,4 @@
-import { api } from '../../api';
+import { api } from '../../shared/api/client';
 
 export const REDEMPTION_PAGE_SIZE = 20;
 export const REDEMPTION_STATUS_ENABLED = 1;

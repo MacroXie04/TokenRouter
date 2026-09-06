@@ -1,4 +1,4 @@
-import { api } from '../../api';
+import { api } from '../../shared/api/client';
 
 const MAX_PRIVATE_KEY_BYTES = 16 * 1024;
 const MAX_STORES = 500;

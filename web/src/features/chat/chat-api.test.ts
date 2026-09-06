@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { api } from '../../api';
+import { api } from '../../shared/api/client';
 import {
   ChatContractError,
   loadActiveChatKey,
@@ -8,7 +8,7 @@ import {
   resolveChatURL,
 } from './chat-api';
 
-vi.mock('../../api', () => ({ api: { get: vi.fn(), post: vi.fn() } }));
+vi.mock('../../shared/api/client', () => ({ api: { get: vi.fn(), post: vi.fn() } }));
 
 const mockedGet = vi.mocked(api.get);
 const mockedPost = vi.mocked(api.post);

@@ -2,7 +2,7 @@ import { useEffect, useId, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import type { PublicAnnouncementInfo } from '../../lib/public-status';
+import type { PublicAnnouncementInfo } from '../../shared/config/public-status';
 import { externalDocumentURL, safeDocumentLink } from '../public-documents/content';
 import { loadPublicContent } from './home-api';
 

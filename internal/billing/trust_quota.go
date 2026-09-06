@@ -1,0 +1,15 @@
+package billing
+
+import (
+	quotamath "github.com/tokenrouter/tokenrouter/internal/billing/quota"
+)
+
+const trustQuotaUnits = 10
+
+// RelayTrustQuota returns the ordinary-relay trust threshold. QuotaPerUnit is
+// an immutable accounting invariant in TokenRouter, so a stale or corrupted
+// compatibility option must never lower this threshold and broaden the
+// zero-hold bypass.
+func RelayTrustQuota() (quota int, valid bool) {
+	return trustQuotaUnits * quotamath.QuotaPerUnit, true
+}

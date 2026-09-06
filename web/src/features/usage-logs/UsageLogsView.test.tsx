@@ -3,7 +3,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { User } from '../../api';
+import type { User } from '../../shared/api/client';
 import { UsageLogsView } from './UsageLogsView';
 import {
   loadUsageLogs,

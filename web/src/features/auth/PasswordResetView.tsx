@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { hasUnsafeAuthText, parsePasswordResetLocation } from '../../lib/auth-flow';
 import {
   TURNSTILE_DISABLED,
   TurnstileWidget,
@@ -9,6 +8,7 @@ import {
 } from '../security/TurnstileWidget';
 import { AuthLayout } from './AuthLayout';
 import { authGet, authPost, isCanceledAuthRequest } from './auth-api';
+import { hasUnsafeAuthText, parsePasswordResetLocation } from './auth-flow';
 
 const MAX_EMAIL_CHARACTERS = 254;
 const MAX_RESET_TOKEN_CHARACTERS = 256;

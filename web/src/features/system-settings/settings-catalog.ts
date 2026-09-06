@@ -3,15 +3,15 @@ import {
   parseConsoleFAQ,
   parseConsoleOptionJSON,
   parseConsoleUptimeKumaGroups,
-} from '../../lib/console-content';
+} from '../dashboard/console-content';
 import { validateBillingSettingFormat } from './billing-setting-validation';
 import { validateModelRequestRateLimitGroups } from './model-request-rate-limit';
-import { validateSpecialUsableGroupDirectives } from './registration-setting-validation';
 import {
   validateChannelDisableKeywords,
   validateHTTPStatusRanges,
   validateToolPriceMap,
 } from './operations-setting-validation';
+import { validateSpecialUsableGroupDirectives } from './registration-setting-validation';
 import { validateUsageRatioMap } from './usage-ratio-validation';
 
 export type SettingInputKind = 'text' | 'textarea' | 'boolean' | 'integer' | 'decimal' | 'json' | 'secret' | 'select';

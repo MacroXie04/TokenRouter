@@ -1,7 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { api } from '../../api';
+import { api } from '../../shared/api/client';
 import {
-  ProfileContractError,
   beginPasskeyRegistration,
   bindEmail,
   bindWeChat,
@@ -20,8 +19,8 @@ import {
   getProfile,
   getSessions,
   getTwoFactorStatus,
-  parseBackupCodesResponse,
   parseAccessTokenResponse,
+  parseBackupCodesResponse,
   parseOAuthBindingFlowResponse,
   parseOAuthBindingsResponse,
   parseOAuthCatalogResponse,
@@ -31,6 +30,7 @@ import {
   parseSessionsResponse,
   parseTelegramBindingFlowResponse,
   parseTwoFactorSetupResponse,
+  ProfileContractError,
   regenerateBackupCodes,
   revokeOtherSessions,
   revokeSession,
@@ -46,7 +46,7 @@ import {
   type CustomOAuthProvider,
 } from './profile-api';
 
-vi.mock('../../api', () => ({
+vi.mock('../../shared/api/client', () => ({
   api: {
     get: vi.fn(),
     post: vi.fn(),

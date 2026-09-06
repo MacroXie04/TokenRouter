@@ -17,7 +17,7 @@ RUN go mod download
 COPY . .
 COPY --from=frontend /build/web/dist ./web/dist
 ARG VERSION=dev
-RUN go build -ldflags "-s -w -X 'github.com/tokenrouter/tokenrouter/common.Version=${VERSION}'" -o tokenrouter .
+RUN go build -ldflags "-s -w -X 'github.com/tokenrouter/tokenrouter/internal/platform/buildinfo.Version=${VERSION}'" -o tokenrouter ./cmd/tokenrouter
 
 FROM debian:bookworm-slim
 RUN apt-get update \

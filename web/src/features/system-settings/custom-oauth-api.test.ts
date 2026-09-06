@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { api } from '../../api';
+import { api } from '../../shared/api/client';
 import {
   createCustomOAuthProvider,
   deleteCustomOAuthProvider,
@@ -11,7 +11,7 @@ import {
 } from './custom-oauth-api';
 import { SystemSettingsContractError, SystemSettingsRequestError } from './system-settings-api';
 
-vi.mock('../../api', () => ({ api: { get: vi.fn(), post: vi.fn(), put: vi.fn(), delete: vi.fn() } }));
+vi.mock('../../shared/api/client', () => ({ api: { get: vi.fn(), post: vi.fn(), put: vi.fn(), delete: vi.fn() } }));
 
 const mockedGet = vi.mocked(api.get);
 const mockedPost = vi.mocked(api.post);

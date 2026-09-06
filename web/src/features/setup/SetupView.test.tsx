@@ -3,7 +3,7 @@
 import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { postData } from '../../api';
+import { postData } from '../../shared/api/client';
 import { SetupView } from './SetupView';
 import { parseSetupStatus } from './setup';
 
@@ -13,7 +13,7 @@ vi.mock('react-i18next', () => ({
   ) }),
 }));
 
-vi.mock('../../api', () => ({ postData: vi.fn() }));
+vi.mock('../../shared/api/client', () => ({ postData: vi.fn() }));
 
 const mockedPostData = vi.mocked(postData);
 

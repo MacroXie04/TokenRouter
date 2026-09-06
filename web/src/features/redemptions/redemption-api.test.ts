@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { api } from '../../api';
+import { api } from '../../shared/api/client';
 import {
   REDEMPTION_STATUS_DISABLED,
   RedemptionContractError,
@@ -16,7 +16,7 @@ import {
   updateRedemptionStatus,
 } from './redemption-api';
 
-vi.mock('../../api', () => ({
+vi.mock('../../shared/api/client', () => ({
   api: {
     get: vi.fn(),
     post: vi.fn(),

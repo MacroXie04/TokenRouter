@@ -1,4 +1,4 @@
-import { api } from '../../api';
+import { api } from '../../shared/api/client';
 import { isChannelProviderType, type ChannelProviderType } from './channel-providers';
 
 export const CHANNEL_PAGE_SIZE = 20;

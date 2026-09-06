@@ -1,4 +1,4 @@
-import { api } from '../../api';
+import { api } from '../../shared/api/client';
 import { serializeSystemSettingsMutation, SystemSettingsContractError, SystemSettingsRequestError } from './system-settings-api';
 
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;

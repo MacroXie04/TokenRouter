@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import type { User } from '../../api';
+import type { User } from '../../shared/api/client';
 import {
   USAGE_LOG_PAGE_SIZES,
   emptyUsageLogQuery,

@@ -1,4 +1,4 @@
-import { api } from '../../api';
+import { api } from '../../shared/api/client';
 
 export const USER_PAGE_SIZE = 20;
 export const USER_ROLE_COMMON = 1;

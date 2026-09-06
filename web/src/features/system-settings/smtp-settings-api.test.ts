@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { api } from '../../api';
-import { SystemSettingsContractError, SystemSettingsRequestError } from './system-settings-api';
+import { api } from '../../shared/api/client';
 import {
   parseSMTPSettingsResponse,
   SMTPSettingsValidationError,
@@ -8,6 +7,7 @@ import {
   validateSMTPSettingsUpdate,
   type SMTPSettingsUpdate,
 } from './smtp-settings-api';
+import { SystemSettingsContractError, SystemSettingsRequestError } from './system-settings-api';
 
 function validUpdate(overrides: Partial<SMTPSettingsUpdate> = {}): SMTPSettingsUpdate {
   return {

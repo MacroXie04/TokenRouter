@@ -3,6 +3,7 @@
 import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { RelayTokenManager } from './RelayTokenManager';
 import {
   createToken,
   deleteToken,
@@ -16,7 +17,6 @@ import {
   updateTokenStatus,
   type RelayToken,
 } from './token-api';
-import { RelayTokenManager } from './RelayTokenManager';
 
 vi.mock('react-i18next', () => {
   const t = (key: string, values?: Record<string, unknown>) => key.replace(

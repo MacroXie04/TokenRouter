@@ -2,6 +2,7 @@
 
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { isPasskeyLoginSupported, serializeAssertionCredential } from '../../shared/browser/webauthn';
 import {
   beginChannelKeyPasskey,
   finishChannelKeyPasskey,
@@ -9,7 +10,6 @@ import {
   verifyChannelKeyTwoFactor,
 } from './channel-key-api';
 import { ChannelKeyRevealPanel } from './ChannelKeyRevealPanel';
-import { isPasskeyLoginSupported, serializeAssertionCredential } from '../../lib/webauthn';
 
 vi.mock('react-i18next', () => {
   const t = (key: string, values?: Record<string, unknown>) => key.replace(
@@ -26,7 +26,7 @@ vi.mock('./channel-key-api', () => ({
   verifyChannelKeyTwoFactor: vi.fn(),
 }));
 
-vi.mock('../../lib/webauthn', () => ({
+vi.mock('../../shared/browser/webauthn', () => ({
   isPasskeyLoginSupported: vi.fn(),
   serializeAssertionCredential: vi.fn(),
 }));

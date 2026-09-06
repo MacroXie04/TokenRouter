@@ -1,4 +1,4 @@
-import { api } from '../../api';
+import { api } from '../../shared/api/client';
 import { parseRankingRows, type RankingRow } from '../rankings/rankings';
 
 export const MAX_PUBLIC_CONTENT_CHARACTERS = 1_000_000;

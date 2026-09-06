@@ -1,9 +1,9 @@
-import { api } from '../../api';
+import { api } from '../../shared/api/client';
 import {
   MAX_PASSKEY_FLOW_TOKEN_CHARACTERS,
   parsePasskeyLoginBegin,
   type PasskeyLoginBegin,
-} from '../../lib/webauthn';
+} from '../../shared/browser/webauthn';
 
 const CHANNEL_KEY_SCOPE = 'channel.key.read';
 const MAX_RESPONSE_BYTES = 1024 * 1024;

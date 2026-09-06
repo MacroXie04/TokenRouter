@@ -1,4 +1,4 @@
-import { api } from '../../api';
+import { api } from '../../shared/api/client';
 
 export const SYSTEM_SETTINGS_ROOT_ROLE = 100;
 export const MAX_OPTION_KEY_BYTES = 128;

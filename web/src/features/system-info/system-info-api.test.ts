@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { api } from '../../api';
+import { api } from '../../shared/api/client';
 import {
   deleteStaleSystemInstance,
   deleteStaleSystemInstances,
@@ -11,7 +11,7 @@ import {
   SystemInfoContractError,
 } from './system-info-api';
 
-vi.mock('../../api', () => ({
+vi.mock('../../shared/api/client', () => ({
   api: { get: vi.fn(), delete: vi.fn() },
 }));
 

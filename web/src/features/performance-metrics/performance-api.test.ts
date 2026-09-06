@@ -1,9 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { api } from '../../api';
+import { api } from '../../shared/api/client';
 import { loadPerformanceMetrics, loadPerformanceSummary } from './performance-api';
 import { PERFORMANCE_SERIES_SCHEMA, PerformanceContractError } from './performance-metrics';
 
-vi.mock('../../api', () => ({ api: { get: vi.fn() } }));
+vi.mock('../../shared/api/client', () => ({ api: { get: vi.fn() } }));
 
 const mockedAPI = vi.mocked(api);
 

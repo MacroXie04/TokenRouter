@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { api } from '../../api';
+import { api } from '../../shared/api/client';
 import {
   beginChannelKeyPasskey,
   ChannelKeyContractError,
@@ -9,7 +9,7 @@ import {
   verifyChannelKeyTwoFactor,
 } from './channel-key-api';
 
-vi.mock('../../api', () => ({
+vi.mock('../../shared/api/client', () => ({
   api: { post: vi.fn() },
 }));
 

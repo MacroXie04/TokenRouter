@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import type { User } from '../../api';
-import { hasUnsafeAuthText, isAuthenticatedUser } from '../../lib/auth-flow';
-import { AuthLayout } from './AuthLayout';
+import type { User } from '../../shared/api/client';
 import { authPost, isCanceledAuthRequest } from './auth-api';
+import { hasUnsafeAuthText, isAuthenticatedUser } from './auth-flow';
+import { AuthLayout } from './AuthLayout';
 
 const FLOW_TOKEN_MAX_CHARACTERS = 256;
 const OTP_LENGTH = 6;

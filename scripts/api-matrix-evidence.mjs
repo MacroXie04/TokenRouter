@@ -14,7 +14,9 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const matrixPath = process.env.TOKENROUTER_API_MATRIX || path.join(repo, 'docs/parity/API_MATRIX.md');
+// The original parity matrix is historical evidence. Current source paths and
+// route evidence are maintained separately after the package reorganization.
+const matrixPath = process.env.TOKENROUTER_API_MATRIX || path.join(repo, 'docs/development/API_MATRIX.md');
 const inventoryPath = process.env.TOKENROUTER_API_INVENTORY || path.join(repo, 'docs/parity/inventory.json');
 const inventoryMarkdownPath = process.env.TOKENROUTER_API_INVENTORY_MARKDOWN
   || path.join(repo, 'docs/parity/INVENTORY.md');
@@ -43,54 +45,56 @@ const explicitAlternates = new Map([
 // Manually reviewed tests whose helper indirection, multiline request, or
 // dynamically constructed path cannot be inferred safely from one source line.
 const testOverrides = new Map([
-  ['GET /api/perf-metrics/summary', ['controller/metrics_test.go']],
-  ['GET /api/perf-metrics', ['controller/metrics_test.go']],
-  ['GET /api/verification', ['router/reference_aliases_test.go']],
-  ['GET /api/reset_password', ['router/reference_aliases_test.go']],
-  ['GET /api/oauth/:provider', ['controller/custom_oauth_admin_test.go']],
-  ['GET /api/ratio_config', ['controller/auth_misc_routes_test.go']],
-  ['POST /api/user/login/2fa', ['controller/auth_misc_routes_test.go']],
-  ['POST /api/user/passkey/login/begin', ['controller/auth_misc_routes_test.go']],
-  ['POST /api/user/passkey/login/finish', ['controller/auth_misc_routes_test.go']],
-  ['GET /api/user/epay/notify', ['controller/auth_misc_routes_test.go']],
-  ['GET /api/user/groups', ['controller/auth_misc_routes_test.go']],
-  ['GET /api/user/self/groups', ['controller/auth_misc_routes_test.go']],
-  ['GET /api/user/models', ['controller/auth_misc_routes_test.go']],
-  ['POST /api/user/2fa/enable', ['controller/auth_misc_routes_test.go']],
-  ['POST /api/user/checkin', ['controller/auth_misc_routes_test.go']],
-  ['POST /api/waffo-pancake/webhook/:env', ['controller/waffo_pancake_test.go']],
-  ['GET /api/models/', ['controller/auth_misc_routes_test.go']],
-  ['POST /api/channel/:id/codex/refresh', ['controller/codex_admin_test.go']],
-  ['GET /api/channel/:id/codex/usage', ['controller/codex_admin_test.go']],
-  ['GET /api/channel/:id/codex/usage/reset-credits', ['controller/codex_admin_test.go']],
-  ['POST /api/channel/:id/codex/usage/reset', ['controller/codex_admin_test.go']],
-  ['POST /api/user/passkey/register/finish', ['controller/self_service_session_gate_test.go']],
-  ['GET /api/channel/:id', ['controller/secure_verify_test.go']],
-  ['POST /api/channel/:id/status', ['controller/channel_write_test.go']],
-  ['POST /api/channel/:id/key', ['controller/secure_verify_test.go']],
-  ['DELETE /api/channel/:id', ['controller/channel_durability_test.go']],
-  ['GET /api/token/:id', ['controller/token_group_test.go']],
-  ['POST /api/token/:id/key', ['controller/token_group_test.go']],
-  ['DELETE /api/token/:id', ['controller/token_group_test.go']],
-  ['DELETE /api/redemption/:id', ['controller/redemption_admin_test.go']],
-  ['DELETE /api/user/:id/bindings/:binding_type', ['controller/admin_user_routes_test.go']],
-  ['DELETE /api/user/:id', ['controller/admin_user_routes_test.go']],
-  ['POST /v1/completions', ['relay/mode_lifecycle_test.go']],
-  ['POST /v1/images/generations', ['relay/mode_lifecycle_test.go']],
-  ['POST /v1/images/edits', ['relay/multipart_lifecycle_test.go']],
-  ['POST /v1/audio/translations', ['relay/multipart_lifecycle_test.go']],
-  ['POST /v1/audio/speech', ['relay/mode_lifecycle_test.go']],
-  ['POST /v1/rerank', ['relay/mode_lifecycle_test.go']],
-  ['POST /v1/engines/:model/embeddings', ['relay/gemini_native_test.go']],
-  ['POST /v1/models/*path', ['relay/gemini_native_test.go']],
-  ['POST /v1/moderations', ['relay/mode_lifecycle_test.go']],
-  ['POST /v1beta/models/*path', ['relay/gemini_native_test.go']],
-  ['GET /v1/videos/:task_id/content', ['relay/video_task_test.go']],
-  ['POST /v1/video/generations', ['relay/video_task_test.go']],
-  ['GET /v1/video/generations/:task_id', ['relay/video_task_test.go']],
-  ['POST /v1/videos/:video_id/remix', ['relay/video_task_test.go']],
-  ['POST /v1/videos', ['relay/video_task_test.go']],
-  ['GET /v1/videos/:task_id', ['relay/video_task_test.go']],
+  ['GET /api/perf-metrics/summary', ['internal/httpapi/router/metrics_test.go']],
+  ['GET /api/perf-metrics', ['internal/httpapi/router/metrics_test.go']],
+  ['GET /api/verification', ['internal/httpapi/router/reference_aliases_test.go']],
+  ['GET /api/reset_password', ['internal/httpapi/router/reference_aliases_test.go']],
+  ['GET /api/oauth/:provider', ['internal/httpapi/router/custom_oauth_admin_test.go']],
+  ['GET /api/ratio_config', ['internal/httpapi/router/auth_misc_routes_test.go']],
+  ['POST /api/user/login/2fa', ['internal/httpapi/router/auth_misc_routes_test.go']],
+  ['POST /api/user/passkey/login/begin', ['internal/httpapi/router/auth_misc_routes_test.go']],
+  ['POST /api/user/passkey/login/finish', ['internal/httpapi/router/auth_misc_routes_test.go']],
+  ['GET /api/user/epay/notify', ['internal/httpapi/router/auth_misc_routes_test.go']],
+  ['GET /api/user/groups', ['internal/httpapi/router/auth_misc_routes_test.go']],
+  ['GET /api/user/self/groups', ['internal/httpapi/router/auth_misc_routes_test.go']],
+  ['GET /api/user/models', ['internal/httpapi/router/auth_misc_routes_test.go']],
+  ['POST /api/user/2fa/enable', ['internal/httpapi/router/auth_misc_routes_test.go']],
+  ['POST /api/user/checkin', ['internal/httpapi/router/auth_misc_routes_test.go']],
+  ['POST /api/waffo-pancake/webhook/:env', ['internal/httpapi/router/waffo_pancake_test.go']],
+  ['GET /api/models/', ['internal/httpapi/router/auth_misc_routes_test.go']],
+  ['POST /api/channel/:id/codex/refresh', ['internal/httpapi/router/codex_admin_test.go']],
+  ['GET /api/channel/:id/codex/usage', ['internal/httpapi/router/codex_admin_test.go']],
+  ['GET /api/channel/:id/codex/usage/reset-credits', ['internal/httpapi/router/codex_admin_test.go']],
+  ['POST /api/channel/:id/codex/usage/reset', ['internal/httpapi/router/codex_admin_test.go']],
+  ['POST /api/user/passkey/register/finish', ['internal/httpapi/router/self_service_session_gate_test.go']],
+  ['GET /api/channel/:id', ['internal/httpapi/router/secure_verify_test.go']],
+  ['POST /api/channel/:id/status', ['internal/httpapi/router/channel_write_test.go']],
+  ['POST /api/channel/:id/key', ['internal/httpapi/router/secure_verify_test.go']],
+  ['DELETE /api/channel/:id', ['internal/httpapi/router/channel_durability_test.go']],
+  ['GET /api/token/:id', ['internal/httpapi/router/token_group_test.go']],
+  ['POST /api/token/:id/key', ['internal/httpapi/router/token_group_test.go']],
+  ['DELETE /api/token/:id', ['internal/httpapi/router/token_group_test.go']],
+  ['DELETE /api/redemption/:id', ['internal/httpapi/router/redemption_admin_test.go']],
+  ['DELETE /api/user/:id/bindings/:binding_type', ['internal/httpapi/router/admin_user_routes_test.go']],
+  ['DELETE /api/user/:id', ['internal/httpapi/router/admin_user_routes_test.go']],
+  ['DELETE /api/user/:id/reset_passkey', ['internal/httpapi/router/auth_adjacent_test.go']],
+  ['DELETE /api/user/:id/2fa', ['internal/httpapi/router/auth_adjacent_test.go']],
+  ['POST /v1/completions', ['internal/relay/engine/mode_lifecycle_test.go']],
+  ['POST /v1/images/generations', ['internal/relay/engine/mode_lifecycle_test.go']],
+  ['POST /v1/images/edits', ['internal/relay/engine/multipart_lifecycle_test.go']],
+  ['POST /v1/audio/translations', ['internal/relay/engine/multipart_lifecycle_test.go']],
+  ['POST /v1/audio/speech', ['internal/relay/engine/mode_lifecycle_test.go']],
+  ['POST /v1/rerank', ['internal/relay/engine/mode_lifecycle_test.go']],
+  ['POST /v1/engines/:model/embeddings', ['internal/relay/engine/gemini_native_test.go']],
+  ['POST /v1/models/*path', ['internal/relay/engine/gemini_native_test.go']],
+  ['POST /v1/moderations', ['internal/relay/engine/mode_lifecycle_test.go']],
+  ['POST /v1beta/models/*path', ['internal/relay/engine/gemini_native_test.go']],
+  ['GET /v1/videos/:task_id/content', ['internal/relay/tasks/video_task_test.go']],
+  ['POST /v1/video/generations', ['internal/relay/tasks/video_task_test.go']],
+  ['GET /v1/video/generations/:task_id', ['internal/relay/tasks/video_task_test.go']],
+  ['POST /v1/videos/:video_id/remix', ['internal/relay/tasks/video_task_test.go']],
+  ['POST /v1/videos', ['internal/relay/tasks/video_task_test.go']],
+  ['GET /v1/videos/:task_id', ['internal/relay/tasks/video_task_test.go']],
 ]);
 
 // Broad table-driven overrides and routes that share a dynamic prefix need
@@ -114,6 +118,8 @@ const testOverrideMarkers = new Map([
   ['POST /api/channel/:id/codex/usage/reset', 'func TestCodexUsageResetRouteContract'],
   ['DELETE /api/user/:id/bindings/:binding_type', 'func TestAdminClearUserBindingRoute'],
   ['DELETE /api/user/:id', 'func TestAdminDeleteUserRouteAndRoleGuard'],
+  ['DELETE /api/user/:id/reset_passkey', 'func TestAdminResetPasskey'],
+  ['DELETE /api/user/:id/2fa', 'func TestAdminDisable2FA'],
   ['POST /v1/completions', [
     'func TestOpenAIModeLifecycleWireResponseAndAccounting',
     'name: "Completions", clientPath: "/v1/completions", upstreamPath: "/v1/completions"',
@@ -288,13 +294,12 @@ function walkFiles(directory, predicate, output = []) {
 }
 
 const implementationFiles = [
-  ...walkFiles(path.join(repo, 'controller'), (file) => file.endsWith('.go') && !file.endsWith('_test.go')),
-  ...walkFiles(path.join(repo, 'relay'), (file) => file.endsWith('.go') && !file.endsWith('_test.go')),
-  ...walkFiles(path.join(repo, 'router'), (file) => file.endsWith('.go') && !file.endsWith('_test.go')),
-  path.join(repo, 'main.go'),
+  ...walkFiles(path.join(repo, 'internal/httpapi'), (file) => file.endsWith('.go') && !file.endsWith('_test.go')),
+  ...walkFiles(path.join(repo, 'internal/relay'), (file) => file.endsWith('.go') && !file.endsWith('_test.go')),
+  path.join(repo, 'internal/app/bootstrap.go'),
 ].sort();
 
-const testFiles = ['controller', 'middleware', 'relay', 'router']
+const testFiles = ['internal/httpapi', 'internal/relay']
   .flatMap((directory) => walkFiles(path.join(repo, directory), (file) =>
     file.endsWith('_test.go') && !file.endsWith('routes_dump_test.go')))
   .sort()
@@ -315,8 +320,9 @@ function sourceInfo(handler) {
   const pattern = new RegExp(`^func\\s+${escapeRegExp(functionName)}\\s*\\(`, 'm');
   for (const file of implementationFiles) {
     const relativeFile = path.relative(repo, file);
-    if (packageName && packageName !== 'main' && !relativeFile.startsWith(`${packageName}/`)) continue;
-    if (packageName === 'main' && relativeFile !== 'main.go') continue;
+    const packagePath = handler.slice(0, handler.lastIndexOf('/') + 1) + packageName;
+    const relativePackage = packagePath.replace('github.com/tokenrouter/tokenrouter/', '');
+    if (path.dirname(relativeFile) !== relativePackage) continue;
     const content = fs.readFileSync(file, 'utf8');
     const match = pattern.exec(content);
     if (!match) continue;
@@ -379,7 +385,7 @@ function routePattern(routePath, forbidden = new Map()) {
 
 function testEvidence(row, target, handlerUseCount, targetRoutes) {
   const source = sourceInfo(target.handler);
-  const { functionName, packageName } = source;
+  const { functionName } = source;
   const handlerIsUnique = handlerUseCount.get(target.handler) === 1;
   const directHandlerRegex = new RegExp(
     `(?:\\b${escapeRegExp(functionName)}\\s*\\(|func\\s+Test[A-Za-z0-9_]*${escapeRegExp(functionName)}\\b|handler\\s*:\\s*${escapeRegExp(functionName)}\\b)`,
@@ -415,7 +421,7 @@ function testEvidence(row, target, handlerUseCount, targetRoutes) {
       file,
       score: methodPathRegex.test(content)
         ? 2
-        : (handlerIsUnique && path.relative(repo, file).startsWith(`${packageName}/`) && directHandlerRegex.test(content) ? 1 : 0),
+        : (handlerIsUnique && path.dirname(path.relative(repo, file)) === path.dirname(source.relativeFile) && directHandlerRegex.test(content) ? 1 : 0),
     }))
     .filter(({ score }) => score > 0)
     .sort((a, b) => b.score - a.score || a.file.localeCompare(b.file))
@@ -440,8 +446,8 @@ function targetEvidence(target, source, tests) {
 }
 
 function embeddedWebEvidence() {
-  const implementationPath = path.join(repo, 'web_static.go');
-  const testPath = path.join(repo, 'web_static_test.go');
+  const implementationPath = path.join(repo, 'internal/app/web_static.go');
+  const testPath = path.join(repo, 'internal/app/web_static_test.go');
   if (!fs.existsSync(implementationPath) || !fs.existsSync(testPath)) return null;
   const implementation = fs.readFileSync(implementationPath, 'utf8');
   const tests = fs.readFileSync(testPath, 'utf8');
@@ -464,8 +470,8 @@ function embeddedWebEvidence() {
   if (!implementationMarkers.every((marker) => implementation.includes(marker))
     || !testMarkers.every((marker) => tests.includes(marker))) return null;
   return {
-    implementation: 'main.go (serveEmbedded), web_static.go (embeddedWebHandler)',
-    test: 'web_static_test.go',
+    implementation: 'internal/app/bootstrap.go (serveEmbedded), internal/app/web_static.go (embeddedWebHandler)',
+    test: 'internal/app/web_static_test.go',
   };
 }
 
@@ -491,7 +497,7 @@ function classifyRows(rows, targetRoutes) {
         status: webEvidence ? 'PASS' : 'IN_PROGRESS',
         evidence: webEvidence
           ? `impl: ${webEvidence.implementation}; test: ${webEvidence.test}`
-          : 'partial: router/router.go and main.go implement API/relay 404 plus SPA fallback; tested embedded web handler is absent',
+          : 'partial: internal/httpapi/router/router.go and internal/app/bootstrap.go implement API/relay 404 plus SPA fallback; tested embedded web handler is absent',
       });
       continue;
     }
@@ -500,7 +506,7 @@ function classifyRows(rows, targetRoutes) {
         status: webEvidence ? 'PASS' : 'IN_PROGRESS',
         evidence: webEvidence
           ? `impl: ${webEvidence.implementation}; test: ${webEvidence.test}`
-          : 'partial: main.go (serveEmbedded) embeds web/dist; tested embedded web handler is absent',
+          : 'partial: internal/app/bootstrap.go (serveEmbedded) embeds web/dist; tested embedded web handler is absent',
       });
       continue;
     }

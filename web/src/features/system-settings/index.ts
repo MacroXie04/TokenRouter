@@ -1,12 +1,8 @@
-export { SystemSettingsView } from './SystemSettingsView';
-export type { SystemSettingsViewProps } from './SystemSettingsView';
-export { SystemSettingsEditor, SettingEditor } from './SystemSettingsEditor';
-export type { SystemSettingsEditorProps } from './SystemSettingsEditor';
 export {
   SYSTEM_SETTINGS_CATEGORIES,
   SYSTEM_SETTINGS_CATEGORY_IDS,
   SYSTEM_SETTING_KEYS,
-  resolveSettingsPath,
+  resolveSettingsPath
 } from './settings-catalog';
 export type {
   SettingDefinition,
@@ -14,7 +10,7 @@ export type {
   SettingInputKind,
   SettingsCategoryDefinition,
   SettingsSectionDefinition,
-  SystemSettingsCategory,
+  SystemSettingsCategory
 } from './settings-catalog';
 export {
   SYSTEM_SETTINGS_ROOT_ROLE,
@@ -22,6 +18,10 @@ export {
   SystemSettingsContractError,
   assertSystemSettingsRoot,
   loadSystemOptions,
-  updateSystemOption,
+  updateSystemOption
 } from './system-settings-api';
 export type { SystemOption } from './system-settings-api';
+export { SettingEditor, SystemSettingsEditor } from './SystemSettingsEditor';
+export type { SystemSettingsEditorProps } from './SystemSettingsEditor';
+export { SystemSettingsView } from './SystemSettingsView';
+export type { SystemSettingsViewProps } from './SystemSettingsView';

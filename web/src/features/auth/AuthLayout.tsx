@@ -1,5 +1,5 @@
 import { useId, type ReactNode } from 'react';
-import { SystemBrand, useSystemBrand } from '../layout/SystemBrand';
+import { SystemBrand, useSystemBrand } from '../../shared/ui/SystemBrand';
 
 export function AuthLayout({
   title,

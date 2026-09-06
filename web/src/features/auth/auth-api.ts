@@ -1,4 +1,4 @@
-import { api, withoutSessionRefresh } from '../../api';
+import { api, withoutSessionRefresh } from '../../shared/api/client';
 
 const MAX_AUTH_RESPONSE_BYTES = 576 * 1024;
 const MAX_AUTH_REQUEST_BYTES = 128 * 1024;

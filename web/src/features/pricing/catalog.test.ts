@@ -4,8 +4,8 @@ import {
   itemModalities,
   parsePricingCatalogResponse,
   parsePricingQuery,
-  pricingQueryString,
   PricingContractError,
+  pricingQueryString,
   type PricingCatalogItem,
 } from './catalog';
 

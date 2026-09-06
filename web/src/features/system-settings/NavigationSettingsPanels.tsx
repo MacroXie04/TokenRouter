@@ -1,7 +1,7 @@
 import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
-import { parseSidebarModules } from '../layout/navigation';
-import { parseHeaderNavigationModules } from '../../lib/nav-modules';
+import { parseHeaderNavigationModules } from '../../shared/config/nav-modules';
+import { parseSidebarModules } from '../../shared/config/sidebar-navigation';
 import {
   isAbortError,
   updateSystemOption,

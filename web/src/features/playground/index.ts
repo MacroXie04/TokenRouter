@@ -1,4 +1,3 @@
-export { PlaygroundView, type PlaygroundViewProps } from './PlaygroundView';
 export {
   PLAYGROUND_ENDPOINT,
   PLAYGROUND_GROUPS_ENDPOINT,
@@ -16,5 +15,6 @@ export {
   type PlaygroundConversationTurn,
   type PlaygroundFetch,
   type PlaygroundGroup,
-  type PlaygroundParameters,
+  type PlaygroundParameters
 } from './playground-api';
+export { PlaygroundView, type PlaygroundViewProps } from './PlaygroundView';

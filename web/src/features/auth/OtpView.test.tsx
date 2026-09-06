@@ -3,7 +3,7 @@
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { User } from '../../api';
+import type { User } from '../../shared/api/client';
 import { authPost } from './auth-api';
 import { OtpView } from './OtpView';
 

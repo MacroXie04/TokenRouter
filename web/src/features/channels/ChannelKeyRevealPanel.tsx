@@ -1,15 +1,15 @@
 import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
+  isPasskeyLoginSupported,
+  serializeAssertionCredential,
+} from '../../shared/browser/webauthn';
+import {
   beginChannelKeyPasskey,
   finishChannelKeyPasskey,
   revealChannelKey,
   verifyChannelKeyTwoFactor,
 } from './channel-key-api';
-import {
-  isPasskeyLoginSupported,
-  serializeAssertionCredential,
-} from '../../lib/webauthn';
 
 const AUTO_HIDE_MILLISECONDS = 45_000;
 

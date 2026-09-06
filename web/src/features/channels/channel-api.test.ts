@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { api } from '../../api';
+import { api } from '../../shared/api/client';
 import {
   applyAllUpstreamUpdates,
   applyUpstreamUpdates,
@@ -7,8 +7,8 @@ import {
   ChannelContractError,
   copyChannel,
   createChannel,
-  deleteDisabledChannels,
   deleteChannels,
+  deleteDisabledChannels,
   deleteOllamaModel,
   detectAllUpstreamUpdates,
   detectUpstreamUpdates,
@@ -21,13 +21,13 @@ import {
   loadOllamaVersion,
   loadTagModels,
   manageMultiKey,
-  parseCodexDocumentResponse,
-  parseChannelRepairResponse,
   parseChannelDetailResponse,
+  parseChannelRepairResponse,
   parseChannelSearchResponse,
-  parseMultiKeyPageResponse,
   parseChannelTestResponse,
+  parseCodexDocumentResponse,
   parseModelListResponse,
+  parseMultiKeyPageResponse,
   pullOllamaModel,
   pullOllamaModelStream,
   refreshAllChannelBalances,
@@ -42,12 +42,12 @@ import {
   setTagChannelsStatus,
   testAllChannels,
   testChannel,
-  updateTagChannels,
   updateChannel,
+  updateTagChannels,
   type ChannelCreateInput,
 } from './channel-api';
 
-vi.mock('../../api', () => ({
+vi.mock('../../shared/api/client', () => ({
   api: {
     get: vi.fn(),
     post: vi.fn(),

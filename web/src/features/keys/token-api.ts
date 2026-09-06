@@ -1,4 +1,4 @@
-import { api } from '../../api';
+import { api } from '../../shared/api/client';
 
 export const TOKEN_PAGE_SIZE = 20;
 export const TOKEN_ENABLED = 1;

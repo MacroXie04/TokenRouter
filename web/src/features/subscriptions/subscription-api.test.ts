@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { api } from '../../api';
+import { api } from '../../shared/api/client';
 import {
   SubscriptionContractError,
   createSubscriptionPlan,
@@ -22,7 +22,7 @@ import {
   type SubscriptionPlanInput,
 } from './subscription-api';
 
-vi.mock('../../api', () => ({
+vi.mock('../../shared/api/client', () => ({
   api: {
     get: vi.fn(),
     post: vi.fn(),

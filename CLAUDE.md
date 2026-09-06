@@ -1,93 +1,81 @@
-# CLAUDE.md
+# Repository instructions
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+TokenRouter is an independently implemented, MIT-licensed AI gateway with an
+embedded React dashboard. Never copy reference implementation code. Compatibility
+choices (Chinese relay errors, structured 501 placeholders, the 500000 quota unit)
+are intentional; consult `docs/parity/KNOWN_DEVIATIONS.md` before changing behavior.
 
-## What this is
+## Navigation and ownership
 
-TokenRouter is an AI API gateway compiled into a single Go binary: an OpenAI-compatible relay data plane (`/v1/*`, `/v1beta/*`) that sits between clients and upstream LLM providers, plus a dashboard/control-plane API (`/api/*`) and an embedded React SPA.
+- `cmd/tokenrouter`: executable entry point; `internal/app`: initialization,
+  dependency assembly, HTTP server and embedded SPA lifecycle.
+- `internal/httpapi`: router, middleware, request context, DTOs and domain
+  handlers. Handler unit tests are adjacent; assembled cross-domain HTTP tests
+  live with the router.
+- `internal/auth`, `users`, `channels`, `catalog`, `billing`, `operations`:
+  business logic with explicit downward dependencies.
+- `internal/relay/{contract,providers,engine,tasks,policy,customconfig}`: shared
+  contracts, explicit provider protocols, dispatch, durable task lifecycles,
+  request policy and advanced-provider configuration.
+- `internal/store`: entities, connections, migration registry and schema
+  migrations; `internal/settings`: validated database-backed runtime snapshots.
+- `internal/platform`: focused infrastructure subpackages, not a catch-all.
+  `internal/testutil` contains reusable test fixtures only.
+- `protocolkit`: independent Go module; never import the root module from it.
+- `web/src/app`: bootstrap, routes, layout, session coordination;
+  `features`: business pages, behavior, APIs and adjacent tests;
+  `shared`: general transport/utilities/UI; `i18n` and global `styles.css`.
 
-It is an independent, MIT-licensed reimplementation of an AGPL-licensed reference gateway, built for behavioral parity. Parity state and decisions live in `docs/parity/` (`STATUS.md`, `KNOWN_DEVIATIONS.md`, `API_MATRIX.md`, `PROVENANCE.md`). Behaviors that look wrong may be deliberate parity choices — e.g. Chinese relay error strings, structured-501 placeholder endpoints, `QuotaPerUnit = 500000` — check `KNOWN_DEVIATIONS.md` before "fixing" them. Never copy code from the reference project; TokenRouter is written from scratch.
+See `docs/architecture/README.md` and `docs/development/reorganization.md`.
 
 ## Commands
 
-Backend (Go 1.26, repo root). CI (`.github/workflows/ci.yml`) runs exactly these:
+Use Go 1.26 and the frozen npm lockfile. Build frontend assets first:
 
-```bash
-go build ./...          # requires web/dist to exist — see gotcha below
+```sh
+(cd web && npm ci --no-audit --no-fund && npm run lint && npm test && npm run typecheck && npm run build)
 go vet ./...
-go test ./...           # does NOT include protocolkit/ (separate module)
-go test ./service/                          # one package
-go test ./controller/ -run TestRegister     # one test
-go test -race ./common/... ./service/...    # race pass for quota/routing code
+go build ./...
+go test ./...
+go test -race ./internal/...
+node scripts/verify-repository-layout.mjs
+go run ./cmd/tokenrouter
+(cd protocolkit && GOWORK=off go vet ./... && GOWORK=off go build ./... && GOWORK=off go test ./...)
+bash scripts/tokenrouter-acceptance.sh
 ```
 
-`protocolkit/` is a separate Go module (consumed via a `replace` directive) and must also build standalone:
+`web/embed.go` embeds ignored `web/dist`; preserve this relationship and never
+commit generated assets. Local startup defaults to port 3000 and SQLite. `.env`
+does not override environment variables. Root account creation uses the setup
+wizard (`POST /api/setup`); there is no default password.
 
-```bash
-cd protocolkit && GOWORK=off go vet ./... && GOWORK=off go build ./... && GOWORK=off go test ./...
-```
+`node scripts/check-translations.mjs` checks all locales. Current route evidence
+lives in `docs/development/API_MATRIX.md`: regenerate with
+`bash scripts/update-api-matrix.sh`, verify with
+`bash scripts/verify-api-matrix.sh`. Update exact external-store CI selectors
+when tests move; the manifest runner rejects missing/skipped tests.
+The repository layout guard also requires all top-level Go tests to match
+`scripts/manifests/go-tests.json`, separately for root and protocolkit modules.
+After reviewing an intentional addition or move, refresh that inventory with
+`node scripts/verify-repository-layout.mjs --update-manifest`.
 
-Frontend (`web/`, bun + Rsbuild + TypeScript):
+## Change discipline
 
-```bash
-cd web && bun install
-bun run typecheck
-bun run build           # outputs web/dist, which gets embedded into the Go binary
-```
+Inspect the working tree and coordinate around other edits. A Go subdirectory
+is a new package: inspect private symbols and dependency direction first. Do not
+force boundaries with unnecessary exports, split transactions, introduce generic
+catch-all packages, or merge similar-looking provider state machines.
 
-Repo-level checks:
+Preserve routes, payloads/statuses, authentication, provider IDs, configuration
+names, database names/values, transaction boundaries, idempotency, cancellation
+and durable recovery. Run race checks for auth, accounting and recovery changes.
+The ordered `AllModels` registry drives migrations; preserve GORM hooks,
+database-clock fences, and separate primary/log-store behavior.
 
-```bash
-scripts/tokenrouter-acceptance.sh    # full acceptance gate: vet+build+test+race+protocolkit+frontend
-node scripts/check-translations.mjs  # all locale files must have identical key sets (run from repo root)
-scripts/update-api-matrix.sh         # re-classify docs/parity/API_MATRIX.md from the actual router
-scripts/verify-api-matrix.sh         # verify every API_MATRIX row against the real route table
-```
+No production data or paid provider calls in local validation. Outbound calls
+use the SSRF-safe transport; `SSRF_DISABLE=true` is only for controlled local
+test upstreams. Runtime guidance is in `docs/operations`.
 
-Run locally: `go run .` — listens on `:3000`, zero-config SQLite (`tokenrouter.db`). Config via env vars / `.env` (see `.env.example`). The initial root account is created through the setup wizard (`POST /api/setup`); there is no default password. Outbound relay traffic goes through an SSRF guard (`common.SafeDialContext`); set `SSRF_DISABLE=true` only when local channels point at loopback upstreams.
-
-**Build gotcha:** `web/embed.go` does `//go:embed dist` and `web/dist/` is gitignored, so on a fresh checkout `go build ./...` fails until you run `cd web && bun install && bun run build`.
-
-## Architecture
-
-Layering (top to bottom):
-
-- `router/` — all route registration in `SetUpRouter()`: public + user `/api`, admin `/api` (AdminAuth), relay `/v1` + `/v1beta` (TokenAuth)
-- `controller/` — HTTP handlers
-- `service/` — business logic: auth flows, channel selection, billing/quota, subscriptions, background jobs, Casbin authz
-- `model/` — GORM entities; `AllModels` in `model/main.go` is the AutoMigrate list — add new entities there
-- `setting/` — DB-backed options table cached in memory, hot-reloaded via `Sync()` for multi-node deployments
-- `relay/` — relay engine: lifecycle in `relay/controller.go`, adapter registry in `relay/adaptor.go`, provider adapters in `relay/channel/{openai,claude,gemini}`
-- `protocolkit/` — pure, standalone module: OpenAI/Responses/Claude/Gemini DTOs plus wire-format conversion and usage normalization; it must never import the root module
-- `middleware/` — dashboard auth (JWT + session), relay auth (bearer token), rate limits, CORS, origin guard, step-up secure verification
-- `common/` — JSON wrapper (jsoniter; all business code routes through it), quota saturation math, Redis with in-memory fallback, SSRF guard, env helpers
-- `pkg/billingexpr/` — expr-lang based price expressions
-
-### Relay request lifecycle (`relay/controller.go`, `relayAndSettle`)
-
-1. `TokenAuth` resolves the bearer API key to a `Token` and its owning `User`.
-2. URL path maps to a `RelayMode` (`constant/`); per-request state travels in `RelayInfo`.
-3. Channel selection: `Ability` rows (group, model, channel, priority, weight) chosen priority-first then weighted-random, with retries that exclude already-failed channels; served from a cache (`service.InitAbilityCache`).
-4. Pre-consume: user quota is reserved before the upstream call so concurrent requests cannot overspend; token quota is checked.
-5. The adapter converts the OpenAI request to the provider wire format and back (`relay.GetAdaptor`: Anthropic → claude, Gemini/Vertex → gemini, everything else → openai adapter). The conversion functions themselves live in `protocolkit`.
-6. Settlement: actual usage is priced via the model-price registry (USD per 1M tokens), converted to quota with saturation clamps, settled against user + token, and a consumption log is written to `LOG_DB`.
-
-Native (non-OpenAI-format) surfaces pass through without conversion: `/v1/messages` (Claude, `relay/claude_messages.go`), `/v1beta/...` and `/v1/models/*path` (Gemini generateContent, `relay/gemini_native.go`), `/v1/realtime` (WebSocket, `relay/realtime.go`). Some responses also adapt their shape to caller headers (e.g. `x-api-key` + `anthropic-version` gets Claude-shaped model listings).
-
-### Control plane
-
-Dashboard auth uses short-lived access JWTs plus server-side sessions with refresh-token rotation and replay detection (`service/auth_flow.go`). Roles are User/Admin/Root, layered with Casbin (`service/authz.go`). Sensitive account/admin actions require step-up verification (`POST /api/verify`, `middleware/secure_verification.go`). 2FA (TOTP + backup codes), passkeys (WebAuthn), and OAuth (GitHub/Discord/Telegram/WeChat/LinuxDO/custom) are all in `service/`.
-
-### Persistence
-
-GORM v2. Primary DB selected by env: SQLite (default), or MySQL/PostgreSQL via `SQL_DSN` prefix. Optional separate log DB via `LOG_SQL_DSN`, which may be `clickhouse://` — `model/clickhouse.go` hand-builds MergeTree DDL instead of AutoMigrate. Row locking uses `clause.Locking{Strength: "UPDATE"}` and is skipped on SQLite. Redis (`REDIS_CONN_STRING`) backs shared cache/rate limiting when configured, with an in-memory fallback otherwise.
-
-### Frontend (`web/`)
-
-React 19 + Rsbuild + axios + i18next. Views live in `web/src/views/`; the shared axios instance (`web/src/api.ts`) targets same-origin `/api` with cookie credentials. No dev-server proxy is configured, so verify UI changes against the Go binary serving a fresh `bun run build`. `main.go` serves the embedded SPA with index.html fallback and analytics injection; `/v1`, `/api`, and `/assets` paths never fall back to the SPA (they return the structured relay 404). All locale files in `web/src/i18n/locales/` must keep identical key sets — verify with `node scripts/check-translations.mjs`.
-
-## Parity workflow
-
-When adding, changing, or removing routes, update the machine-maintained matrix: run `scripts/update-api-matrix.sh`, then `scripts/verify-api-matrix.sh` (it dumps the real route table via `go test ./router/ -run TestDumpRoutes` and exact-matches every matrix row — no suffix guessing). Intentional differences from the reference get a numbered entry in `docs/parity/KNOWN_DEVIATIONS.md`; iteration status goes in `docs/parity/STATUS.md`.
-
-Relay-facing error messages are intentionally Chinese (parity with the reference wire contract) — do not translate them.
+Historical reports and fingerprints in `docs/parity` describe recorded snapshots.
+Do not rewrite them for source moves or imply they validate reorganized code.
+Active development and validation documents live in `docs/development`.

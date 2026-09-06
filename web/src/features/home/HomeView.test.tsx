@@ -3,7 +3,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { HeaderNavigationModules } from '../../lib/nav-modules';
+import type { HeaderNavigationModules } from '../../shared/config/nav-modules';
 import type { PricingCatalog } from '../pricing/catalog';
 import { loadPricingCatalog } from '../pricing/pricing-api';
 import { loadBasicRankings, loadPerformanceSummary, loadPublicContent } from './home-api';

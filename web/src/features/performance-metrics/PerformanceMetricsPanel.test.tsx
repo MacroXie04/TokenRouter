@@ -4,8 +4,8 @@ import { act, cleanup, render, screen, waitFor, within } from '@testing-library/
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { loadPerformanceMetrics } from './performance-api';
-import { PerformanceMetricsPanel, PerformanceSummaryBadge } from './PerformanceMetricsPanel';
 import { PERFORMANCE_SERIES_SCHEMA, type PerformanceMetrics } from './performance-metrics';
+import { PerformanceMetricsPanel, PerformanceSummaryBadge } from './PerformanceMetricsPanel';
 
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => key }) }));
 vi.mock('./performance-api', () => ({ loadPerformanceMetrics: vi.fn() }));

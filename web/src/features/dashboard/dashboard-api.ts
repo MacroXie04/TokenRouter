@@ -1,11 +1,11 @@
-import { api } from '../../api';
+import { api } from '../../shared/api/client';
 import {
   ConsoleContentContractError,
   parseConsoleAPIInfo,
   parseConsoleFAQ,
   type ConsoleAPIInfo,
   type ConsoleFAQ,
-} from '../../lib/console-content';
+} from './console-content';
 
 export const DASHBOARD_SECTIONS = ['overview', 'models', 'flow', 'users'] as const;
 export type DashboardSection = (typeof DASHBOARD_SECTIONS)[number];

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { api } from '../../api';
+import { api } from '../../shared/api/client';
 import {
   calculatePaymentAmount,
   checkIn,
@@ -14,8 +14,8 @@ import {
   getTopUpInfo,
   getWalletOrders,
   getWalletUser,
-  parseAffiliateResponse,
   parseAdminWalletOrderPageResponse,
+  parseAffiliateResponse,
   parseSubscriptionPlansResponse,
   parseSubscriptionSummaryResponse,
   parseTopUpInfoResponse,
@@ -29,7 +29,7 @@ import {
   WalletContractError,
 } from './wallet-api';
 
-vi.mock('../../api', () => ({
+vi.mock('../../shared/api/client', () => ({
   api: { get: vi.fn(), post: vi.fn(), put: vi.fn() },
 }));
 

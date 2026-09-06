@@ -61,7 +61,7 @@ jobs:
       - name: Format
         shell: bash
         run: |
-          unformatted="$(gofmt -l $(git ls-files '*.go'))"
+          unformatted="$(node scripts/list-source-files.mjs . --go | xargs -0 gofmt -l)"
           if [[ -n "$unformatted" ]]; then
             echo "The following Go files need gofmt:"
             echo "$unformatted"
@@ -71,6 +71,8 @@ jobs:
         run: bash scripts/test-tokenrouter-acceptance.sh
       - name: Release scanner regressions
         run: |
+          node scripts/verify-repository-layout.mjs --self-test
+          node scripts/verify-repository-layout.mjs
           node scripts/verify-go-test-manifest.mjs --self-test
           bash scripts/scan-repository-secrets.sh --self-test
           bash scripts/scan-repository-secrets.sh
@@ -81,7 +83,7 @@ jobs:
       - name: Test
         run: go test ./...
       - name: Race tests
-        run: go test -race ./common/... ./middleware/... ./relay/... ./router/... ./service/...
+        run: go test -race ./internal/...
       - name: Protocol module (standalone)
         run: |
           cd protocolkit
@@ -159,15 +161,15 @@ jobs:
           TOKENROUTER_CHANNEL_TYPE_CATALOG: reference-v1
         run: |
           bash scripts/run-go-test-manifest.sh \
-            ./model:TestDatabaseMatrixExternalMigration \
-            ./model:TestRelationalLogRetentionExternalDatabaseLifecycle \
-            ./service:TestRelayAccountingExternalDatabaseConcurrency \
-            ./service:TestChannelMultiKeyExternalDatabaseConcurrency \
-            ./service:TestSystemTaskExternalDatabaseLeaseAndCadence \
-            ./service:TestAuditOutboxExternalDatabaseLeaseAndDelivery \
-            ./service:TestSubscriptionUsageEpochExternalDatabaseLifecycle \
-            ./service:TestTaskOperationAccountingExternalDatabaseLifecycle \
-            ./relay:TestJimengExternalDatabaseAtomicLifecycle
+            ./internal/store:TestDatabaseMatrixExternalMigration \
+            ./internal/store:TestRelationalLogRetentionExternalDatabaseLifecycle \
+            ./internal/billing:TestRelayAccountingExternalDatabaseConcurrency \
+            ./internal/channels:TestChannelMultiKeyExternalDatabaseConcurrency \
+            ./internal/operations:TestSystemTaskExternalDatabaseLeaseAndCadence \
+            ./internal/billing:TestAuditOutboxExternalDatabaseLeaseAndDelivery \
+            ./internal/billing:TestSubscriptionUsageEpochExternalDatabaseLifecycle \
+            ./internal/billing:TestTaskOperationAccountingExternalDatabaseLifecycle \
+            ./internal/relay/tasks:TestJimengExternalDatabaseAtomicLifecycle
       - name: PostgreSQL migration, accounting, scheduler, retention, outbox, and async-task lifecycle
         env:
           TOKENROUTER_TEST_SQL_DSN: postgres://tokenrouter:tokenrouter-ci@127.0.0.1:5432/tokenrouter_ci?sslmode=disable
@@ -175,29 +177,29 @@ jobs:
           TOKENROUTER_CHANNEL_TYPE_CATALOG: reference-v1
         run: |
           bash scripts/run-go-test-manifest.sh \
-            ./model:TestDatabaseMatrixExternalMigration \
-            ./model:TestRelationalLogRetentionExternalDatabaseLifecycle \
-            ./service:TestRelayAccountingExternalDatabaseConcurrency \
-            ./service:TestChannelMultiKeyExternalDatabaseConcurrency \
-            ./service:TestSystemTaskExternalDatabaseLeaseAndCadence \
-            ./service:TestAuditOutboxExternalDatabaseLeaseAndDelivery \
-            ./service:TestSubscriptionUsageEpochExternalDatabaseLifecycle \
-            ./service:TestTaskOperationAccountingExternalDatabaseLifecycle \
-            ./relay:TestJimengExternalDatabaseAtomicLifecycle
+            ./internal/store:TestDatabaseMatrixExternalMigration \
+            ./internal/store:TestRelationalLogRetentionExternalDatabaseLifecycle \
+            ./internal/billing:TestRelayAccountingExternalDatabaseConcurrency \
+            ./internal/channels:TestChannelMultiKeyExternalDatabaseConcurrency \
+            ./internal/operations:TestSystemTaskExternalDatabaseLeaseAndCadence \
+            ./internal/billing:TestAuditOutboxExternalDatabaseLeaseAndDelivery \
+            ./internal/billing:TestSubscriptionUsageEpochExternalDatabaseLifecycle \
+            ./internal/billing:TestTaskOperationAccountingExternalDatabaseLifecycle \
+            ./internal/relay/tasks:TestJimengExternalDatabaseAtomicLifecycle
       - name: ClickHouse audit-log schema, insert, retention, and retry deduplication
         env:
           TOKENROUTER_TEST_CLICKHOUSE_DSN: clickhouse://tokenrouter:tokenrouter-ci@127.0.0.1:9000/tokenrouter_logs?dial_timeout=5s
           TOKENROUTER_TEST_ALLOW_SCHEMA_RESET: "1"
         run: |
           bash scripts/run-go-test-manifest.sh \
-            ./model:TestClickHouseExternalLogLifecycle \
-            ./model:TestClickHouseLogRetentionExternalDatabaseLifecycle
+            ./internal/store:TestClickHouseExternalLogLifecycle \
+            ./internal/store:TestClickHouseLogRetentionExternalDatabaseLifecycle
       - name: Redis shared-store atomicity and expiry lifecycle
         env:
           TOKENROUTER_TEST_REDIS_DSN: redis://127.0.0.1:6379/15
         run: >-
           bash scripts/run-go-test-manifest.sh
-          ./common:TestRedisExternalSharedStoreLifecycle
+          ./internal/platform/cache:TestRedisExternalSharedStoreLifecycle
 
   container-image:
     runs-on: ubuntu-latest

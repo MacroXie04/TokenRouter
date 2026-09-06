@@ -1,13 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { api } from '../../api';
+import { api } from '../../shared/api/client';
 import {
   DashboardAccessError,
   DashboardContractError,
   aggregateDashboardRows,
   aggregateDashboardTimeline,
   canFilterDashboardByUsername,
-  dashboardQueryURL,
   dashboardMetricValue,
+  dashboardQueryURL,
   dashboardTimelineBucket,
   dashboardTimelineBuckets,
   defaultDashboardQuery,
@@ -25,7 +25,7 @@ import {
   type DashboardQuery,
 } from './dashboard-api';
 
-vi.mock('../../api', () => ({ api: { get: vi.fn() } }));
+vi.mock('../../shared/api/client', () => ({ api: { get: vi.fn() } }));
 
 const mockedGet = vi.mocked(api.get);
 

@@ -1,4 +1,4 @@
-import { api } from '../../api';
+import { api } from '../../shared/api/client';
 import {
   MAX_PERFORMANCE_MODEL_NAME_BYTES,
   parsePerformanceMetricsResponse,

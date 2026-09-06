@@ -1,4 +1,4 @@
-import { bufferToBase64Url, prepareCreationOptions, type PreparedCreationOptions } from '../../lib/webauthn';
+import { bufferToBase64Url, prepareCreationOptions, type PreparedCreationOptions } from '../../shared/browser/webauthn';
 
 const MAX_OPTIONS_BYTES = 64 * 1024;
 const MAX_RESULT_BYTES = 128 * 1024;

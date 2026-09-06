@@ -2,7 +2,7 @@
 
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { getData } from '../../api';
+import { getData } from '../../shared/api/client';
 import { MAX_DOCUMENT_CHARACTERS } from './content';
 import { PublicDocumentView } from './PublicDocumentView';
 
@@ -11,7 +11,7 @@ vi.mock('react-i18next', () => {
   return { useTranslation: () => ({ t }) };
 });
 
-vi.mock('../../api', () => ({
+vi.mock('../../shared/api/client', () => ({
   getData: vi.fn(),
 }));
 

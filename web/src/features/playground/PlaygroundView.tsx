@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
-import type { User } from '../../api';
+import type { User } from '../../shared/api/client';
 import {
   PLAYGROUND_LIMITS,
   PlaygroundContractError,
