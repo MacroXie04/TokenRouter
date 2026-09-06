@@ -1,27 +1,18 @@
+import { PublicHomeContractError } from "../public-documents";
 import { api } from '../../shared/api/client';
-import { parseRankingRows, type RankingRow } from '../rankings/rankings';
+import { parseRankingRows, type RankingRow } from "../rankings";
 
-export const MAX_PUBLIC_CONTENT_CHARACTERS = 1_000_000;
-const PUBLIC_CONTENT_RESPONSE_BYTES = 6 * 1024 * 1024;
 const SUMMARY_RESPONSE_BYTES = 2 * 1024 * 1024;
 const MAX_PERFORMANCE_MODELS = 10_000;
 const MAX_MODEL_NAME = 512;
 
 type UnknownRecord = Record<string, unknown>;
-export type PublicContentPath = '/notice' | '/home_page_content' | '/about' | '/user-agreement' | '/privacy-policy';
 
 export interface PerformanceSummary {
   model_name: string;
   avg_latency_ms: number;
   success_rate: number;
   avg_tps: number;
-}
-
-export class PublicHomeContractError extends Error {
-  constructor() {
-    super('Invalid public home API response');
-    this.name = 'PublicHomeContractError';
-  }
 }
 
 function fail(): never {
@@ -55,12 +46,6 @@ function finite(value: unknown, minimum: number, maximum: number): number {
   return value;
 }
 
-export function parsePublicContentResponse(value: unknown): string {
-  const data = envelopeData(value, PUBLIC_CONTENT_RESPONSE_BYTES);
-  if (typeof data !== 'string' || data.length > MAX_PUBLIC_CONTENT_CHARACTERS) fail();
-  return data.trim();
-}
-
 export function parsePerformanceSummaryResponse(value: unknown): PerformanceSummary[] {
   const data = record(envelopeData(value, SUMMARY_RESPONSE_BYTES));
   if (!Array.isArray(data.models) || data.models.length > MAX_PERFORMANCE_MODELS) fail();
@@ -86,15 +71,6 @@ export function parsePerformanceSummaryResponse(value: unknown): PerformanceSumm
 
 export function parseBasicRankingsResponse(value: unknown): RankingRow[] {
   return parseRankingRows(envelopeData(value, SUMMARY_RESPONSE_BYTES));
-}
-
-export async function loadPublicContent(path: PublicContentPath, signal?: AbortSignal): Promise<string> {
-  const response = await api.get<unknown>(path, {
-    signal,
-    maxContentLength: PUBLIC_CONTENT_RESPONSE_BYTES,
-    maxBodyLength: PUBLIC_CONTENT_RESPONSE_BYTES,
-  });
-  return parsePublicContentResponse(response.data);
 }
 
 export async function loadPerformanceSummary(signal?: AbortSignal): Promise<PerformanceSummary[]> {

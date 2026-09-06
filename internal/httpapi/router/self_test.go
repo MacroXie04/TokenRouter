@@ -372,7 +372,7 @@ func TestUpdateUserSettingUpstreamNotificationIsAdminOnly(t *testing.T) {
 	})
 
 	t.Run("administrator can opt in", func(t *testing.T) {
-		_, do, userID := setupChannelRead(t, roles.RoleRootUser)
+		_, do, userID := setupDashboardSession(t, roles.RoleRootUser)
 		body := decodeBody(t, do(http.MethodPut, "/api/user/setting",
 			`{"quota_warning_threshold":5000,"notify_type":"email","upstream_model_update_notify_enabled":true}`))
 		assert.Equal(t, true, body["success"])

@@ -567,3 +567,10 @@ func TestUnmatchedStripeDisputeCreatesDurableManualCorrelationAudit(t *testing.T
 	require.NoError(t, model.DB.Model(&model.Log{}).Where("content LIKE ?", "%evt_unmatched_dispute%").Count(&auditCount).Error)
 	assert.EqualValues(t, 1, auditCount)
 }
+
+func TestStripeCheckoutReconciliationRejectsMissingResolver(t *testing.T) {
+	previous := registeredStripeCheckoutResolver()
+	RegisterStripeCheckoutResolver(nil)
+	t.Cleanup(func() { RegisterStripeCheckoutResolver(previous) })
+	require.ErrorIs(t, ReconcileStripeCheckoutOrders(context.Background()), ErrStripeCheckoutResolverNotConfigured)
+}

@@ -10,6 +10,7 @@ import (
 	billingsvc "github.com/tokenrouter/tokenrouter/internal/billing"
 	quotamath "github.com/tokenrouter/tokenrouter/internal/billing/quota"
 	"github.com/tokenrouter/tokenrouter/internal/httpapi/requestctx"
+	stripepayments "github.com/tokenrouter/tokenrouter/internal/payments/stripe"
 	"github.com/tokenrouter/tokenrouter/internal/platform/cryptoutil"
 	"github.com/tokenrouter/tokenrouter/internal/platform/env"
 	"github.com/tokenrouter/tokenrouter/internal/platform/httpx"
@@ -517,7 +518,7 @@ func RequestStripePay(c *gin.Context) {
 		return
 	}
 	stripeSecret := env.GetEnv("STRIPE_SECRET_KEY", "")
-	if !validStripeSecret(stripeSecret) || strings.TrimSpace(env.GetEnv("STRIPE_WEBHOOK_SECRET", "")) == "" {
+	if !stripepayments.ValidSecret(stripeSecret) || strings.TrimSpace(env.GetEnv("STRIPE_WEBHOOK_SECRET", "")) == "" {
 		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "Stripe 未配置或回调不可用"})
 		return
 	}
@@ -535,7 +536,7 @@ func RequestStripePay(c *gin.Context) {
 	}
 	payLink, err := genStripeLink(stripeSecret, order, user, successURL, cancelURL)
 	if err != nil {
-		if stripeRequestDefinitelyRejected(err) {
+		if stripepayments.RequestDefinitelyRejected(err) {
 			if statusErr := billingsvc.UpdatePendingTopUpStatus(referenceID, billingsvc.PaymentProviderStripe, billingsvc.TopUpStatusFailed); statusErr != nil {
 				logging.SysError(fmt.Sprintf("Stripe checkout rejection status update failed trade_no=%s: %v", referenceID, statusErr))
 			}
@@ -563,7 +564,7 @@ func sha1Hex(s string) string {
 // carries user_id/trade_no/quota so TokenRouter's Stripe webhook can settle
 // the order.
 func genStripeLink(apiKey string, order *model.TopUp, user *model.User, successURL, cancelURL string) (string, error) {
-	if !validStripeSecret(apiKey) || order == nil || user == nil || order.ProviderAmountMinor <= 0 {
+	if !stripepayments.ValidSecret(apiKey) || order == nil || user == nil || order.ProviderAmountMinor <= 0 {
 		return "", fmt.Errorf("无效的Stripe API密钥")
 	}
 	referenceID := order.TradeNo
@@ -589,12 +590,12 @@ func genStripeLink(apiKey string, order *model.TopUp, user *model.User, successU
 	if err := billingsvc.ConfigureStripeTopUpCheckoutRequest(referenceID, snapshot); err != nil {
 		return "", err
 	}
-	params := stripeCheckoutParamsFromSnapshot(snapshot)
-	result, err := createStripeCheckoutSession(apiKey, params)
+	params := stripepayments.CheckoutParamsFromSnapshot(snapshot)
+	result, err := stripepayments.CreateCheckoutSession(apiKey, params)
 	if err != nil {
 		return "", err
 	}
-	if err := validateCreatedStripeCheckoutSession(result, referenceID, billingsvc.StripeCheckoutModePayment,
+	if err := stripepayments.ValidateCreatedCheckoutSession(result, referenceID, billingsvc.StripeCheckoutModePayment,
 		billingsvc.StripeOrderTypeWallet, order.ProviderAmountMinor, order.ProviderCurrency, ""); err != nil {
 		return "", err
 	}

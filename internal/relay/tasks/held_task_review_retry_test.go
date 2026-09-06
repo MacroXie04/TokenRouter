@@ -5,6 +5,7 @@ import (
 	"github.com/stretchr/testify/require"
 	billingsvc "github.com/tokenrouter/tokenrouter/internal/billing"
 	channelcatalog "github.com/tokenrouter/tokenrouter/internal/channels/catalog"
+	"github.com/tokenrouter/tokenrouter/internal/httpapi/middleware"
 	"github.com/tokenrouter/tokenrouter/internal/relay/providers/kling"
 	"github.com/tokenrouter/tokenrouter/internal/relay/providers/task/doubao"
 	model "github.com/tokenrouter/tokenrouter/internal/store"
@@ -26,7 +27,7 @@ func createKlingPollManualReviewFixture(t *testing.T) (
 	t.Cleanup(func() { newKlingTaskClient = previousClient })
 	c, recorder := klingLifecycleContext(t, fixture, http.MethodPost, "/kling/v1/videos/text2video",
 		`{"model":"kling-v1","prompt":"manual retry"}`, "")
-	RelayKlingTask(c)
+	RelayKlingTask(c, middleware.CaptureRelayRequestState(c))
 	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 	taskID := decodeKlingSubmitTaskID(t, recorder)
 	var task model.Task

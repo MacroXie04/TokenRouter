@@ -8,9 +8,6 @@ import (
 	billingsvc "github.com/tokenrouter/tokenrouter/internal/billing"
 	channelssvc "github.com/tokenrouter/tokenrouter/internal/channels"
 	channelcatalog "github.com/tokenrouter/tokenrouter/internal/channels/catalog"
-	"github.com/tokenrouter/tokenrouter/internal/httpapi/middleware"
-	"github.com/tokenrouter/tokenrouter/internal/httpapi/requestctx"
-	operationssvc "github.com/tokenrouter/tokenrouter/internal/operations"
 	wallclock "github.com/tokenrouter/tokenrouter/internal/platform/clock"
 	"github.com/tokenrouter/tokenrouter/internal/platform/httpx"
 	"github.com/tokenrouter/tokenrouter/internal/platform/logging"
@@ -25,14 +22,9 @@ import (
 var newDoubaoTaskClient = func() *doubao.Client { return &doubao.Client{} }
 var newDoubaoContentHTTPClient = doubao.NewHTTPClient
 
-func init() {
-	operationssvc.RegisterAsyncTaskReconciler(reconcileAsyncDoubaoTasks)
-	operationssvc.RegisterAsyncTaskPromoter(PromoteDoubaoTaskRecoveryJournalsContext)
-}
-
 // RelayDoubaoTask submits an Ark content-generation task through either the
 // general VolcEngine or dedicated Doubao Video channel family.
-func RelayDoubaoTask(c *gin.Context) {
+func RelayDoubaoTask(c *gin.Context, state relaycommon.RequestState) {
 	raw, err := httpx.ReadAllLimited(c.Request.Body, doubao.MaxRequestBodyBytes)
 	if err != nil {
 		status := http.StatusBadRequest
@@ -44,13 +36,13 @@ func RelayDoubaoTask(c *gin.Context) {
 	}
 	c.Request.Body = io.NopCloser(bytes.NewReader(raw))
 
-	userID := requestctx.GetUserId(c)
-	token := middleware.GetRelayToken(c)
+	userID := state.UserID
+	token := state.Token
 	if userID <= 0 || token == nil {
 		writeDoubaoTaskError(c, http.StatusInternalServerError, "auth_context_missing", "relay token context is missing", nil)
 		return
 	}
-	groups := middleware.GetTokenGroups(c)
+	groups := state.Groups
 	if len(groups) == 0 {
 		writeDoubaoTaskError(c, http.StatusForbidden, "group_not_allowed", "token group is unavailable", nil)
 		return
@@ -60,7 +52,7 @@ func RelayDoubaoTask(c *gin.Context) {
 		writeDoubaoTaskError(c, http.StatusBadRequest, "invalid_request", err.Error(), nil)
 		return
 	}
-	if !middleware.RelayModelAllowed(c, originModel) {
+	if !state.Allows(originModel) {
 		writeDoubaoTaskError(c, http.StatusForbidden, "model_not_allowed", "token is not allowed to access model "+originModel, nil)
 		return
 	}
@@ -95,7 +87,7 @@ func RelayDoubaoTask(c *gin.Context) {
 	}
 
 	pricing, enabled, err := billingsvc.ResolveReferenceAsyncTaskBillingPlanForUser(
-		userID, originModel, requestctx.GetUserGroup(c), usingGroup,
+		userID, originModel, state.UserGroup, usingGroup,
 	)
 	if err != nil || !enabled {
 		if err != nil {
@@ -272,7 +264,7 @@ func RelayDoubaoTask(c *gin.Context) {
 
 // RelayDoubaoTaskFetch reads only the user-owned local task. Background polling
 // is the sole path that contacts or decrypts the provider snapshot.
-func RelayDoubaoTaskFetch(c *gin.Context) {
+func RelayDoubaoTaskFetch(c *gin.Context, state relaycommon.RequestState) {
 	taskID := strings.TrimSpace(c.Param("task_id"))
 	if err := validateDoubaoTaskPublicID(taskID); err != nil {
 		writeDoubaoTaskError(c, http.StatusBadRequest, "invalid_request", "task_id is invalid", nil)
@@ -280,7 +272,7 @@ func RelayDoubaoTaskFetch(c *gin.Context) {
 	}
 	var tasks []model.Task
 	result := model.DB.Where("task_id = ? AND user_id = ? AND platform IN ?", taskID,
-		requestctx.GetUserId(c), model.DoubaoVideoTaskOperationPlatforms()).Limit(2).Find(&tasks)
+		state.UserID, model.DoubaoVideoTaskOperationPlatforms()).Limit(2).Find(&tasks)
 	if result.Error != nil {
 		writeDoubaoTaskError(c, http.StatusInternalServerError, "task_query_failed", "failed to query Doubao task", nil)
 		return
@@ -299,7 +291,7 @@ func RelayDoubaoTaskFetch(c *gin.Context) {
 		writeDoubaoTaskError(c, http.StatusInternalServerError, "task_data_invalid", "Doubao task metadata is invalid", nil)
 		return
 	}
-	if !authorizeDoubaoTaskRead(c, task, properties) {
+	if !authorizeDoubaoTaskRead(c, state, task, properties) {
 		return
 	}
 	if strings.HasPrefix(c.Request.URL.Path, "/v1/video/generations/") || c.Request.URL.Path == "/v1/video/fetch" {
@@ -319,13 +311,13 @@ func RelayDoubaoTaskFetch(c *gin.Context) {
 	c.JSON(http.StatusOK, response)
 }
 
-func relayDoubaoTaskContent(c *gin.Context, task *model.Task) {
+func relayDoubaoTaskContent(c *gin.Context, state relaycommon.RequestState, task *model.Task) {
 	properties, err := decodeDoubaoTaskProperties(task.Properties)
 	if err != nil || string(properties.Action) != task.Action {
 		writeDoubaoTaskError(c, http.StatusInternalServerError, "server_error", "Doubao task metadata is invalid", nil)
 		return
 	}
-	if !authorizeDoubaoTaskRead(c, task, properties) {
+	if !authorizeDoubaoTaskRead(c, state, task, properties) {
 		return
 	}
 	if task.Status != model.TaskStatusSuccess {
@@ -421,15 +413,15 @@ func applyDoubaoVideoInputRatio(
 	return pricing, nil
 }
 
-func authorizeDoubaoTaskRead(c *gin.Context, task *model.Task, properties doubaoTaskProperties) bool {
-	if middleware.GetRelayToken(c) == nil {
+func authorizeDoubaoTaskRead(c *gin.Context, state relaycommon.RequestState, task *model.Task, properties doubaoTaskProperties) bool {
+	if state.Token == nil {
 		return true
 	}
-	if !containsVideoGroup(middleware.GetTokenGroups(c), task.Group) {
+	if !containsVideoGroup(state.Groups, task.Group) {
 		writeDoubaoTaskError(c, http.StatusForbidden, "group_not_allowed", "token is not allowed to access this task group", nil)
 		return false
 	}
-	if !middleware.RelayModelAllowed(c, properties.OriginModelName) {
+	if !state.Allows(properties.OriginModelName) {
 		writeDoubaoTaskError(c, http.StatusForbidden, "model_not_allowed", "token is not allowed to access this model", nil)
 		return false
 	}

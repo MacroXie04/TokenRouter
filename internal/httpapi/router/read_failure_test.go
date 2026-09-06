@@ -20,7 +20,7 @@ func TestCheckInStatusPropagatesDatabaseFailure(t *testing.T) {
 
 func TestDashboardAndInstanceReadsPropagateDatabaseFailures(t *testing.T) {
 	t.Run("dashboard", func(t *testing.T) {
-		_, do, _ := setupChannelRead(t, roles.RoleRootUser)
+		_, do, _ := setupDashboardSession(t, roles.RoleRootUser)
 		require.NoError(t, model.DB.Migrator().DropTable(&model.Token{}))
 		rec := do(http.MethodGet, "/api/dashboard/stats", "")
 		require.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
@@ -28,7 +28,7 @@ func TestDashboardAndInstanceReadsPropagateDatabaseFailures(t *testing.T) {
 	})
 
 	t.Run("instances", func(t *testing.T) {
-		_, do, _ := setupChannelRead(t, roles.RoleRootUser)
+		_, do, _ := setupDashboardSession(t, roles.RoleRootUser)
 		require.NoError(t, model.DB.Migrator().DropTable(&model.SystemInstance{}))
 		rec := do(http.MethodGet, "/api/instance", "")
 		require.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
@@ -36,7 +36,7 @@ func TestDashboardAndInstanceReadsPropagateDatabaseFailures(t *testing.T) {
 	})
 
 	t.Run("channel model catalog", func(t *testing.T) {
-		_, do, _ := setupChannelRead(t, roles.RoleRootUser)
+		_, do, _ := setupDashboardSession(t, roles.RoleRootUser)
 		require.NoError(t, model.DB.Migrator().DropTable(&model.Model{}))
 		rec := do(http.MethodGet, "/api/channel/models", "")
 		require.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())

@@ -1,5 +1,5 @@
 import { api, type User } from '../../shared/api/client';
-import { turnstileParams } from '../security/TurnstileWidget';
+import { turnstileParams } from "../security";
 
 const MAX_RESPONSE_BYTES = 512 * 1024;
 const MAX_TEXT = 2_048;

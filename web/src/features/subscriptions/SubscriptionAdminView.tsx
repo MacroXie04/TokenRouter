@@ -5,7 +5,7 @@ import {
   createWaffoPancakeSubscriptionProduct,
   listWaffoPancakeSubscriptionProducts,
   type WaffoPancakeCatalogProduct,
-} from '../wallet/waffo-pancake-admin-api';
+} from "../wallet";
 import {
   SUBSCRIPTION_ADMIN_ROLE,
   SUBSCRIPTION_PAGE_SIZE,

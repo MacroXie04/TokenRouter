@@ -74,11 +74,11 @@
     }
   },
   "source": {
-    "fileCount": 132,
-    "literalKeyCount": 2019,
+    "fileCount": 176,
+    "literalKeyCount": 1973,
     "staticallyResolvedKeyCount": 517,
     "staticallyResolvedMissingFromBaseCount": 0,
-    "runtimeKeyCount": 2536,
+    "runtimeKeyCount": 2490,
     "missingFromBaseCount": 0,
     "missingFromBase": []
   }

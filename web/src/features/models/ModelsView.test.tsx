@@ -6,41 +6,39 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   checkDeploymentName,
   createDeployment,
-  createModel,
-  createVendor,
   deleteDeployment,
-  deleteModel,
-  deleteVendor,
   estimateDeploymentPrice,
   extendDeployment,
   getDeployment,
   getDeploymentContainer,
-  getModel,
-  getVendor,
   loadDeploymentContainers,
   loadDeploymentHardware,
   loadDeploymentLogs,
   loadDeploymentReplicas,
   loadDeploymentSettings,
   loadDeployments,
+  renameDeployment,
+  testDeploymentConnection,
+  updateDeployment,
+} from "./deployment-api";
+import {
+  createModel,
+  createVendor,
+  deleteModel,
+  deleteVendor,
+  getModel,
+  getVendor,
   loadMissingModels,
   loadModels,
   loadVendors,
   previewUpstream,
-  renameDeployment,
   setModelStatus,
   syncUpstream,
-  testDeploymentConnection,
-  updateDeployment,
   updateModel,
   updateVendor,
-  type DeploymentPage,
-  type DeploymentSummary,
-  type MetadataPage,
-  type ModelMetadata,
-  type VendorMetadata,
-  type VendorPage,
-} from './models-api';
+} from "./metadata-api";
+import { type DeploymentPage, type DeploymentSummary } from "./deployment-contracts";
+import { type MetadataPage, type ModelMetadata, type VendorMetadata, type VendorPage } from "./metadata-contracts";
 import { ModelsView } from './ModelsView';
 
 vi.mock('react-i18next', () => {
@@ -51,40 +49,47 @@ vi.mock('react-i18next', () => {
   return { useTranslation: () => ({ t }) };
 });
 
-vi.mock('./models-api', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('./models-api')>();
+vi.mock('./metadata-api', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./metadata-api')>();
+  return {
+    ...actual,
+    createModel: vi.fn(),
+    createVendor: vi.fn(),
+    deleteModel: vi.fn(),
+    deleteVendor: vi.fn(),
+    getModel: vi.fn(),
+    getVendor: vi.fn(),
+    loadMissingModels: vi.fn(),
+    loadModels: vi.fn(),
+    loadVendors: vi.fn(),
+    previewUpstream: vi.fn(),
+    setModelStatus: vi.fn(),
+    syncUpstream: vi.fn(),
+    updateModel: vi.fn(),
+    updateVendor: vi.fn(),
+  };
+});
+
+vi.mock('./deployment-api', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./deployment-api')>();
   return {
     ...actual,
     checkDeploymentName: vi.fn(),
     createDeployment: vi.fn(),
-    createModel: vi.fn(),
-    createVendor: vi.fn(),
     deleteDeployment: vi.fn(),
-    deleteModel: vi.fn(),
-    deleteVendor: vi.fn(),
     extendDeployment: vi.fn(),
     estimateDeploymentPrice: vi.fn(),
     getDeployment: vi.fn(),
     getDeploymentContainer: vi.fn(),
-    getModel: vi.fn(),
-    getVendor: vi.fn(),
     loadDeploymentContainers: vi.fn(),
     loadDeploymentHardware: vi.fn(),
     loadDeploymentLogs: vi.fn(),
     loadDeploymentReplicas: vi.fn(),
     loadDeploymentSettings: vi.fn(),
     loadDeployments: vi.fn(),
-    loadMissingModels: vi.fn(),
-    loadModels: vi.fn(),
-    loadVendors: vi.fn(),
-    previewUpstream: vi.fn(),
     renameDeployment: vi.fn(),
-    setModelStatus: vi.fn(),
-    syncUpstream: vi.fn(),
     testDeploymentConnection: vi.fn(),
     updateDeployment: vi.fn(),
-    updateModel: vi.fn(),
-    updateVendor: vi.fn(),
   };
 });
 

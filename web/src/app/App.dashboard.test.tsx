@@ -39,10 +39,6 @@ vi.mock('../features/dashboard', () => ({
   ),
 }));
 
-vi.mock('../features/admin/AdminConsole', () => ({
-  AdminConsole: () => <main aria-label="admin console">Legacy admin console</main>,
-}));
-
 const mockedGetData = vi.mocked(getData);
 
 function bootAs(role: number) {
@@ -85,7 +81,6 @@ describe('/dashboard integration', () => {
       'textContent',
       'section overviewrole 1search ?start_timestamp=1700000000',
     );
-    expect(screen.queryByRole('main', { name: 'admin console' })).toBeNull();
   });
 
   it('routes an administrator model view to the same dedicated feature', async () => {
@@ -97,6 +92,5 @@ describe('/dashboard integration', () => {
       'textContent',
       'section modelsrole 10search ',
     );
-    expect(screen.queryByRole('main', { name: 'admin console' })).toBeNull();
   });
 });

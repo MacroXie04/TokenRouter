@@ -167,7 +167,7 @@ func TestHailuoGenericVideoSubmitFetchAndEncryptedReservationLifecycle(t *testin
 	})
 	c, recorder := hailuoLifecycleContext(t, fixture, http.MethodPost, "/v1/videos",
 		`{"model":"MiniMax-Hailuo-2.3","prompt":"mapped request","duration":10,"size":"1920x1080","image":"https://assets.example/frame.png"}`, "")
-	RelayVideoTask(c)
+	RelayVideoTask(c, middleware.CaptureRelayRequestState(c))
 	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 	taskID := decodeHailuoPublicID(t, recorder)
 	assert.NotContains(t, recorder.Body.String(), "provider-hailuo-1")
@@ -198,7 +198,7 @@ func TestHailuoGenericVideoSubmitFetchAndEncryptedReservationLifecycle(t *testin
 
 	for _, route := range []string{"/v1/videos/", "/v1/video/generations/"} {
 		c, recorder = hailuoLifecycleContext(t, fixture, http.MethodGet, route+taskID, "", taskID)
-		RelayVideoTaskFetch(c)
+		RelayVideoTaskFetch(c, middleware.CaptureRelayRequestState(c))
 		require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 		assert.Contains(t, recorder.Body.String(), taskID)
 		assert.NotContains(t, recorder.Body.String(), "provider-hailuo-1")
@@ -209,7 +209,7 @@ func TestHailuoGenericVideoSubmitFetchAndEncryptedReservationLifecycle(t *testin
 
 	c, recorder = hailuoLifecycleContext(t, fixture, http.MethodGet, "/v1/videos/"+taskID, "", taskID)
 	requestctx.SetUserId(c, fixture.user.Id+1)
-	RelayVideoTaskFetch(c)
+	RelayVideoTaskFetch(c, middleware.CaptureRelayRequestState(c))
 	assert.Equal(t, http.StatusNotFound, recorder.Code)
 }
 
@@ -243,7 +243,7 @@ func TestHailuoRecoveryPollUsesSnapshotsAndContentIsOwnerScoped(t *testing.T) {
 	t.Cleanup(func() { newHailuoContentHTTPClient = previousContentClient })
 	c, recorder := hailuoLifecycleContext(t, fixture, http.MethodPost, "/v1/videos",
 		`{"model":"MiniMax-Hailuo-2.3","prompt":"content"}`, "")
-	RelayVideoTask(c)
+	RelayVideoTask(c, middleware.CaptureRelayRequestState(c))
 	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 	taskID := decodeHailuoPublicID(t, recorder)
 
@@ -271,7 +271,7 @@ func TestHailuoRecoveryPollUsesSnapshotsAndContentIsOwnerScoped(t *testing.T) {
 	assert.Equal(t, int32(1), fetchCalls.Load())
 
 	c, recorder = hailuoLifecycleContext(t, fixture, http.MethodGet, "/v1/videos/"+taskID+"/content", "", taskID)
-	VideoProxy(c)
+	VideoProxy(c, middleware.CaptureRelayRequestState(c))
 	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 	assert.Equal(t, "hailuo-video", recorder.Body.String())
 	assert.Equal(t, "video/mp4", recorder.Header().Get("Content-Type"))
@@ -279,7 +279,7 @@ func TestHailuoRecoveryPollUsesSnapshotsAndContentIsOwnerScoped(t *testing.T) {
 
 	c, recorder = hailuoLifecycleContext(t, fixture, http.MethodGet, "/v1/videos/"+taskID+"/content", "", taskID)
 	requestctx.SetUserId(c, fixture.user.Id+1)
-	VideoProxy(c)
+	VideoProxy(c, middleware.CaptureRelayRequestState(c))
 	assert.Equal(t, http.StatusNotFound, recorder.Code)
 	assert.Equal(t, int32(1), contentCalls.Load())
 }
@@ -301,7 +301,7 @@ func TestHailuoDefinitiveRejectionRefundsAndAmbiguityNeverReplays(t *testing.T) 
 		})
 		c, recorder := hailuoLifecycleContext(t, fixture, http.MethodPost, "/v1/videos",
 			`{"model":"MiniMax-Hailuo-2.3","prompt":"reject"}`, "")
-		RelayVideoTask(c)
+		RelayVideoTask(c, middleware.CaptureRelayRequestState(c))
 		require.Equal(t, http.StatusBadRequest, recorder.Code, recorder.Body.String())
 		assert.NotContains(t, recorder.Body.String(), "upstream-hailuo-key")
 		assert.Equal(t, int32(1), submitCalls.Load())
@@ -321,7 +321,7 @@ func TestHailuoDefinitiveRejectionRefundsAndAmbiguityNeverReplays(t *testing.T) 
 		})
 		c, recorder := hailuoLifecycleContext(t, fixture, http.MethodPost, "/v1/videos",
 			`{"model":"MiniMax-Hailuo-2.3","prompt":"business reject"}`, "")
-		RelayVideoTask(c)
+		RelayVideoTask(c, middleware.CaptureRelayRequestState(c))
 		require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 		assert.NotContains(t, recorder.Body.String(), "upstream-hailuo-key")
 		assertHailuoRefunded(t, fixture)
@@ -342,7 +342,7 @@ func TestHailuoDefinitiveRejectionRefundsAndAmbiguityNeverReplays(t *testing.T) 
 		})
 		c, recorder := hailuoLifecycleContext(t, fixture, http.MethodPost, "/v1/videos",
 			`{"model":"MiniMax-Hailuo-2.3","prompt":"ambiguous"}`, "")
-		RelayVideoTask(c)
+		RelayVideoTask(c, middleware.CaptureRelayRequestState(c))
 		require.Equal(t, http.StatusAccepted, recorder.Code, recorder.Body.String())
 		var task model.Task
 		var operation model.TaskOperation
@@ -413,7 +413,7 @@ func TestHailuoTerminalFailureReversesSettledChargeExactlyOnce(t *testing.T) {
 	})
 	c, recorder := hailuoLifecycleContext(t, fixture, http.MethodPost, "/v1/videos",
 		`{"model":"MiniMax-Hailuo-2.3","prompt":"fail later"}`, "")
-	RelayVideoTask(c)
+	RelayVideoTask(c, middleware.CaptureRelayRequestState(c))
 	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 	taskID := decodeHailuoPublicID(t, recorder)
 	forceHailuoRecoveryDue(t, taskID)
@@ -526,7 +526,7 @@ func TestRetryHailuoPollReviewIsAuditedAndDoesNotRebill(t *testing.T) {
 	})
 	c, recorder := hailuoLifecycleContext(t, fixture, http.MethodPost, "/v1/videos",
 		`{"model":"MiniMax-Hailuo-2.3","prompt":"manual poll"}`, "")
-	RelayVideoTask(c)
+	RelayVideoTask(c, middleware.CaptureRelayRequestState(c))
 	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 	taskID := decodeHailuoPublicID(t, recorder)
 	var task model.Task
@@ -601,7 +601,7 @@ func TestHailuoRecoveryLeasePreventsConcurrentPolls(t *testing.T) {
 	})
 	c, recorder := hailuoLifecycleContext(t, fixture, http.MethodPost, "/v1/videos",
 		`{"model":"MiniMax-Hailuo-2.3","prompt":"concurrent"}`, "")
-	RelayVideoTask(c)
+	RelayVideoTask(c, middleware.CaptureRelayRequestState(c))
 	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 	taskID := decodeHailuoPublicID(t, recorder)
 	forceHailuoRecoveryDue(t, taskID)

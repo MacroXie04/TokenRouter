@@ -2,11 +2,8 @@
 
 import { cleanup, fireEvent, render, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import {
-  TurnstileWidget,
-  parseTurnstileConfig,
-  turnstileParams,
-} from './TurnstileWidget';
+import { parseTurnstileConfig, turnstileParams } from './turnstile';
+import { TurnstileWidget,  } from './TurnstileWidget';
 
 afterEach(() => {
   cleanup();

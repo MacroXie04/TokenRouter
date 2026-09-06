@@ -33,7 +33,7 @@ func (paymentEntropyFailureReader) Read([]byte) (int, error) {
 // setupTopupTest builds a root session with the payment options reset and
 // compliance confirmed.
 func setupTopupTest(t *testing.T) (http.Handler, func(method, path, body string) *httptest.ResponseRecorder, int) {
-	handler, do, uid := setupChannelRead(t, roles.RoleRootUser)
+	handler, do, uid := setupDashboardSession(t, roles.RoleRootUser)
 	setPaymentCompliance(t, true)
 	t.Setenv("STRIPE_SECRET_KEY", "")
 	t.Setenv("STRIPE_WEBHOOK_SECRET", "")

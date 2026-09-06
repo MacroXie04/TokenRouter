@@ -12,8 +12,8 @@ import (
 	billingsvc "github.com/tokenrouter/tokenrouter/internal/billing"
 	channelssvc "github.com/tokenrouter/tokenrouter/internal/channels"
 	channelcatalog "github.com/tokenrouter/tokenrouter/internal/channels/catalog"
-	"github.com/tokenrouter/tokenrouter/internal/httpapi/requestctx"
 	"github.com/tokenrouter/tokenrouter/internal/httpapi/router"
+	"github.com/tokenrouter/tokenrouter/internal/platform/cryptoutil"
 	"github.com/tokenrouter/tokenrouter/internal/platform/httpx"
 	"github.com/tokenrouter/tokenrouter/internal/platform/logging"
 	"github.com/tokenrouter/tokenrouter/internal/relay/tasks"
@@ -86,7 +86,7 @@ func TestJimengOfficialTaskContract(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	handler, _, userID := setupChannelRead(t, roles.RoleCommonUser)
+	handler, _, userID := setupDashboardSession(t, roles.RoleCommonUser)
 	require.NoError(t, model.DB.AutoMigrate(
 		&model.Task{}, &model.JimengTaskOperation{}, &model.RelayQuotaReservationRecord{},
 		&model.UserSubscription{}, &model.SubscriptionPlan{}, &model.SubscriptionPreConsumeRecord{}, &model.AuditLogOutbox{},
@@ -189,7 +189,7 @@ func TestJimengOfficialTaskContract(t *testing.T) {
 	assert.Equal(t, channel.Id, consumption.ChannelId)
 	assert.Equal(t, token.Id, consumption.TokenId)
 	assert.Equal(t, 5000, consumption.Quota)
-	assert.Equal(t, requestctx.NormalizeProviderCorrelationID("jimeng-submit-request"), consumption.UpstreamRequestId)
+	assert.Equal(t, cryptoutil.NormalizeProviderCorrelationID("jimeng-submit-request"), consumption.UpstreamRequestId)
 	assert.NotContains(t, consumption.Other, "access|secret")
 	var consumeOther map[string]any
 	require.NoError(t, json.Unmarshal([]byte(consumption.Other), &consumeOther))
@@ -341,7 +341,7 @@ func TestJimengOfficialTaskContract(t *testing.T) {
 
 func TestJimengMiddlewareAndOwnershipFailures(t *testing.T) {
 	t.Setenv("RETRY_TIMES", "0")
-	handler, _, userID := setupChannelRead(t, roles.RoleCommonUser)
+	handler, _, userID := setupDashboardSession(t, roles.RoleCommonUser)
 	require.NoError(t, model.DB.AutoMigrate(
 		&model.Task{}, &model.JimengTaskOperation{}, &model.RelayQuotaReservationRecord{},
 		&model.UserSubscription{}, &model.SubscriptionPlan{}, &model.SubscriptionPreConsumeRecord{}, &model.AuditLogOutbox{},
@@ -423,7 +423,7 @@ func (p *bodyReadProbe) Read([]byte) (int, error) {
 }
 
 func TestJimengPreAuthBodyIsRateLimited(t *testing.T) {
-	_, _, _ = setupChannelRead(t, roles.RoleCommonUser)
+	_, _, _ = setupDashboardSession(t, roles.RoleCommonUser)
 	t.Setenv("GLOBAL_API_RATE_LIMIT", "1")
 	handler := router.SetUpRouter()
 	sequence := jimengRateLimitIPSequence.Add(1)
@@ -466,7 +466,7 @@ func TestJimengAcceptedTaskCommitFailureRecoversOnFetch(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	handler, _, userID := setupChannelRead(t, roles.RoleCommonUser)
+	handler, _, userID := setupDashboardSession(t, roles.RoleCommonUser)
 	require.NoError(t, model.DB.AutoMigrate(
 		&model.Task{}, &model.JimengTaskOperation{}, &model.RelayQuotaReservationRecord{},
 		&model.UserSubscription{}, &model.SubscriptionPlan{}, &model.SubscriptionPreConsumeRecord{}, &model.AuditLogOutbox{},
@@ -602,7 +602,7 @@ func TestJimengFallbackWriteFailureRecoversFromEncryptedDatabaseOperation(t *tes
 	}))
 	defer upstream.Close()
 
-	handler, _, userID := setupChannelRead(t, roles.RoleCommonUser)
+	handler, _, userID := setupDashboardSession(t, roles.RoleCommonUser)
 	require.NoError(t, model.DB.AutoMigrate(
 		&model.Task{}, &model.JimengTaskOperation{}, &model.RelayQuotaReservationRecord{},
 		&model.UserSubscription{}, &model.SubscriptionPlan{}, &model.SubscriptionPreConsumeRecord{}, &model.AuditLogOutbox{},
@@ -859,7 +859,7 @@ func TestJimengAcceptedMetadataEncryptionFailureReturnsHonestAcceptedRecoverySta
 
 func setupJimengDurabilityFixture(t *testing.T, upstreamURL, modelName string) (http.Handler, int, model.Token, model.Channel) {
 	t.Helper()
-	handler, _, userID := setupChannelRead(t, roles.RoleCommonUser)
+	handler, _, userID := setupDashboardSession(t, roles.RoleCommonUser)
 	require.NoError(t, model.DB.AutoMigrate(
 		&model.Task{}, &model.JimengTaskOperation{}, &model.RelayQuotaReservationRecord{},
 		&model.UserSubscription{}, &model.SubscriptionPlan{}, &model.SubscriptionPreConsumeRecord{}, &model.AuditLogOutbox{},

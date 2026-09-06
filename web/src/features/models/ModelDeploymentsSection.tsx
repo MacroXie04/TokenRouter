@@ -2,28 +2,8 @@ import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ContainersDialog, DeploymentDetails } from './DeploymentDetails';
 import { DeploymentCreator, DeploymentUpdater } from './DeploymentEditors';
-import {
-  DEPLOYMENT_PAGE_SIZE,
-  createDeployment,
-  deleteDeployment,
-  extendDeployment,
-  getDeployment,
-  getDeploymentContainer,
-  loadDeploymentContainers,
-  loadDeploymentLogs,
-  loadDeploymentSettings,
-  loadDeployments,
-  renameDeployment,
-  testDeploymentConnection,
-  updateDeployment,
-  type DeploymentAccess,
-  type DeploymentContainer,
-  type DeploymentDetail,
-  type DeploymentPage,
-  type DeploymentQuery,
-  type DeploymentStatus,
-  type DeploymentSummary
-} from './models-api';
+import { createDeployment, deleteDeployment, extendDeployment, getDeployment, getDeploymentContainer, loadDeploymentContainers, loadDeploymentLogs, loadDeploymentSettings, loadDeployments, renameDeployment, testDeploymentConnection, updateDeployment } from "./deployment-api";
+import { DEPLOYMENT_PAGE_SIZE, type DeploymentAccess, type DeploymentContainer, type DeploymentDetail, type DeploymentPage, type DeploymentQuery, type DeploymentStatus, type DeploymentSummary } from "./deployment-contracts";
 import { ErrorPanel, LoadingPanel, NoticeBanner, Overlay, type Notice } from './models-ui';
 
 export const EMPTY_DEPLOYMENT_QUERY: DeploymentQuery = {

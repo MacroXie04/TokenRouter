@@ -1,18 +1,8 @@
 import type { FormEvent } from 'react';
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import {
-  checkDeploymentName,
-  estimateDeploymentPrice,
-  loadDeploymentHardware,
-  loadDeploymentReplicas,
-  type DeploymentCreateInput,
-  type DeploymentHardware,
-  type DeploymentPriceEstimate,
-  type DeploymentReplica,
-  type DeploymentSummary,
-  type DeploymentUpdateInput
-} from './models-api';
+import { checkDeploymentName, estimateDeploymentPrice, loadDeploymentHardware, loadDeploymentReplicas } from "./deployment-api";
+import { type DeploymentCreateInput, type DeploymentHardware, type DeploymentPriceEstimate, type DeploymentReplica, type DeploymentSummary, type DeploymentUpdateInput } from "./deployment-contracts";
 import { Overlay, type ResourceState } from './models-ui';
 
 export const EMPTY_DEPLOYMENT: DeploymentCreateInput = {
@@ -218,8 +208,8 @@ export function DeploymentCreator({ busy, onCancel, onSave }: {
           <label>{t('Registry username')}<input maxLength={4_096} autoComplete="off" value={draft.registryUsername} onChange={(e) => setDraft({ ...draft, registryUsername: e.target.value })} /></label>
           <label>{t('Registry secret')}<input type="password" maxLength={4_096} autoComplete="new-password" value={draft.registrySecret} onChange={(e) => setDraft({ ...draft, registrySecret: e.target.value })} /></label>
         </div>
-        <label>{t('Environment variables (JSON)')}<textarea className="models-code" rows={4} maxLength={1_048_576} placeholder={'{"KEY":"value"}'} value={environmentJSON} aria-invalid={configurationError} onChange={(e) => setEnvironmentJSON(e.target.value)} /></label>
-        <label>{t('Secret environment variables (JSON)')}<textarea className="models-code" rows={4} maxLength={1_048_576} placeholder={'{"TOKEN":"value"}'} value={secretEnvironmentJSON} aria-invalid={configurationError} onChange={(e) => setSecretEnvironmentJSON(e.target.value)} /></label>
+          <label>{t('Environment variables (JSON)')}<textarea className="models-code" rows={4} maxLength={1_048_576} placeholder={'{"KEY":"value"}'} value={environmentJSON} aria-invalid={configurationError} onChange={(e) => setEnvironmentJSON(e.target.value)} /></label>
+          <label>{t('Secret environment variables (JSON)')}<textarea className="models-code" rows={4} maxLength={1_048_576} placeholder={'{"TOKEN":"value"}'} value={secretEnvironmentJSON} aria-invalid={configurationError} onChange={(e) => setSecretEnvironmentJSON(e.target.value)} /></label>
         </details>
         {configurationError && <p className="models-field-error" role="alert">{t('Configuration must be valid JSON objects with string values.')}</p>}
         <p className="models-security-note">{t('Registry credentials are sent only when you submit and are never displayed again.')}</p>

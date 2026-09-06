@@ -93,7 +93,7 @@ func emailFromRequest(c *gin.Context) (string, bool) {
 
 // ResetPassword resets a password using the emailed code.
 func ResetPassword(c *gin.Context) {
-	var req dto.ResetPasswordRequest
+	var req ResetPasswordRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, dto.Fail("参数错误"))
 		return

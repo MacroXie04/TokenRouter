@@ -228,6 +228,13 @@ describe('system option transports', () => {
     ]);
   });
 
+  it('rejects malformed compliance and affinity mutation payloads', async () => {
+    mockedPost.mockResolvedValueOnce({ data: ok({ confirmed: true, terms_version: 'future' }) });
+    await expect(confirmPaymentCompliance()).rejects.toBeInstanceOf(SystemSettingsContractError);
+    mockedDelete.mockResolvedValueOnce({ data: ok({ deleted: 'sk-private-result' }) });
+    await expect(clearAffinityCache({ all: true })).rejects.toBeInstanceOf(SystemSettingsContractError);
+  });
+
   it('rejects inconsistent affinity statistics and unsuccessful mutations', async () => {
     mockedGet.mockResolvedValueOnce({ data: ok({
       enabled: true,

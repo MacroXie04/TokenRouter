@@ -4,7 +4,7 @@ import (
 	"github.com/gin-gonic/gin"
 	billingsvc "github.com/tokenrouter/tokenrouter/internal/billing"
 	quotamath "github.com/tokenrouter/tokenrouter/internal/billing/quota"
-	"github.com/tokenrouter/tokenrouter/internal/httpapi/handlers/pagination"
+	"github.com/tokenrouter/tokenrouter/internal/httpapi/pagination"
 	"github.com/tokenrouter/tokenrouter/internal/httpapi/requestctx"
 	wallclock "github.com/tokenrouter/tokenrouter/internal/platform/clock"
 	"github.com/tokenrouter/tokenrouter/internal/platform/textutil"

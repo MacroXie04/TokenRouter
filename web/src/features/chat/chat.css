@@ -1,0 +1,32 @@
+.chat-app {
+  max-width: 1180px;
+}
+
+.chat-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.65rem;
+}
+
+.chat-actions .link {
+  margin-left: 0;
+}
+
+.chat-launch-card {
+  display: grid;
+  gap: 1rem;
+}
+
+.chat-launch-card h2,
+.chat-launch-card p {
+  margin: 0;
+}
+
+.chat-frame {
+  width: 100%;
+  min-height: min(70vh, 760px);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+}

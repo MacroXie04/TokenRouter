@@ -9,9 +9,6 @@ import (
 	billingsvc "github.com/tokenrouter/tokenrouter/internal/billing"
 	channelssvc "github.com/tokenrouter/tokenrouter/internal/channels"
 	channelcatalog "github.com/tokenrouter/tokenrouter/internal/channels/catalog"
-	"github.com/tokenrouter/tokenrouter/internal/httpapi/middleware"
-	"github.com/tokenrouter/tokenrouter/internal/httpapi/requestctx"
-	operationssvc "github.com/tokenrouter/tokenrouter/internal/operations"
 	wallclock "github.com/tokenrouter/tokenrouter/internal/platform/clock"
 	"github.com/tokenrouter/tokenrouter/internal/platform/httpx"
 	"github.com/tokenrouter/tokenrouter/internal/platform/logging"
@@ -31,14 +28,9 @@ import (
 	"time"
 )
 
-func init() {
-	RegisterVideoTaskRecoveryJournalPromoter()
-	operationssvc.RegisterAsyncTaskReconciler(reconcileAsyncVideoTasks)
-}
-
 // RelayVideoTask submits OpenAI-compatible video creation and remix requests.
 // All identifiers returned to the caller are server-generated public task IDs.
-func RelayVideoTask(c *gin.Context) {
+func RelayVideoTask(c *gin.Context, state relaycommon.RequestState) {
 	raw, err := httpx.ReadAllLimited(c.Request.Body, sora.MaxRequestBodyBytes)
 	if err != nil {
 		status := http.StatusBadRequest
@@ -61,36 +53,36 @@ func RelayVideoTask(c *gin.Context) {
 	if !strings.HasSuffix(c.Request.URL.Path, "/remix") {
 		if modelName := aliWan.DeclaredModel(raw, contentType); aliWan.IsModel(modelName) {
 			c.Request.Body = io.NopCloser(bytes.NewReader(raw))
-			RelayAliWanTask(c)
+			RelayAliWanTask(c, state)
 			return
 		}
-		if relayVeoTask(c, raw, contentType) {
+		if relayVeoTask(c, state, raw, contentType) {
 			return
 		}
 		if modelName := hailuo.DeclaredModel(raw, contentType); hailuo.IsModel(modelName) {
 			c.Request.Body = io.NopCloser(bytes.NewReader(raw))
-			RelayHailuoTask(c)
+			RelayHailuoTask(c, state)
 			return
 		}
 		if modelName, modelErr := doubao.RequestedModel(raw); modelErr == nil && doubao.IsModel(modelName) {
 			c.Request.Body = io.NopCloser(bytes.NewReader(raw))
-			RelayDoubaoTask(c)
+			RelayDoubaoTask(c, state)
 			return
 		}
 		if modelName, modelErr := vidu.RequestedModel(raw, contentType); modelErr == nil && vidu.IsModel(modelName) {
 			c.Request.Body = io.NopCloser(bytes.NewReader(raw))
-			RelayViduTask(c)
+			RelayViduTask(c, state)
 			return
 		}
 	}
 
-	userID := requestctx.GetUserId(c)
-	token := middleware.GetRelayToken(c)
+	userID := state.UserID
+	token := state.Token
 	if userID <= 0 || token == nil {
 		writeVideoTaskError(c, http.StatusInternalServerError, "auth_context_missing", "relay token context is missing", nil)
 		return
 	}
-	groups := middleware.GetTokenGroups(c)
+	groups := state.Groups
 	if len(groups) == 0 {
 		writeVideoTaskError(c, http.StatusForbidden, "group_not_allowed", "token group is unavailable", nil)
 		return
@@ -154,7 +146,7 @@ func RelayVideoTask(c *gin.Context) {
 		}
 		originModel = properties.OriginModelName
 		inheritedSeconds, inheritedSize = properties.Seconds, properties.Size
-		if !middleware.RelayModelAllowed(c, originModel) {
+		if !state.Allows(originModel) {
 			writeVideoTaskError(c, http.StatusForbidden, "model_not_allowed", "token is not allowed to access this model", nil)
 			return
 		}
@@ -197,7 +189,7 @@ func RelayVideoTask(c *gin.Context) {
 			writeVideoTaskError(c, http.StatusBadRequest, "invalid_request", err.Error(), nil)
 			return
 		}
-		if !middleware.RelayModelAllowed(c, originModel) {
+		if !state.Allows(originModel) {
 			writeVideoTaskError(c, http.StatusForbidden, "model_not_allowed", "token is not allowed to access model "+originModel, nil)
 			return
 		}
@@ -236,14 +228,14 @@ func RelayVideoTask(c *gin.Context) {
 		multiplier = multiplier.Mul(highResolution)
 	}
 	quota, err := billingsvc.ComputePerCallQuotaMultiplierForUser(
-		originModel, requestctx.GetUserGroup(c), usingGroup, multiplier,
+		originModel, state.UserGroup, usingGroup, multiplier,
 	)
 	if err != nil {
 		writeVideoTaskError(c, http.StatusBadRequest, "model_price_error", err.Error(), nil)
 		return
 	}
 	freeModel := billingsvc.ShouldSkipPerCallFreeModelPreConsume(
-		originModel, requestctx.GetUserGroup(c), usingGroup,
+		originModel, state.UserGroup, usingGroup,
 	)
 	taskID, err := model.GenerateSecureTaskID()
 	if err != nil {
@@ -399,7 +391,7 @@ func RelayVideoTask(c *gin.Context) {
 
 // RelayVideoTaskFetch returns a user-owned task in either the legacy task DTO
 // envelope or the OpenAI video object, based on the requested route.
-func RelayVideoTaskFetch(c *gin.Context) {
+func RelayVideoTaskFetch(c *gin.Context, state relaycommon.RequestState) {
 	taskID := strings.TrimSpace(c.Param("task_id"))
 	if taskID == "" {
 		taskID = strings.TrimSpace(c.Query("task_id"))
@@ -410,7 +402,7 @@ func RelayVideoTaskFetch(c *gin.Context) {
 	}
 	var doubaoTasks []model.Task
 	doubaoLookup := model.DB.Where("task_id = ? AND user_id = ? AND platform IN ?", taskID,
-		requestctx.GetUserId(c), model.DoubaoVideoTaskOperationPlatforms()).Limit(2).Find(&doubaoTasks)
+		state.UserID, model.DoubaoVideoTaskOperationPlatforms()).Limit(2).Find(&doubaoTasks)
 	if doubaoLookup.Error != nil {
 		writeDoubaoTaskError(c, http.StatusInternalServerError, "task_query_failed", "failed to query Doubao task", nil)
 		return
@@ -420,12 +412,12 @@ func RelayVideoTaskFetch(c *gin.Context) {
 			writeDoubaoTaskError(c, http.StatusInternalServerError, "task_data_invalid", "Doubao task identity is ambiguous", nil)
 			return
 		}
-		RelayDoubaoTaskFetch(c)
+		RelayDoubaoTaskFetch(c, state)
 		return
 	}
 	var aliWanTasks []model.Task
 	aliWanLookup := model.DB.Where("task_id = ? AND user_id = ? AND platform = ?", taskID,
-		requestctx.GetUserId(c), aliWanTaskPlatform).Limit(2).Find(&aliWanTasks)
+		state.UserID, aliWanTaskPlatform).Limit(2).Find(&aliWanTasks)
 	if aliWanLookup.Error != nil {
 		writeAliWanTaskError(c, http.StatusInternalServerError, "task_query_failed", "failed to query Alibaba Wan task", nil)
 		return
@@ -435,14 +427,14 @@ func RelayVideoTaskFetch(c *gin.Context) {
 			writeAliWanTaskError(c, http.StatusInternalServerError, "task_data_invalid", "Alibaba Wan task identity is ambiguous", nil)
 			return
 		}
-		RelayAliWanTaskFetch(c)
+		RelayAliWanTaskFetch(c, state)
 		return
 	}
 	var viduTask model.Task
 	viduLookup := model.DB.Where("task_id = ? AND user_id = ? AND platform = ?", taskID,
-		requestctx.GetUserId(c), viduTaskPlatform).First(&viduTask).Error
+		state.UserID, viduTaskPlatform).First(&viduTask).Error
 	if viduLookup == nil {
-		RelayViduTaskFetch(c)
+		RelayViduTaskFetch(c, state)
 		return
 	}
 	if !errors.Is(viduLookup, gorm.ErrRecordNotFound) {
@@ -451,7 +443,7 @@ func RelayVideoTaskFetch(c *gin.Context) {
 	}
 	var geminiVeoTasks []model.Task
 	geminiVeoLookup := model.DB.Where("task_id = ? AND user_id = ? AND platform IN ?", taskID,
-		requestctx.GetUserId(c), model.VeoTaskOperationPlatforms()).Limit(2).Find(&geminiVeoTasks)
+		state.UserID, model.VeoTaskOperationPlatforms()).Limit(2).Find(&geminiVeoTasks)
 	if geminiVeoLookup.Error != nil {
 		writeGeminiVeoTaskError(c, http.StatusInternalServerError, "task_query_failed", "failed to query Gemini Veo task", nil)
 		return
@@ -461,12 +453,12 @@ func RelayVideoTaskFetch(c *gin.Context) {
 			writeGeminiVeoTaskError(c, http.StatusInternalServerError, "task_data_invalid", "Gemini Veo task identity is ambiguous", nil)
 			return
 		}
-		RelayGeminiVeoTaskFetch(c)
+		RelayGeminiVeoTaskFetch(c, state)
 		return
 	}
 	var hailuoTasks []model.Task
 	hailuoLookup := model.DB.Where("task_id = ? AND user_id = ? AND platform = ?", taskID,
-		requestctx.GetUserId(c), hailuoTaskPlatform).Limit(2).Find(&hailuoTasks)
+		state.UserID, hailuoTaskPlatform).Limit(2).Find(&hailuoTasks)
 	if hailuoLookup.Error != nil {
 		writeHailuoTaskError(c, http.StatusInternalServerError, "task_query_failed", "failed to query Hailuo task", nil)
 		return
@@ -476,11 +468,11 @@ func RelayVideoTaskFetch(c *gin.Context) {
 			writeHailuoTaskError(c, http.StatusInternalServerError, "task_data_invalid", "Hailuo task identity is ambiguous", nil)
 			return
 		}
-		RelayHailuoTaskFetch(c)
+		RelayHailuoTaskFetch(c, state)
 		return
 	}
 	var task model.Task
-	err := model.DB.Where("task_id = ? AND user_id = ?", taskID, requestctx.GetUserId(c)).First(&task).Error
+	err := model.DB.Where("task_id = ? AND user_id = ?", taskID, state.UserID).First(&task).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			writeVideoTaskError(c, http.StatusNotFound, "task_not_found", "video task was not found", nil)
@@ -498,7 +490,7 @@ func RelayVideoTaskFetch(c *gin.Context) {
 		writeVideoTaskError(c, http.StatusInternalServerError, "task_data_invalid", "video task metadata is invalid", nil)
 		return
 	}
-	if !authorizeVideoTaskRead(c, &task, properties) {
+	if !authorizeVideoTaskRead(c, state, &task, properties) {
 		return
 	}
 	if strings.HasPrefix(c.Request.URL.Path, "/v1/video/generations/") || c.Request.URL.Path == "/v1/video/fetch" {
@@ -520,7 +512,7 @@ func RelayVideoTaskFetch(c *gin.Context) {
 
 // VideoProxy streams a completed user-owned video from the original provider
 // using the encrypted channel snapshot captured before submission.
-func VideoProxy(c *gin.Context) {
+func VideoProxy(c *gin.Context, state relaycommon.RequestState) {
 	c.Header("X-Content-Type-Options", "nosniff")
 	c.Header("Content-Security-Policy", "sandbox; default-src 'none'")
 	taskID := strings.TrimSpace(c.Param("task_id"))
@@ -530,7 +522,7 @@ func VideoProxy(c *gin.Context) {
 	}
 	var doubaoTasks []model.Task
 	doubaoLookup := model.DB.Where("task_id = ? AND user_id = ? AND platform IN ?", taskID,
-		requestctx.GetUserId(c), model.DoubaoVideoTaskOperationPlatforms()).Limit(2).Find(&doubaoTasks)
+		state.UserID, model.DoubaoVideoTaskOperationPlatforms()).Limit(2).Find(&doubaoTasks)
 	if doubaoLookup.Error != nil {
 		writeDoubaoTaskError(c, http.StatusInternalServerError, "server_error", "failed to query Doubao task", nil)
 		return
@@ -540,12 +532,12 @@ func VideoProxy(c *gin.Context) {
 			writeDoubaoTaskError(c, http.StatusInternalServerError, "server_error", "Doubao task identity is ambiguous", nil)
 			return
 		}
-		relayDoubaoTaskContent(c, &doubaoTasks[0])
+		relayDoubaoTaskContent(c, state, &doubaoTasks[0])
 		return
 	}
 	var aliWanTasks []model.Task
 	aliWanLookup := model.DB.Where("task_id = ? AND user_id = ? AND platform = ?", taskID,
-		requestctx.GetUserId(c), aliWanTaskPlatform).Limit(2).Find(&aliWanTasks)
+		state.UserID, aliWanTaskPlatform).Limit(2).Find(&aliWanTasks)
 	if aliWanLookup.Error != nil {
 		writeAliWanTaskError(c, http.StatusInternalServerError, "server_error", "failed to query Alibaba Wan task", nil)
 		return
@@ -555,14 +547,14 @@ func VideoProxy(c *gin.Context) {
 			writeAliWanTaskError(c, http.StatusInternalServerError, "server_error", "Alibaba Wan task identity is ambiguous", nil)
 			return
 		}
-		relayAliWanTaskContent(c, &aliWanTasks[0])
+		relayAliWanTaskContent(c, state, &aliWanTasks[0])
 		return
 	}
 	var viduTask model.Task
 	viduLookup := model.DB.Where("task_id = ? AND user_id = ? AND platform = ?", taskID,
-		requestctx.GetUserId(c), viduTaskPlatform).First(&viduTask).Error
+		state.UserID, viduTaskPlatform).First(&viduTask).Error
 	if viduLookup == nil {
-		relayViduTaskContent(c, &viduTask)
+		relayViduTaskContent(c, state, &viduTask)
 		return
 	}
 	if !errors.Is(viduLookup, gorm.ErrRecordNotFound) {
@@ -571,7 +563,7 @@ func VideoProxy(c *gin.Context) {
 	}
 	var geminiVeoTasks []model.Task
 	geminiVeoLookup := model.DB.Where("task_id = ? AND user_id = ? AND platform IN ?", taskID,
-		requestctx.GetUserId(c), model.VeoTaskOperationPlatforms()).Limit(2).Find(&geminiVeoTasks)
+		state.UserID, model.VeoTaskOperationPlatforms()).Limit(2).Find(&geminiVeoTasks)
 	if geminiVeoLookup.Error != nil {
 		writeGeminiVeoTaskError(c, http.StatusInternalServerError, "server_error", "failed to query Gemini Veo task", nil)
 		return
@@ -581,12 +573,12 @@ func VideoProxy(c *gin.Context) {
 			writeGeminiVeoTaskError(c, http.StatusInternalServerError, "server_error", "Gemini Veo task identity is ambiguous", nil)
 			return
 		}
-		relayGeminiVeoTaskContent(c, &geminiVeoTasks[0])
+		relayGeminiVeoTaskContent(c, state, &geminiVeoTasks[0])
 		return
 	}
 	var hailuoTasks []model.Task
 	hailuoLookup := model.DB.Where("task_id = ? AND user_id = ? AND platform = ?", taskID,
-		requestctx.GetUserId(c), hailuoTaskPlatform).Limit(2).Find(&hailuoTasks)
+		state.UserID, hailuoTaskPlatform).Limit(2).Find(&hailuoTasks)
 	if hailuoLookup.Error != nil {
 		writeHailuoTaskError(c, http.StatusInternalServerError, "server_error", "failed to query Hailuo task", nil)
 		return
@@ -596,11 +588,11 @@ func VideoProxy(c *gin.Context) {
 			writeHailuoTaskError(c, http.StatusInternalServerError, "server_error", "Hailuo task identity is ambiguous", nil)
 			return
 		}
-		relayHailuoTaskContent(c, &hailuoTasks[0])
+		relayHailuoTaskContent(c, state, &hailuoTasks[0])
 		return
 	}
 	var task model.Task
-	err := model.DB.Where("task_id = ? AND user_id = ?", taskID, requestctx.GetUserId(c)).First(&task).Error
+	err := model.DB.Where("task_id = ? AND user_id = ?", taskID, state.UserID).First(&task).Error
 	if err != nil || !isVideoTaskPlatform(&task) {
 		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 			writeVideoTaskError(c, http.StatusInternalServerError, "server_error", "failed to query video task", nil)
@@ -614,7 +606,7 @@ func VideoProxy(c *gin.Context) {
 		writeVideoTaskError(c, http.StatusInternalServerError, "server_error", "video task metadata is invalid", nil)
 		return
 	}
-	if !authorizeVideoTaskRead(c, &task, properties) {
+	if !authorizeVideoTaskRead(c, state, &task, properties) {
 		return
 	}
 	if task.Status != model.TaskStatusSuccess {
@@ -701,18 +693,18 @@ func containsVideoGroup(groups []string, group string) bool {
 	return false
 }
 
-func authorizeVideoTaskRead(c *gin.Context, task *model.Task, properties videoTaskProperties) bool {
-	if middleware.GetRelayToken(c) == nil {
+func authorizeVideoTaskRead(c *gin.Context, state relaycommon.RequestState, task *model.Task, properties videoTaskProperties) bool {
+	if state.Token == nil {
 		// Dashboard sessions and dashboard PATs are owner-wide identities. The
 		// task lookup has already enforced ownership.
 		return true
 	}
-	if !containsVideoGroup(middleware.GetTokenGroups(c), task.Group) {
+	if !containsVideoGroup(state.Groups, task.Group) {
 		writeVideoTaskError(c, http.StatusForbidden, "group_not_allowed",
 			"token is not allowed to access this task group", nil)
 		return false
 	}
-	if !middleware.RelayModelAllowed(c, properties.OriginModelName) {
+	if !state.Allows(properties.OriginModelName) {
 		writeVideoTaskError(c, http.StatusForbidden, "model_not_allowed",
 			"token is not allowed to access this model", nil)
 		return false

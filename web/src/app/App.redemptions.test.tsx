@@ -24,13 +24,11 @@ vi.mock('../shared/api/client', async (importOriginal) => {
   return { ...actual, getData: vi.fn() };
 });
 
-vi.mock('../features/admin/AdminConsole', () => ({
-  AdminConsole: ({ initialTab, settingsPath, user }: { initialTab: string; settingsPath?: string; user: { role: number } }) => (
-    <main aria-label="admin console">
-      <h1>Admin route</h1>
-      <span>{initialTab}</span>
-      {settingsPath && <span>{settingsPath}</span>}
-      <span>role {user.role}</span>
+vi.mock('../features/redemptions/RedemptionAdminView', () => ({
+  RedemptionAdminView: ({ operatorRole }: { operatorRole: number }) => (
+    <main aria-label="redemption management">
+      <h1>Redemption management</h1>
+      <span>role {operatorRole}</span>
     </main>
   ),
 }));
@@ -126,7 +124,7 @@ afterEach(() => {
 describe('/redemption-codes integration', () => {
   it('renders the root language control with every supported locale', async () => {
     render(<App />);
-    expect(await screen.findByRole('main', { name: 'admin console' })).toBeTruthy();
+    expect(await screen.findByRole('main', { name: 'redemption management' })).toBeTruthy();
 
     const language = screen.getByRole('combobox', { name: 'Language' });
     expect(language.querySelectorAll('option')).toHaveLength(7);
@@ -134,10 +132,9 @@ describe('/redemption-codes integration', () => {
     expect(i18nMocks.changeLanguage).toHaveBeenCalledWith('ja');
   });
 
-  it('boots the guarded admin route into the dedicated redemption tab', async () => {
+  it('boots the guarded admin route into the dedicated redemption feature', async () => {
     render(<App />);
-    expect(await screen.findByRole('main', { name: 'admin console' })).toBeTruthy();
-    expect(screen.getByText('redemptions')).toBeTruthy();
+    expect(await screen.findByRole('main', { name: 'redemption management' })).toBeTruthy();
     expect(screen.getByText('role 10')).toBeTruthy();
     await waitFor(() => expect(mockedGetData).toHaveBeenCalledWith('/user/self'));
   });
@@ -189,7 +186,7 @@ describe('/redemption-codes integration', () => {
 
     render(<App />);
     expect(await screen.findByRole('main', { name: 'system information route' })).toBeTruthy();
-    expect(screen.queryByRole('main', { name: 'admin console' })).toBeNull();
+    expect(screen.queryByRole('main', { name: 'redemption management' })).toBeNull();
   });
 
   it('boots the authenticated wallet route into its dedicated feature view', async () => {
@@ -200,7 +197,7 @@ describe('/redemption-codes integration', () => {
     expect(screen.getByText('Dedicated wallet for operator')).toBeTruthy();
     expect(screen.getByText(/verification public-site-key/)).toBeTruthy();
     expect(screen.getByText('history open')).toBeTruthy();
-    expect(screen.queryByRole('main', { name: 'admin console' })).toBeNull();
+    expect(screen.queryByRole('main', { name: 'redemption management' })).toBeNull();
   });
 
   it('boots direct and compatibility chat routes into the dedicated feature', async () => {
@@ -232,7 +229,7 @@ describe('/redemption-codes integration', () => {
 
     await waitFor(() => expect(window.location.pathname).toBe('/403'));
     expect(await screen.findByRole('heading', { name: 'Access denied' })).toBeTruthy();
-    expect(screen.queryByRole('main', { name: 'admin console' })).toBeNull();
+    expect(screen.queryByRole('main', { name: 'redemption management' })).toBeNull();
   });
 
   it('normalizes a root system-settings category to its exact default section', async () => {

@@ -30,7 +30,7 @@ func channelByID(t *testing.T, id int) model.Channel {
 }
 
 func TestChannelStatusUpdateEndpoints(t *testing.T) {
-	_, do, _ := setupChannelRead(t, roles.RoleRootUser)
+	_, do, _ := setupDashboardSession(t, roles.RoleRootUser)
 	ch := createWriteChannel(t, "statusch", channelcatalog.ChannelStatusEnabled, "default", "gpt-4o", "", 0)
 	ability := model.Ability{Group: "default", Model: "gpt-4o", ChannelId: ch.Id, Enabled: true, Weight: 1}
 	require.NoError(t, model.DB.Create(&ability).Error)
@@ -75,7 +75,7 @@ func TestChannelStatusUpdateEndpoints(t *testing.T) {
 }
 
 func TestChannelBatchMutationsRejectUnboundedOrAmbiguousIDs(t *testing.T) {
-	_, do, _ := setupChannelRead(t, roles.RoleRootUser)
+	_, do, _ := setupDashboardSession(t, roles.RoleRootUser)
 	channel := createWriteChannel(t, "bounded-batch", channelcatalog.ChannelStatusEnabled, "default", "gpt-4o", "original", 0)
 	require.NoError(t, model.DB.Create(&model.Ability{
 		Group: "default", Model: "gpt-4o", ChannelId: channel.Id, Enabled: true, Weight: 1, Tag: &channel.Tag,
@@ -121,7 +121,7 @@ func TestChannelBatchMutationsRejectUnboundedOrAmbiguousIDs(t *testing.T) {
 }
 
 func TestChannelDeleteDisabledEndpoint(t *testing.T) {
-	_, do, _ := setupChannelRead(t, roles.RoleRootUser)
+	_, do, _ := setupDashboardSession(t, roles.RoleRootUser)
 	enabled := createWriteChannel(t, "keepme", channelcatalog.ChannelStatusEnabled, "default", "gpt-4o", "", 0)
 	createWriteChannel(t, "delme1", channelcatalog.ChannelStatusAutoDisabled, "default", "gpt-4o", "", 0)
 	createWriteChannel(t, "delme2", channelcatalog.ChannelStatusManuallyDisabled, "default", "gpt-4o", "", 0)
@@ -139,7 +139,7 @@ func TestChannelDeleteDisabledEndpoint(t *testing.T) {
 }
 
 func TestChannelTagEndpoints(t *testing.T) {
-	_, do, _ := setupChannelRead(t, roles.RoleRootUser)
+	_, do, _ := setupDashboardSession(t, roles.RoleRootUser)
 	fast1 := createWriteChannel(t, "fast1", channelcatalog.ChannelStatusEnabled, "default", "gpt-4o", "fast", 10)
 	fast2 := createWriteChannel(t, "fast2", channelcatalog.ChannelStatusEnabled, "default", "claude-sonnet", "fast", 20)
 	slow := createWriteChannel(t, "slow1", channelcatalog.ChannelStatusEnabled, "default", "gpt-4o-mini", "slow", 5)
@@ -223,7 +223,7 @@ func TestChannelTagEndpoints(t *testing.T) {
 }
 
 func TestChannelDeleteBatchEndpoint(t *testing.T) {
-	_, do, _ := setupChannelRead(t, roles.RoleRootUser)
+	_, do, _ := setupDashboardSession(t, roles.RoleRootUser)
 	ch1 := createWriteChannel(t, "batch1", channelcatalog.ChannelStatusEnabled, "default", "gpt-4o", "", 0)
 	ch2 := createWriteChannel(t, "batch2", channelcatalog.ChannelStatusEnabled, "default", "gpt-4o", "", 0)
 	ch3 := createWriteChannel(t, "batch3", channelcatalog.ChannelStatusEnabled, "default", "gpt-4o", "", 0)
@@ -250,7 +250,7 @@ func TestChannelDeleteBatchEndpoint(t *testing.T) {
 }
 
 func TestChannelFixAbilitiesEndpoint(t *testing.T) {
-	_, do, _ := setupChannelRead(t, roles.RoleRootUser)
+	_, do, _ := setupDashboardSession(t, roles.RoleRootUser)
 	enabled := createWriteChannel(t, "fixme", channelcatalog.ChannelStatusEnabled, "default,vip", "gpt-4o, claude-sonnet", "", 7)
 	disabled := createWriteChannel(t, "fixoff", channelcatalog.ChannelStatusManuallyDisabled, "default", "gpt-4o-mini", "", 0)
 	// Stale ability rows that the rebuild must replace.
@@ -290,7 +290,7 @@ func TestChannelFixAbilitiesEndpoint(t *testing.T) {
 }
 
 func TestChannelFetchModelsEndpoints(t *testing.T) {
-	_, do, _ := setupChannelRead(t, roles.RoleRootUser)
+	_, do, _ := setupDashboardSession(t, roles.RoleRootUser)
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, "/v1/models", r.URL.Path)
 		assert.Equal(t, "Bearer sk-up", r.Header.Get("Authorization"))
@@ -345,7 +345,7 @@ func TestChannelFetchModelsEndpoints(t *testing.T) {
 }
 
 func TestChannelFetchModelsAdvancedCustomPreview(t *testing.T) {
-	_, do, _ := setupChannelRead(t, roles.RoleRootUser)
+	_, do, _ := setupDashboardSession(t, roles.RoleRootUser)
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, "/provider/models", r.URL.Path)
 		assert.Equal(t, "override preview-key", r.Header.Get("x-api-key"))
@@ -424,7 +424,7 @@ func TestChannelFetchModelsAdvancedCustomPreview(t *testing.T) {
 }
 
 func TestChannelBatchTagAndTagModels(t *testing.T) {
-	_, do, _ := setupChannelRead(t, roles.RoleRootUser)
+	_, do, _ := setupDashboardSession(t, roles.RoleRootUser)
 	ch1 := createWriteChannel(t, "tagme1", channelcatalog.ChannelStatusEnabled, "default", "m1,m2,m3", "old", 0)
 	ch2 := createWriteChannel(t, "tagme2", channelcatalog.ChannelStatusEnabled, "default", "m1", "old", 0)
 	require.NoError(t, model.DB.Create(&model.Ability{Group: "default", Model: "m1", ChannelId: ch1.Id, Enabled: true, Weight: 1}).Error)
@@ -460,7 +460,7 @@ func TestChannelBatchTagAndTagModels(t *testing.T) {
 }
 
 func TestChannelCopyEndpoint(t *testing.T) {
-	_, do, _ := setupChannelRead(t, roles.RoleRootUser)
+	_, do, _ := setupDashboardSession(t, roles.RoleRootUser)
 	orig := createWriteChannel(t, "origin", channelcatalog.ChannelStatusEnabled, "default", "gpt-4o", "cp", 9)
 	require.NoError(t, model.DB.Model(&orig).Updates(map[string]any{"balance": 42.5, "used_quota": 100}).Error)
 
@@ -498,7 +498,7 @@ func TestChannelCopyEndpoint(t *testing.T) {
 }
 
 func TestChannelMultiKeyManageEndpoint(t *testing.T) {
-	_, do, _ := setupChannelRead(t, roles.RoleRootUser)
+	_, do, _ := setupDashboardSession(t, roles.RoleRootUser)
 	multikey := createWriteChannel(t, "mk", channelcatalog.ChannelStatusEnabled, "default", "gpt-4o", "", 0)
 	require.NoError(t, model.DB.Model(&multikey).Updates(map[string]any{
 		"key":          "sk-k1\nsk-k2\nsk-k3",
@@ -623,7 +623,7 @@ func TestChannelMultiKeyManageEndpoint(t *testing.T) {
 }
 
 func TestChannelBalanceEndpoints(t *testing.T) {
-	_, do, _ := setupChannelRead(t, roles.RoleRootUser)
+	_, do, _ := setupDashboardSession(t, roles.RoleRootUser)
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, "Bearer sk-bal", r.Header.Get("Authorization"))
 		switch r.URL.Path {

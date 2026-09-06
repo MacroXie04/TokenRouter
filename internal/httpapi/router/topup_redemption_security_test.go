@@ -12,7 +12,7 @@ import (
 )
 
 func TestUserTopUpCannotMintQuotaFromClientDeclaredBalance(t *testing.T) {
-	_, do, userID := setupChannelRead(t, roles.RoleCommonUser)
+	_, do, userID := setupDashboardSession(t, roles.RoleCommonUser)
 	setPaymentCompliance(t, true)
 
 	var before model.User
@@ -30,7 +30,7 @@ func TestUserTopUpCannotMintQuotaFromClientDeclaredBalance(t *testing.T) {
 }
 
 func TestUserTopUpRedeemsServerIssuedCodeExactlyOnce(t *testing.T) {
-	_, do, userID := setupChannelRead(t, roles.RoleCommonUser)
+	_, do, userID := setupDashboardSession(t, roles.RoleCommonUser)
 	setPaymentCompliance(t, true)
 
 	redemption := model.Redemption{
@@ -59,7 +59,7 @@ func TestUserTopUpRedeemsServerIssuedCodeExactlyOnce(t *testing.T) {
 }
 
 func TestPaymentComplianceGateCoversEveryRedemptionAndAffiliateMutation(t *testing.T) {
-	_, do, userID := setupChannelRead(t, roles.RoleCommonUser)
+	_, do, userID := setupDashboardSession(t, roles.RoleCommonUser)
 	setPaymentCompliance(t, false)
 	require.NoError(t, setting.UpdateOption(setting.QuotaPerUnitOption, "10"))
 	require.NoError(t, model.DB.Model(&model.User{}).Where("id = ?", userID).

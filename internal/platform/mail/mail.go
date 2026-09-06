@@ -5,13 +5,11 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
-	setting "github.com/tokenrouter/tokenrouter/internal/settings"
 	"io"
 	"mime"
 	"net"
 	"net/mail"
 	"net/smtp"
-	"os"
 	"strings"
 	"time"
 	"unicode"
@@ -41,18 +39,24 @@ var Mail Mailer = &noopMailer{}
 // InitMailer installs the hot-reloadable SMTP implementation. Configuration is
 // resolved at delivery time rather than copied here because settings are loaded
 // after this initializer during startup and may later be synchronized remotely.
-func InitMailer() {
-	Mail = &smtpRuntimeMailer{}
+func InitMailer(resolve ConfigResolver) {
+	Mail = &smtpRuntimeMailer{resolve: resolve}
 }
 
 type noopMailer struct{}
 
 func (noopMailer) Send(to, subject, body string) error { return nil }
 
-type smtpRuntimeMailer struct{}
+// ConfigResolver supplies one immutable configuration snapshot per delivery.
+type ConfigResolver func() (Config, bool, error)
 
-func (smtpRuntimeMailer) Send(to, subject, body string) error {
-	configured, enabled, err := EffectiveSMTPSetting()
+type smtpRuntimeMailer struct{ resolve ConfigResolver }
+
+func (mailer smtpRuntimeMailer) Send(to, subject, body string) error {
+	if mailer.resolve == nil {
+		return errors.New("SMTP configuration resolver is not installed")
+	}
+	configured, enabled, err := mailer.resolve()
 	if err != nil {
 		return err
 	}
@@ -60,80 +64,6 @@ func (smtpRuntimeMailer) Send(to, subject, body string) error {
 		return nil
 	}
 	return sendSMTP(configured, to, subject, body, smtpDialTimeout, smtpDeliveryTimeout)
-}
-
-var smtpEnvironmentAliases = map[string][]string{
-	setting.SMTPServerOption:             {"SMTP_HOST", "SMTP_SERVER"},
-	setting.SMTPPortOption:               {"SMTP_PORT"},
-	setting.SMTPAccountOption:            {"SMTP_USER", "SMTP_ACCOUNT"},
-	setting.SMTPFromOption:               {"SMTP_FROM"},
-	setting.SMTPTokenOption:              {"SMTP_PASSWORD", "SMTP_TOKEN"},
-	setting.SMTPSSLEnabledOption:         {"SMTP_SSL_ENABLED", "SMTP_SSL_ENABLE"},
-	setting.SMTPStartTLSEnabledOption:    {"SMTP_STARTTLS_ENABLED", "SMTP_STARTTLS_ENABLE"},
-	setting.SMTPInsecureSkipVerifyOption: {"SMTP_INSECURE_SKIP_VERIFY", "SMTP_TLS_INSECURE_SKIP_VERIFY"},
-	setting.SMTPForceAuthLoginOption:     {"SMTP_FORCE_AUTH_LOGIN"},
-}
-
-func firstSMTPEnvironmentValue(names []string) (string, bool, error) {
-	var selected string
-	found := false
-	for _, name := range names {
-		if value, present := os.LookupEnv(name); present {
-			if found && value != selected {
-				return "", true, fmt.Errorf("conflicting SMTP environment aliases %s", strings.Join(names, " and "))
-			}
-			selected = value
-			found = true
-		}
-	}
-	return selected, found, nil
-}
-
-func smtpEnvironmentValues() (map[string]string, bool, error) {
-	selected := false
-	values := setting.OperationsOptionDefaults()
-	delete(values, setting.DefaultCollapseSidebarOption)
-	for option, aliases := range smtpEnvironmentAliases {
-		value, present, err := firstSMTPEnvironmentValue(aliases)
-		if err != nil {
-			return nil, true, err
-		}
-		if present {
-			values[option] = value
-			selected = true
-		}
-	}
-	return values, selected, nil
-}
-
-// EffectiveSMTPSetting resolves the entire deployment environment domain when
-// any SMTP environment key is present. It never mixes an environment account
-// with an option token (or vice versa). A partial or malformed override fails
-// closed instead of falling back to persisted credentials.
-func EffectiveSMTPSetting() (setting.SMTPSetting, bool, error) {
-	values, selected, err := smtpEnvironmentValues()
-	if err != nil {
-		return setting.SMTPSetting{}, false, fmt.Errorf("invalid SMTP environment configuration: %w", err)
-	}
-	if selected {
-		configured, err := setting.ParseSMTPSetting(values)
-		if err != nil {
-			return setting.SMTPSetting{}, false, fmt.Errorf("invalid SMTP environment configuration: %w", err)
-		}
-		if err := configured.ValidateRunnable(); err != nil {
-			return setting.SMTPSetting{}, false, fmt.Errorf("invalid SMTP environment configuration: %w", err)
-		}
-		return configured, true, nil
-	}
-
-	configured := setting.GetOperationsSetting().SMTP
-	if configured.Server == "" {
-		return configured, false, nil
-	}
-	if err := configured.ValidateRunnable(); err != nil {
-		return setting.SMTPSetting{}, false, fmt.Errorf("invalid SMTP option configuration: %w", err)
-	}
-	return configured, true, nil
 }
 
 func validMailInput(value string, maximumBytes int, allowLineBreaks bool) bool {
@@ -187,7 +117,7 @@ func buildSMTPMessage(from, to, subject, body string) ([]byte, error) {
 	return []byte(message.String()), nil
 }
 
-func smtpTLSConfig(config setting.SMTPSetting) *tls.Config {
+func smtpTLSConfig(config Config) *tls.Config {
 	return &tls.Config{
 		MinVersion:         tls.VersionTLS12,
 		ServerName:         config.Server,
@@ -197,7 +127,7 @@ func smtpTLSConfig(config setting.SMTPSetting) *tls.Config {
 
 func dialSMTP(
 	ctx context.Context,
-	config setting.SMTPSetting,
+	config Config,
 	dialTimeout time.Duration,
 ) (*smtp.Client, net.Conn, error) {
 	address := net.JoinHostPort(config.Server, fmt.Sprintf("%d", config.Port))
@@ -263,7 +193,7 @@ func (auth *smtpLoginAuth) Next(_ []byte, more bool) ([]byte, error) {
 	return []byte(auth.password), nil
 }
 
-func smtpAuthentication(config setting.SMTPSetting) smtp.Auth {
+func smtpAuthentication(config Config) smtp.Auth {
 	if config.Account == "" {
 		return nil
 	}
@@ -274,7 +204,7 @@ func smtpAuthentication(config setting.SMTPSetting) smtp.Auth {
 }
 
 func sendSMTP(
-	config setting.SMTPSetting,
+	config Config,
 	to, subject, body string,
 	dialTimeout, deliveryTimeout time.Duration,
 ) error {

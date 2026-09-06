@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	billingsvc "github.com/tokenrouter/tokenrouter/internal/billing"
-	operationssvc "github.com/tokenrouter/tokenrouter/internal/operations"
 	"github.com/tokenrouter/tokenrouter/internal/platform/jsonutil"
 	"github.com/tokenrouter/tokenrouter/internal/relay/providers/sora"
 	model "github.com/tokenrouter/tokenrouter/internal/store"
@@ -44,13 +43,6 @@ type videoRecoveryJournalDiskEnvelope struct {
 }
 
 var videoRecoveryJournalPromotionCursor atomic.Uint64
-
-// RegisterVideoTaskRecoveryJournalPromoter wires the node-local journal into
-// the service scheduler without creating a service-to-relay import cycle. The
-// caller should invoke it while registering the async video reconciler.
-func RegisterVideoTaskRecoveryJournalPromoter() {
-	operationssvc.RegisterAsyncTaskPromoter(PromoteVideoTaskRecoveryJournalsContext)
-}
 
 func videoRecoveryJournalDirectory() string {
 	if configured := strings.TrimSpace(os.Getenv("VIDEO_TASK_RECOVERY_DIR")); configured != "" {

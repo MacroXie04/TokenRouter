@@ -7,7 +7,6 @@ import (
 	"github.com/gin-gonic/gin"
 	channelssvc "github.com/tokenrouter/tokenrouter/internal/channels"
 	channelcatalog "github.com/tokenrouter/tokenrouter/internal/channels/catalog"
-	"github.com/tokenrouter/tokenrouter/internal/httpapi/requestctx"
 	"github.com/tokenrouter/tokenrouter/internal/platform/httpx"
 	"github.com/tokenrouter/tokenrouter/internal/platform/logging"
 	relaycommon "github.com/tokenrouter/tokenrouter/internal/relay/contract"
@@ -27,7 +26,7 @@ const maxGeminiNativeRequestBodyBytes int64 = 16 << 20
 // format. Channels of Gemini type pass the body through verbatim; other
 // OpenAI-compatible channels convert the request to OpenAI chat completions
 // and convert the response back (mirroring the reference's RelayFormatGemini).
-func RelayGeminiNative(c *gin.Context) {
+func RelayGeminiNative(c *gin.Context, state relaycommon.RequestState) {
 	cancel := applyRelayRequestDeadline(c)
 	defer cancel()
 	rawBody, err := httpx.ReadAllLimited(c.Request.Body, maxGeminiNativeRequestBodyBytes)
@@ -64,12 +63,12 @@ func RelayGeminiNative(c *gin.Context) {
 		Request:       converted,
 		GeminiRequest: &native,
 		RawBody:       rawBody,
-		UserGroup:     requestctx.GetUserGroup(c),
-		Group:         getRelayGroup(c),
+		UserGroup:     state.UserGroup,
+		Group:         state.FirstGroup(),
 		IsStream:      geminiStreamRequested(c, &native),
 	}
 	info.Request.Stream = info.IsStream
-	if err := relayAndSettleWithDispatch(c, info, dispatchGeminiNative); err != nil {
+	if err := relayAndSettleWithDispatch(c, state, info, dispatchGeminiNative); err != nil {
 		logging.SysError("Gemini relay lifecycle failed: " + err.Error())
 	}
 }

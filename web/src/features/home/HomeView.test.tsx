@@ -6,7 +6,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { HeaderNavigationModules } from '../../shared/config/nav-modules';
 import type { PricingCatalog } from '../pricing/catalog';
 import { loadPricingCatalog } from '../pricing/pricing-api';
-import { loadBasicRankings, loadPerformanceSummary, loadPublicContent } from './home-api';
+import { loadBasicRankings, loadPerformanceSummary } from './home-api';
+import { loadPublicContent } from '../public-documents/public-content-api';
+vi.mock('../public-documents/public-content-api', () => ({ loadPublicContent: vi.fn(), MAX_PUBLIC_CONTENT_CHARACTERS: 1_000_000 }));
 import { HomeView } from './HomeView';
 
 const i18nState = vi.hoisted(() => ({ language: 'en', resolvedLanguage: 'en' }));

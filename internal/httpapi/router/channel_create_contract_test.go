@@ -15,7 +15,7 @@ import (
 )
 
 func TestChannelCreateAcceptsReferenceEnvelopeAndPersistsProviderFields(t *testing.T) {
-	_, do, _ := setupChannelRead(t, roles.RoleRootUser)
+	_, do, _ := setupDashboardSession(t, roles.RoleRootUser)
 	response := do(http.MethodPost, "/api/channel", `{
 		"mode":"single",
 		"channel":{
@@ -53,7 +53,7 @@ func TestChannelCreateAcceptsReferenceEnvelopeAndPersistsProviderFields(t *testi
 }
 
 func TestChannelCreateBatchAndMultiKeyModesAreBoundedAndSecretSafe(t *testing.T) {
-	_, do, _ := setupChannelRead(t, roles.RoleRootUser)
+	_, do, _ := setupDashboardSession(t, roles.RoleRootUser)
 	response := do(http.MethodPost, "/api/channel", `{
 		"mode":"batch","batch_add_set_key_prefix_2_name":true,
 		"channel":{"name":"batch","type":1,"key":"sk-first-secret\n\nsk-second-secret ","models":"gpt-4o","group":"default"}
@@ -97,7 +97,7 @@ func TestChannelCreateBatchAndMultiKeyModesAreBoundedAndSecretSafe(t *testing.T)
 }
 
 func TestChannelUpdatePersistsEveryClassifiedProviderField(t *testing.T) {
-	_, do, _ := setupChannelRead(t, roles.RoleRootUser)
+	_, do, _ := setupDashboardSession(t, roles.RoleRootUser)
 	channel := createSearchChannel(t, "full-update", int(channelcatalog.ChannelTypeOpenAI),
 		channelcatalog.ChannelStatusEnabled, "default", "gpt-4o", "", 0)
 	require.NoError(t, model.DB.Model(&channel).Update("channel_info", `{"is_multi_key":true,"multi_key_size":2}`).Error)

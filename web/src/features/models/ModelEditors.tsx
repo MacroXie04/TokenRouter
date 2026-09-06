@@ -1,12 +1,7 @@
 import type { FormEvent } from 'react';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import {
-  type ModelMetadata,
-  type ModelMutationInput,
-  type VendorMetadata,
-  type VendorMutationInput
-} from './models-api';
+import { type ModelMetadata, type ModelMutationInput, type VendorMetadata, type VendorMutationInput } from "./metadata-contracts";
 import { Overlay, type EditorMode } from './models-ui';
 
 export const EMPTY_MODEL: ModelMutationInput = {

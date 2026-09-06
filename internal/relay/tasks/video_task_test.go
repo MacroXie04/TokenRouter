@@ -101,14 +101,14 @@ func newVideoTaskFixture(t *testing.T, upstreamURL string) videoTaskFixture {
 	router := gin.New()
 	video := router.Group("/v1")
 	video.Use(middleware.TokenAuth())
-	video.POST("/video/generations", RelayVideoTask)
-	video.GET("/video/generations/:task_id", RelayVideoTaskFetch)
-	video.POST("/videos/:video_id/remix", RelayVideoTask)
-	video.POST("/videos", RelayVideoTask)
-	video.GET("/videos/:task_id", RelayVideoTaskFetch)
+	video.POST("/video/generations", authenticatedTaskHandler(RelayVideoTask))
+	video.GET("/video/generations/:task_id", authenticatedTaskHandler(RelayVideoTaskFetch))
+	video.POST("/videos/:video_id/remix", authenticatedTaskHandler(RelayVideoTask))
+	video.POST("/videos", authenticatedTaskHandler(RelayVideoTask))
+	video.GET("/videos/:task_id", authenticatedTaskHandler(RelayVideoTaskFetch))
 	content := router.Group("/v1")
 	content.Use(middleware.TokenOrUserAuth())
-	content.GET("/videos/:task_id/content", VideoProxy)
+	content.GET("/videos/:task_id/content", authenticatedTaskHandler(VideoProxy))
 	return videoTaskFixture{router: router, db: db, user: user, token: token, channel: channel}
 }
 

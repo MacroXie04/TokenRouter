@@ -7,6 +7,7 @@ import (
 	"github.com/stretchr/testify/require"
 	billingsvc "github.com/tokenrouter/tokenrouter/internal/billing"
 	channelcatalog "github.com/tokenrouter/tokenrouter/internal/channels/catalog"
+	"github.com/tokenrouter/tokenrouter/internal/httpapi/middleware"
 	setting "github.com/tokenrouter/tokenrouter/internal/settings"
 	model "github.com/tokenrouter/tokenrouter/internal/store"
 	"github.com/tokenrouter/tokenrouter/protocolkit"
@@ -54,7 +55,7 @@ func TestOrdinaryReferenceUsageRatiosSettleAndLogCapturedSnapshotForHTTPAndStrea
 					ImageTokens: 4,
 				},
 			}
-			err := relayAndSettleWithDispatch(c, info, func(c *gin.Context, _ *RelayInfo) (*protocolkit.Usage, error) {
+			err := relayAndSettleWithDispatch(c, middleware.CaptureRelayRequestState(c), info, func(c *gin.Context, _ *RelayInfo) (*protocolkit.Usage, error) {
 				// All request-time ratios have already been captured. This edit
 				// must affect only a later relay, never this settlement or log.
 				require.NoError(t, setting.UpdateOptions(map[string]string{
@@ -112,7 +113,7 @@ func TestOrdinaryZeroPriceUsesExplicitFreeModelReservationWhenPolicyDisabled(t *
 	}))
 
 	c, recorder, info := newRelayAccountingContext(t, &fixture.token, 64)
-	err := relayAndSettleWithDispatch(c, info, func(c *gin.Context, _ *RelayInfo) (*protocolkit.Usage, error) {
+	err := relayAndSettleWithDispatch(c, middleware.CaptureRelayRequestState(c), info, func(c *gin.Context, _ *RelayInfo) (*protocolkit.Usage, error) {
 		var record model.RelayQuotaReservationRecord
 		require.NoError(t, model.DB.First(&record).Error)
 		assert.Equal(t, billingsvc.BillingSourceFreeModel, record.FundingSource)
@@ -147,7 +148,7 @@ func TestOrdinaryReferenceUsagePreservesConvertedClaudeBillingSemantic(t *testin
 	}))
 
 	c, recorder, info := newRelayAccountingContext(t, &fixture.token, 64)
-	err := relayAndSettleWithDispatch(c, info, func(c *gin.Context, _ *RelayInfo) (*protocolkit.Usage, error) {
+	err := relayAndSettleWithDispatch(c, middleware.CaptureRelayRequestState(c), info, func(c *gin.Context, _ *RelayInfo) (*protocolkit.Usage, error) {
 		c.JSON(http.StatusOK, gin.H{"ok": true})
 		return protocolkit.ClaudeUsageToOpenAIUsage(&protocolkit.ClaudeUsage{
 			InputTokens: 70, CacheReadInputTokens: 10, CacheCreationInputTokens: 20,

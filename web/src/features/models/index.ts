@@ -1,4 +1,3 @@
-export { MODEL_SECTIONS } from './models-api';
-export type { ModelsSection } from './models-api';
-export { ModelsView } from './ModelsView';
-export type { ModelsViewProps } from './ModelsView';
+export { testDeploymentConnection } from './deployment-api';
+export { MODEL_SECTIONS, type ModelsSection } from './metadata-contracts';
+export { ModelsView, type ModelsViewProps } from './ModelsView';

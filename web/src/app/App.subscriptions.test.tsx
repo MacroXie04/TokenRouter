@@ -27,10 +27,6 @@ vi.mock('../features/subscriptions', () => ({
   ),
 }));
 
-vi.mock('../features/admin/AdminConsole', () => ({
-  AdminConsole: () => <main aria-label="legacy admin console">Legacy subscriptions</main>,
-}));
-
 const mockedGetData = vi.mocked(getData);
 
 beforeEach(() => {
@@ -67,6 +63,5 @@ describe('/subscriptions integration', () => {
 
     expect(await screen.findByRole('main', { name: 'dedicated subscriptions' }))
       .toHaveProperty('textContent', 'operator role 10');
-    expect(screen.queryByRole('main', { name: 'legacy admin console' })).toBeNull();
   });
 });

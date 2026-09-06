@@ -19,7 +19,7 @@ import (
 )
 
 func TestRelayQuotaReservationManualReviewRootWorkflow(t *testing.T) {
-	handler, do, rootID := setupChannelRead(t, roles.RoleRootUser)
+	handler, do, rootID := setupDashboardSession(t, roles.RoleRootUser)
 	require.NoError(t, model.DB.AutoMigrate(
 		&model.RelayQuotaReservationRecord{}, &model.RelayQuotaReservationReviewEvent{},
 		&model.Task{}, &model.TaskOperation{}, &model.JimengTaskOperation{},
@@ -101,7 +101,7 @@ func TestRelayQuotaReservationManualReviewRootWorkflow(t *testing.T) {
 }
 
 func TestRelayQuotaReservationManualReviewRejectsNonRootAdmin(t *testing.T) {
-	_, do, _ := setupChannelRead(t, roles.RoleAdminUser)
+	_, do, _ := setupDashboardSession(t, roles.RoleAdminUser)
 	request := do(http.MethodGet, "/api/relay-quota-reservations/manual-review", "")
 	assert.Equal(t, http.StatusForbidden, request.Code)
 	resolution := do(http.MethodPost,
@@ -113,7 +113,7 @@ func TestRelayQuotaReservationManualReviewRejectsNonRootAdmin(t *testing.T) {
 }
 
 func TestGrokViolationFeeManualReviewRootRetryUsesImmutableStoredPlan(t *testing.T) {
-	_, do, rootID := setupChannelRead(t, roles.RoleRootUser)
+	_, do, rootID := setupDashboardSession(t, roles.RoleRootUser)
 	require.NoError(t, model.DB.AutoMigrate(
 		&model.RelayQuotaReservationRecord{}, &model.RelayQuotaReservationReviewEvent{},
 		&model.Task{}, &model.TaskOperation{}, &model.JimengTaskOperation{},
@@ -196,7 +196,7 @@ func TestGrokViolationFeeManualReviewRootRetryUsesImmutableStoredPlan(t *testing
 }
 
 func TestRelayQuotaReservationJimengResolutionRootOnlyAndImmutable(t *testing.T) {
-	_, do, rootID := setupChannelRead(t, roles.RoleRootUser)
+	_, do, rootID := setupDashboardSession(t, roles.RoleRootUser)
 	require.NoError(t, model.DB.AutoMigrate(
 		&model.RelayQuotaReservationRecord{}, &model.RelayQuotaReservationReviewEvent{},
 		&model.Task{}, &model.TaskOperation{}, &model.JimengTaskOperation{},
@@ -299,7 +299,7 @@ func TestRelayQuotaReservationJimengResolutionRootOnlyAndImmutable(t *testing.T)
 }
 
 func TestRelayQuotaReservationVideoPollReviewListsAndRejectsMissingProviderID(t *testing.T) {
-	_, do, rootID := setupChannelRead(t, roles.RoleRootUser)
+	_, do, rootID := setupDashboardSession(t, roles.RoleRootUser)
 	require.NoError(t, model.DB.AutoMigrate(
 		&model.RelayQuotaReservationRecord{}, &model.RelayQuotaReservationReviewEvent{},
 		&model.Task{}, &model.TaskOperation{}, &model.JimengTaskOperation{},

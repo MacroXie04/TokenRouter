@@ -111,7 +111,7 @@ var channelNonSensitiveFields = map[string]struct{}{
 	"multi_key_mode":      {},
 }
 
-// dtoChannelUpdate mirrors dto.ChannelRequest with an id and pointer-shaped
+// dtoChannelUpdate mirrors ChannelRequest with an id and pointer-shaped
 // optional fields so the update can distinguish absent from zero values.
 type dtoChannelUpdate struct {
 	Id                 int    `json:"id"`

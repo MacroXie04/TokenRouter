@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 	billingsvc "github.com/tokenrouter/tokenrouter/internal/billing"
 	"github.com/tokenrouter/tokenrouter/internal/httpapi/handlers/commerce"
+	creempayments "github.com/tokenrouter/tokenrouter/internal/payments/creem"
 	"github.com/tokenrouter/tokenrouter/internal/platform/httpx"
 	"github.com/tokenrouter/tokenrouter/internal/platform/jsonutil"
 	setting "github.com/tokenrouter/tokenrouter/internal/settings"
@@ -74,7 +75,7 @@ func TestCreemWalletAndSubscriptionHTTPContractEndToEnd(t *testing.T) {
 
 	var mu sync.Mutex
 	requests := make([]map[string]any, 0, 2)
-	restore := commerce.SetCreemCheckoutTransportForTesting(creemRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+	restore := creempayments.SetCheckoutTransportForTesting(creemRoundTripFunc(func(request *http.Request) (*http.Response, error) {
 		require.Equal(t, http.MethodPost, request.Method)
 		require.Equal(t, "https://test-api.creem.io/v1/checkouts", request.URL.String())
 		require.Equal(t, "application/json", request.Header.Get("Content-Type"))
@@ -244,7 +245,7 @@ func TestCreemCheckoutFailureClassificationPreservesAmbiguousOrdersAndReleasesDe
 
 	// Transport failure is ambiguous: the request_id may already have created
 	// checkout state, so the complete immutable local order remains pending.
-	restore := commerce.SetCreemCheckoutTransportForTesting(creemRoundTripFunc(func(*http.Request) (*http.Response, error) {
+	restore := creempayments.SetCheckoutTransportForTesting(creemRoundTripFunc(func(*http.Request) (*http.Response, error) {
 		return nil, errors.New("injected timeout")
 	}))
 	recorder := do(http.MethodPost, "/api/user/creem/pay", `{"product_id":"prod_wallet","payment_method":"creem"}`)
@@ -269,7 +270,7 @@ func TestCreemCheckoutFailureClassificationPreservesAmbiguousOrdersAndReleasesDe
 	// A definitive provider 400 cannot have produced a usable checkout. The
 	// subscription reservation is released instead of permanently consuming
 	// the plan's purchase cap.
-	restore = commerce.SetCreemCheckoutTransportForTesting(creemRoundTripFunc(func(*http.Request) (*http.Response, error) {
+	restore = creempayments.SetCheckoutTransportForTesting(creemRoundTripFunc(func(*http.Request) (*http.Response, error) {
 		return &http.Response{StatusCode: http.StatusBadRequest, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"error":"bad product"}`))}, nil
 	}))
 	recorder = do(http.MethodPost, "/api/subscription/creem/pay", fmt.Sprintf(`{"plan_id":%d}`, plan.Id))
@@ -284,7 +285,7 @@ func TestCreemCheckoutFailureClassificationPreservesAmbiguousOrdersAndReleasesDe
 
 	// A malformed 2xx may conceal an already-created checkout, so it remains
 	// pending rather than being falsely marked failed.
-	restore = commerce.SetCreemCheckoutTransportForTesting(creemRoundTripFunc(func(*http.Request) (*http.Response, error) {
+	restore = creempayments.SetCheckoutTransportForTesting(creemRoundTripFunc(func(*http.Request) (*http.Response, error) {
 		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"checkout_url":"https://checkout.creem.io/pay/missing-id"}`))}, nil
 	}))
 	recorder = do(http.MethodPost, "/api/subscription/creem/pay", fmt.Sprintf(`{"plan_id":%d}`, plan.Id))

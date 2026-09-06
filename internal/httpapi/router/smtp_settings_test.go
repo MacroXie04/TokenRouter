@@ -33,7 +33,7 @@ func smtpUpdateBody(t *testing.T, overrides map[string]any) string {
 }
 
 func TestRootSMTPAtomicUpdateTransitionsTLSAndPreservesSecret(t *testing.T) {
-	_, do, _ := setupChannelRead(t, roles.RoleRootUser)
+	_, do, _ := setupDashboardSession(t, roles.RoleRootUser)
 	require.NoError(t, setting.Init())
 
 	const secret = "smtp-option-secret"
@@ -102,7 +102,7 @@ func TestRootSMTPAtomicUpdateTransitionsTLSAndPreservesSecret(t *testing.T) {
 }
 
 func TestRootSMTPAtomicUpdateIsStrictAndBounded(t *testing.T) {
-	_, do, _ := setupChannelRead(t, roles.RoleRootUser)
+	_, do, _ := setupDashboardSession(t, roles.RoleRootUser)
 	require.NoError(t, setting.Init())
 
 	missing := do(http.MethodPut, "/api/option/smtp", `{"SMTPServer":"smtp.example.com"}`)
@@ -136,7 +136,7 @@ func TestRootSMTPAtomicUpdateIsStrictAndBounded(t *testing.T) {
 }
 
 func TestSMTPAtomicUpdateRequiresRootAndStatusExposesOnlyCollapseBehavior(t *testing.T) {
-	handler, do, _ := setupChannelRead(t, roles.RoleAdminUser)
+	handler, do, _ := setupDashboardSession(t, roles.RoleAdminUser)
 	require.NoError(t, setting.Init())
 	response := do(http.MethodPut, "/api/option/smtp", smtpUpdateBody(t, nil))
 	assert.Equal(t, http.StatusForbidden, response.Code)

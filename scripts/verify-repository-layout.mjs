@@ -413,6 +413,48 @@ function requiredLayoutFailures(files) {
   return failures;
 }
 
+// These are ownership boundaries, not a file-count or directory-depth limit.
+// Domain vocabulary/math leaves are explicitly allowed below their parent
+// business services so persistence and configuration do not acquire those services.
+function dependencyBoundaryFailures(fileName, imports, rootModule) {
+  if (fileName.endsWith('_test.go')) return [];
+  const owner = path.posix.dirname(fileName);
+  const within = (candidate, area) => candidate === area || candidate.startsWith(area + '/');
+  const failures = [];
+  for (const imported of imports) {
+    if (!imported.startsWith(rootModule + '/internal/')) continue;
+    const dependency = imported.slice(rootModule.length + 1);
+    let reason;
+    if (within(owner, 'internal/platform') && !within(dependency, 'internal/platform')) {
+      reason = 'platform infrastructure cannot import application domains';
+    } else if (within(owner, 'internal/store')
+      && !['internal/store', 'internal/platform', 'internal/channels/catalog'].some((area) => within(dependency, area))) {
+      reason = 'persistence may use infrastructure and channel vocabulary only';
+    } else if (within(owner, 'internal/settings')
+      && !['internal/settings', 'internal/store', 'internal/platform', 'internal/billing/quota', 'internal/billing/expression']
+        .some((area) => within(dependency, area))) {
+      reason = 'settings may use persistence, infrastructure and calculation leaves only';
+    } else if (within(owner, 'internal') && !within(owner, 'internal/app')
+      && within(dependency, 'internal/app')) {
+      reason = 'only the composition layer owns application startup';
+    } else if (within(owner, 'internal') && !within(owner, 'internal/httpapi')
+      && !within(owner, 'internal/app') && within(dependency, 'internal/httpapi')) {
+      reason = 'business and relay packages cannot depend on HTTP adapters';
+    } else if (['internal/relay/contract', 'internal/relay/providers', 'internal/relay/policy', 'internal/relay/customconfig']
+      .some((area) => within(owner, area))
+      && ['internal/relay/engine', 'internal/relay/tasks', 'internal/operations'].some((area) => within(dependency, area))) {
+      reason = 'relay contracts and providers cannot depend on lifecycle orchestration';
+    } else if (['internal/httpapi/handlers', 'internal/httpapi/middleware', 'internal/httpapi/requestctx', 'internal/httpapi/dto']
+      .some((area) => within(owner, area)) && within(dependency, 'internal/httpapi/router')) {
+      reason = 'HTTP components cannot depend on router composition';
+    } else if (within(owner, 'internal/httpapi/middleware') && within(dependency, 'internal/httpapi/handlers')) {
+      reason = 'middleware cannot depend on domain handlers';
+    }
+    if (reason) failures.push(fileName + ' -> ' + dependency + ': ' + reason);
+  }
+  return failures;
+}
+
 function structuralFailures(files, rootModule, protocolModule) {
   const failures = [
     ...legacyLayoutFailures(files),
@@ -482,6 +524,7 @@ function structuralFailures(files, rootModule, protocolModule) {
   let protocolkitImported = false;
   for (const fileName of rootProductionGo) {
     const imports = extractGoImports(readRepositoryFile(fileName));
+    failures.push(...dependencyBoundaryFailures(fileName, imports, rootModule));
     if (imports.some(
       (importName) => importName === protocolModule || importName.startsWith(protocolModule + '/'),
     )) {
@@ -543,6 +586,36 @@ function expectSelfTestFailure(name, failures, fragment) {
 }
 
 function runSelfTests() {
+  const modulePath = 'example.test/tokenrouter';
+  const violations = [
+    ['internal/platform/mail/mail.go', 'internal/settings', 'infrastructure'],
+    ['internal/store/user.go', 'internal/auth', 'persistence'],
+    ['internal/settings/smtp.go', 'internal/billing', 'calculation leaves'],
+    ['internal/billing/log.go', 'internal/httpapi/requestctx', 'HTTP adapters'],
+    ['internal/relay/engine/dispatch.go', 'internal/httpapi/middleware', 'HTTP adapters'],
+    ['internal/relay/tasks/video.go', 'internal/httpapi/middleware', 'HTTP adapters'],
+    ['internal/relay/providers/openai/openai.go', 'internal/relay/engine', 'lifecycle'],
+    ['internal/httpapi/handlers/accounts/user.go', 'internal/httpapi/router', 'router composition'],
+    ['internal/httpapi/middleware/auth.go', 'internal/httpapi/handlers/accounts', 'domain handlers'],
+    ['internal/operations/jobs.go', 'internal/app', 'startup'],
+  ];
+  for (const [file, dependency, fragment] of violations) {
+    // Exercise aliased import parsing as well as the boundary policy.
+    const imports = extractGoImports('package example\nimport dependency "' + modulePath + '/' + dependency + '"');
+    expectSelfTestFailure('dependency ' + file, dependencyBoundaryFailures(file, imports, modulePath), fragment);
+  }
+  for (const [file, dependency] of [
+    ['internal/billing/log_test.go', 'internal/httpapi/router'],
+    ['internal/app/bootstrap.go', 'internal/httpapi/router'],
+    ['internal/store/channel.go', 'internal/channels/catalog'],
+    ['internal/settings/pricing.go', 'internal/billing/quota'],
+    ['internal/settings/expression.go', 'internal/billing/expression'],
+    ['internal/billing/log.go', 'internal/platform/cryptoutil'],
+  ]) {
+    if (dependencyBoundaryFailures(file, [modulePath + '/' + dependency], modulePath).length !== 0) {
+      throw new Error('self-test allowed dependency was rejected: ' + file + ' -> ' + dependency);
+    }
+  }
   const actual = {
     version: 1,
     root: ['./current:TestAlive', './current:TestNew'],

@@ -3,7 +3,6 @@ package billing
 import (
 	"fmt"
 	channelssvc "github.com/tokenrouter/tokenrouter/internal/channels"
-	"github.com/tokenrouter/tokenrouter/internal/httpapi/requestctx"
 	"github.com/tokenrouter/tokenrouter/internal/platform/cryptoutil"
 	"github.com/tokenrouter/tokenrouter/internal/platform/jsonutil"
 	"github.com/tokenrouter/tokenrouter/internal/platform/logging"
@@ -38,7 +37,7 @@ func RecordConsumeLog(userId int, username, tokenName, modelName string, promptT
 // serialization/storage failures. Realtime accounting uses the checked form
 // so a successful charge can never silently lose its audit record.
 func RecordConsumeLogChecked(userId int, username, tokenName, modelName string, promptTokens, completionTokens, quota, useTime int, isStream bool, channelId int, group, ip, requestId, upstreamRequestId string, tokenId int, other map[string]any) error {
-	upstreamRequestId = requestctx.NormalizeProviderCorrelationID(upstreamRequestId)
+	upstreamRequestId = cryptoutil.NormalizeProviderCorrelationID(upstreamRequestId)
 	if !userssvc.UserRecordIPLogEnabled(userId) {
 		ip = ""
 	}

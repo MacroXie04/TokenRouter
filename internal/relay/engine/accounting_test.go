@@ -112,7 +112,7 @@ func TestXAIExactSafetyViolationSkipsRetryRefundsThenChargesAtomically(t *testin
 	var dispatches atomic.Int32
 	selectedChannel := 0
 	c, recorder, info := newRelayAccountingContext(t, &fixture.token, 64)
-	err := relayAndSettleWithDispatch(c, info, func(_ *gin.Context, selected *RelayInfo) (*protocolkit.Usage, error) {
+	err := relayAndSettleWithDispatch(c, middleware.CaptureRelayRequestState(c), info, func(_ *gin.Context, selected *RelayInfo) (*protocolkit.Usage, error) {
 		dispatches.Add(1)
 		selectedChannel = selected.Channel.Id
 		return nil, &relaycommon.UpstreamError{
@@ -167,7 +167,7 @@ func TestNonXAISafetyMarkerCannotTriggerViolationCharge(t *testing.T) {
 	}))
 	t.Cleanup(func() { _ = setting.UpdateOptions(setting.GrokOptionDefaults()) })
 	c, recorder, info := newRelayAccountingContext(t, &fixture.token, 64)
-	require.NoError(t, relayAndSettleWithDispatch(c, info, func(_ *gin.Context, _ *RelayInfo) (*protocolkit.Usage, error) {
+	require.NoError(t, relayAndSettleWithDispatch(c, middleware.CaptureRelayRequestState(c), info, func(_ *gin.Context, _ *RelayInfo) (*protocolkit.Usage, error) {
 		return nil, &relaycommon.UpstreamError{
 			StatusCode: http.StatusBadRequest,
 			Body:       `{"error":{"message":"Failed check: SAFETY_CHECK_TYPE"}}`,
@@ -200,6 +200,7 @@ func newRelayAccountingContext(t *testing.T, token *model.Token, maxTokens int) 
 	requestctx.SetUsername(c, "accounting-user")
 	requestctx.SetUserGroup(c, "default")
 	middleware.SetupRelayTokenContext(c, token)
+	middleware.SetRelayGroupPolicy(c, billingsvc.RelayGroupPolicy{Groups: []string{"default"}})
 	request := &protocolkit.GeneralOpenAIRequest{
 		Model:     "accounting-model",
 		MaxTokens: &maxTokens,
@@ -248,10 +249,12 @@ func TestOrdinaryRelayReservationPreventsConcurrentTokenOverspend(t *testing.T) 
 	}
 
 	firstDone := make(chan error, 1)
-	go func() { firstDone <- relayAndSettleWithDispatch(firstContext, firstInfo, dispatch) }()
+	go func() {
+		firstDone <- relayAndSettleWithDispatch(firstContext, middleware.CaptureRelayRequestState(firstContext), firstInfo, dispatch)
+	}()
 	<-started // the first reservation is held while its upstream is in flight
 
-	secondErr := relayAndSettleWithDispatch(secondContext, secondInfo, dispatch)
+	secondErr := relayAndSettleWithDispatch(secondContext, middleware.CaptureRelayRequestState(secondContext), secondInfo, dispatch)
 	require.NoError(t, secondErr)
 	assert.Equal(t, http.StatusBadRequest, secondRecorder.Code)
 	assert.Contains(t, secondRecorder.Body.String(), "insufficient_quota")
@@ -311,7 +314,7 @@ func TestOrdinaryRelayTieredMultimodalUsageSettlesExactAccounting(t *testing.T) 
 			ImageTokens: 7, AudioTokens: 11,
 		},
 	}
-	err := relayAndSettleWithDispatch(c, info, func(c *gin.Context, _ *RelayInfo) (*protocolkit.Usage, error) {
+	err := relayAndSettleWithDispatch(c, middleware.CaptureRelayRequestState(c), info, func(c *gin.Context, _ *RelayInfo) (*protocolkit.Usage, error) {
 		// The flat $2/M reservation holds 512 quota before upstream contact.
 		var held model.RelayQuotaReservationRecord
 		require.NoError(t, model.DB.Order("id desc").First(&held).Error)
@@ -437,7 +440,7 @@ func TestOrdinaryRelayTieredMultimodalBucketsPriceIndependently(t *testing.T) {
 			})
 
 			c, recorder, info := newRelayAccountingContext(t, &fixture.token, 512)
-			err = relayAndSettleWithDispatch(c, info, func(c *gin.Context, _ *RelayInfo) (*protocolkit.Usage, error) {
+			err = relayAndSettleWithDispatch(c, middleware.CaptureRelayRequestState(c), info, func(c *gin.Context, _ *RelayInfo) (*protocolkit.Usage, error) {
 				c.JSON(http.StatusOK, gin.H{"ok": true})
 				return test.usage(), nil
 			})
@@ -497,7 +500,7 @@ func TestSuccessfulStreamWithoutProviderUsageSettlesPromptEstimate(t *testing.T)
 	expectedPrompt := relaycommon.EstimatePromptTokens(info.Request)
 	expectedQuota := billingsvc.ComputeQuota("accounting-model", "default", expectedPrompt, 0)
 
-	err := relayAndSettleWithDispatch(c, info, func(c *gin.Context, _ *RelayInfo) (*protocolkit.Usage, error) {
+	err := relayAndSettleWithDispatch(c, middleware.CaptureRelayRequestState(c), info, func(c *gin.Context, _ *RelayInfo) (*protocolkit.Usage, error) {
 		c.Header("Content-Type", "text/event-stream")
 		c.Status(http.StatusOK)
 		_, _ = c.Writer.WriteString("data: [DONE]\n\n")
@@ -524,7 +527,7 @@ func TestOrdinaryRelayPersistsDispatchedStateBeforeUpstreamCall(t *testing.T) {
 	c, recorder, info := newRelayAccountingContext(t, &fixture.token, 24)
 	var observedId string
 
-	err := relayAndSettleWithDispatch(c, info, func(_ *gin.Context, _ *RelayInfo) (*protocolkit.Usage, error) {
+	err := relayAndSettleWithDispatch(c, middleware.CaptureRelayRequestState(c), info, func(_ *gin.Context, _ *RelayInfo) (*protocolkit.Usage, error) {
 		var record model.RelayQuotaReservationRecord
 		require.NoError(t, model.DB.Order("id desc").First(&record).Error)
 		observedId = record.ReservationID
@@ -556,7 +559,7 @@ func TestOrdinaryRelayDispatchMarkerFailureNeverContactsUpstream(t *testing.T) {
 	t.Cleanup(func() { _ = model.DB.Callback().Update().Remove(callbackName) })
 	var dispatched atomic.Bool
 
-	err := relayAndSettleWithDispatch(c, info, func(_ *gin.Context, _ *RelayInfo) (*protocolkit.Usage, error) {
+	err := relayAndSettleWithDispatch(c, middleware.CaptureRelayRequestState(c), info, func(_ *gin.Context, _ *RelayInfo) (*protocolkit.Usage, error) {
 		dispatched.Store(true)
 		return nil, nil
 	})
@@ -590,7 +593,7 @@ func TestAutoGroupRelayUsesAuthorizedFallbackAndActualGroupBilling(t *testing.T)
 		Groups: []string{"staff", "vip"}, Auto: true, CrossGroupRetry: true,
 	})
 
-	err := relayAndSettleWithDispatch(c, info, func(c *gin.Context, selected *RelayInfo) (*protocolkit.Usage, error) {
+	err := relayAndSettleWithDispatch(c, middleware.CaptureRelayRequestState(c), info, func(c *gin.Context, selected *RelayInfo) (*protocolkit.Usage, error) {
 		assert.Equal(t, "vip", selected.Group)
 		assert.Equal(t, "vip", middleware.GetTokenGroup(c))
 		staffWorstCase, estimateErr := estimateReservationForGroupChecked(selected, "staff")
@@ -641,7 +644,7 @@ func TestOrdinaryRelayUsesUserGroupSpecialRatioForHoldSettlementAndLog(t *testin
 		Groups: []string{"staff", "vip"}, Auto: true, CrossGroupRetry: true,
 	})
 
-	err := relayAndSettleWithDispatch(c, info, func(c *gin.Context, selected *RelayInfo) (*protocolkit.Usage, error) {
+	err := relayAndSettleWithDispatch(c, middleware.CaptureRelayRequestState(c), info, func(c *gin.Context, selected *RelayInfo) (*protocolkit.Usage, error) {
 		assert.Equal(t, "default", selected.UserGroup)
 		assert.Equal(t, "vip", selected.Group)
 		staffEstimate, estimateErr := estimateReservationForGroupChecked(selected, "staff")
@@ -726,7 +729,7 @@ func TestAutoGroupRetryRecordsAffinityForActualGroup(t *testing.T) {
 		Groups: []string{"staff", "vip"}, Auto: true, CrossGroupRetry: true,
 	})
 	dispatches := 0
-	err = relayAndSettleWithDispatch(c, info, func(c *gin.Context, selected *RelayInfo) (*protocolkit.Usage, error) {
+	err = relayAndSettleWithDispatch(c, middleware.CaptureRelayRequestState(c), info, func(c *gin.Context, selected *RelayInfo) (*protocolkit.Usage, error) {
 		dispatches++
 		if dispatches == 1 {
 			assert.Equal(t, "staff", selected.Group)
@@ -764,7 +767,7 @@ func TestOrdinaryRelaySettlementFailureRollsBackUserAndTokenTogether(t *testing.
 	}))
 	t.Cleanup(func() { _ = model.DB.Callback().Update().Remove(callbackName) })
 
-	err := relayAndSettleWithDispatch(c, info, func(c *gin.Context, _ *RelayInfo) (*protocolkit.Usage, error) {
+	err := relayAndSettleWithDispatch(c, middleware.CaptureRelayRequestState(c), info, func(c *gin.Context, _ *RelayInfo) (*protocolkit.Usage, error) {
 		failSettlement.Store(true)
 		c.JSON(http.StatusOK, gin.H{"upstream": "accepted"})
 		return &protocolkit.Usage{PromptTokens: 4, CompletionTokens: 2, TotalTokens: 6}, nil
@@ -803,7 +806,7 @@ func TestOrdinaryRelayRefundFailureIsReturnedAndNeverOverCredits(t *testing.T) {
 	}))
 	t.Cleanup(func() { _ = model.DB.Callback().Update().Remove(callbackName) })
 
-	err := relayAndSettleWithDispatch(c, info, func(_ *gin.Context, _ *RelayInfo) (*protocolkit.Usage, error) {
+	err := relayAndSettleWithDispatch(c, middleware.CaptureRelayRequestState(c), info, func(_ *gin.Context, _ *RelayInfo) (*protocolkit.Usage, error) {
 		failRefund.Store(true)
 		return nil, errors.New("upstream unavailable")
 	})
@@ -828,7 +831,7 @@ func TestOrdinaryRelayLogSinkFailureFallsBackWithoutTurningSuccessIntoRetry(t *t
 	oldLogDB := model.LOG_DB
 	t.Cleanup(func() { model.LOG_DB = oldLogDB })
 
-	err := relayAndSettleWithDispatch(c, info, func(c *gin.Context, _ *RelayInfo) (*protocolkit.Usage, error) {
+	err := relayAndSettleWithDispatch(c, middleware.CaptureRelayRequestState(c), info, func(c *gin.Context, _ *RelayInfo) (*protocolkit.Usage, error) {
 		model.LOG_DB = nil
 		c.JSON(http.StatusOK, gin.H{"upstream": "accepted"})
 		return &protocolkit.Usage{PromptTokens: 3, CompletionTokens: 2, TotalTokens: 5}, nil
@@ -862,7 +865,7 @@ func TestOrdinaryRelayPartialStreamIsSettledAndNeverRetriedOrRefunded(t *testing
 
 	var dispatches atomic.Int32
 	usage := &protocolkit.Usage{PromptTokens: 3, CompletionTokens: 2, TotalTokens: 5}
-	err := relayAndSettleWithDispatch(c, info, func(c *gin.Context, _ *RelayInfo) (*protocolkit.Usage, error) {
+	err := relayAndSettleWithDispatch(c, middleware.CaptureRelayRequestState(c), info, func(c *gin.Context, _ *RelayInfo) (*protocolkit.Usage, error) {
 		dispatches.Add(1)
 		c.Status(http.StatusOK)
 		c.Header("Content-Type", "text/event-stream")
@@ -899,7 +902,7 @@ func TestOrdinaryRelayUsageBearingFailureIsChargedOnceAndNeverRetried(t *testing
 
 	var dispatches atomic.Int32
 	usage := &protocolkit.Usage{PromptTokens: 3, CompletionTokens: 2, TotalTokens: 5}
-	err := relayAndSettleWithDispatch(c, info, func(_ *gin.Context, _ *RelayInfo) (*protocolkit.Usage, error) {
+	err := relayAndSettleWithDispatch(c, middleware.CaptureRelayRequestState(c), info, func(_ *gin.Context, _ *RelayInfo) (*protocolkit.Usage, error) {
 		dispatches.Add(1)
 		return usage, errors.New("upstream response transport failed after usage")
 	})
@@ -932,7 +935,7 @@ func TestOrdinaryRelayRejectsInvalidQuotaInputsBeforeUnsafeSettlement(t *testing
 		t.Run(name, func(t *testing.T) {
 			c, recorder, info := newRelayAccountingContext(t, &fixture.token, maxTokens)
 			var dispatched atomic.Bool
-			err := relayAndSettleWithDispatch(c, info, func(_ *gin.Context, _ *RelayInfo) (*protocolkit.Usage, error) {
+			err := relayAndSettleWithDispatch(c, middleware.CaptureRelayRequestState(c), info, func(_ *gin.Context, _ *RelayInfo) (*protocolkit.Usage, error) {
 				dispatched.Store(true)
 				return nil, nil
 			})
@@ -945,7 +948,7 @@ func TestOrdinaryRelayRejectsInvalidQuotaInputsBeforeUnsafeSettlement(t *testing
 
 	t.Run("negative upstream usage", func(t *testing.T) {
 		c, recorder, info := newRelayAccountingContext(t, &fixture.token, 16)
-		err := relayAndSettleWithDispatch(c, info, func(c *gin.Context, _ *RelayInfo) (*protocolkit.Usage, error) {
+		err := relayAndSettleWithDispatch(c, middleware.CaptureRelayRequestState(c), info, func(c *gin.Context, _ *RelayInfo) (*protocolkit.Usage, error) {
 			c.JSON(http.StatusOK, gin.H{"upstream": "invalid usage"})
 			return &protocolkit.Usage{PromptTokens: -1, CompletionTokens: 1}, nil
 		})
@@ -991,7 +994,7 @@ func TestOrdinaryRelayRejectsOversizedUsageWithoutRefundingAcceptedWork(t *testi
 			t.Cleanup(func() { billingsvc.SetModelPriceRegistry(previousPrices) })
 			const reservedQuota = 16
 			c, recorder, info := newRelayAccountingContext(t, &fixture.token, 16)
-			err := relayAndSettleWithDispatch(c, info, func(c *gin.Context, _ *RelayInfo) (*protocolkit.Usage, error) {
+			err := relayAndSettleWithDispatch(c, middleware.CaptureRelayRequestState(c), info, func(c *gin.Context, _ *RelayInfo) (*protocolkit.Usage, error) {
 				c.JSON(http.StatusOK, gin.H{"upstream": "accepted invalid usage"})
 				return test.usage, nil
 			})

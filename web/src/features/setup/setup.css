@@ -1,0 +1,149 @@
+.setup-app {
+  max-width: 860px;
+}
+
+.setup-header {
+  text-align: center;
+}
+
+.setup-progress ol {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 0.5rem;
+  padding: 0;
+  margin: 0 0 1rem;
+  list-style: none;
+}
+
+.setup-progress li {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  min-width: 0;
+  padding: 0.65rem;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  font-size: 0.82rem;
+}
+
+.setup-progress li span {
+  display: inline-grid;
+  flex: 0 0 1.5rem;
+  width: 1.5rem;
+  height: 1.5rem;
+  place-items: center;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+}
+
+.setup-progress li[aria-current='step'] {
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+.setup-progress li[aria-current='step'] span,
+.setup-progress li[data-complete='true'] span {
+  color: #fff;
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.setup-card {
+  min-height: 360px;
+}
+
+.setup-step-count {
+  margin-top: 0;
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.setup-fields {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0 1rem;
+}
+
+.setup-fields label:first-child {
+  grid-column: 1 / -1;
+}
+
+.setup-modes {
+  display: grid;
+  gap: 0.75rem;
+  padding: 0;
+  border: 0;
+}
+
+.setup-modes legend {
+  margin-bottom: 0.75rem;
+  color: var(--text);
+  font-size: 1.05rem;
+  font-weight: 700;
+}
+
+.setup-modes label {
+  display: flex;
+  gap: 0.8rem;
+  align-items: flex-start;
+  margin: 0;
+  padding: 0.9rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  cursor: pointer;
+}
+
+.setup-modes label[data-selected='true'] {
+  border-color: var(--accent);
+  background: rgba(108, 140, 255, 0.08);
+}
+
+.setup-modes input {
+  flex: 0 0 auto;
+  width: auto;
+  margin: 0.2rem 0 0;
+}
+
+.setup-modes small {
+  display: block;
+  margin-top: 0.3rem;
+  color: var(--muted);
+  line-height: 1.4;
+}
+
+.setup-summary {
+  padding: 1rem;
+  margin: 1rem 0;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.setup-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.65rem;
+  margin-top: 1.5rem;
+}
+
+.setup-actions button:focus-visible,
+.setup-modes input:focus-visible {
+  outline: 3px solid color-mix(in srgb, var(--accent), transparent 45%);
+  outline-offset: 2px;
+}
+
+@media (max-width: 560px) {
+
+  .setup-progress ol {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .setup-fields {
+    grid-template-columns: 1fr;
+  }
+
+  .setup-fields label:first-child {
+    grid-column: auto;
+  }
+}

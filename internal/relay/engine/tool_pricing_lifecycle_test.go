@@ -6,6 +6,7 @@ import (
 	"github.com/stretchr/testify/require"
 	billingsvc "github.com/tokenrouter/tokenrouter/internal/billing"
 	quotamath "github.com/tokenrouter/tokenrouter/internal/billing/quota"
+	"github.com/tokenrouter/tokenrouter/internal/httpapi/middleware"
 	relaycommon "github.com/tokenrouter/tokenrouter/internal/relay/contract"
 	setting "github.com/tokenrouter/tokenrouter/internal/settings"
 	model "github.com/tokenrouter/tokenrouter/internal/store"
@@ -20,7 +21,7 @@ func TestOrdinaryRelayRejectsModelQuotaClampAfterAcceptedWork(t *testing.T) {
 		"accounting-model": {Prompt: 3, Completion: 3},
 	})
 	c, recorder, info := newRelayAccountingContext(t, &fixture.token, 16)
-	err := relayAndSettleWithDispatch(c, info, func(c *gin.Context, _ *RelayInfo) (*protocolkit.Usage, error) {
+	err := relayAndSettleWithDispatch(c, middleware.CaptureRelayRequestState(c), info, func(c *gin.Context, _ *RelayInfo) (*protocolkit.Usage, error) {
 		c.JSON(http.StatusOK, gin.H{"upstream": "accepted"})
 		return &protocolkit.Usage{PromptTokens: int(quotamath.MaxQuota), TotalTokens: int(quotamath.MaxQuota)}, nil
 	})
@@ -40,7 +41,7 @@ func TestOrdinaryRelayRejectsToolQuotaClampAfterAcceptedWork(t *testing.T) {
 	}))
 	t.Cleanup(func() { _ = setting.UpdateOptions(map[string]string{setting.ToolPriceOption: `{}`}) })
 	c, recorder, info := newRelayAccountingContext(t, &fixture.token, 16)
-	err := relayAndSettleWithDispatch(c, info, func(c *gin.Context, selected *RelayInfo) (*protocolkit.Usage, error) {
+	err := relayAndSettleWithDispatch(c, middleware.CaptureRelayRequestState(c), info, func(c *gin.Context, selected *RelayInfo) (*protocolkit.Usage, error) {
 		require.NotNil(t, selected.ToolUsageHooks)
 		require.NotNil(t, selected.ToolUsageHooks.ObserveChatToolCall)
 		require.NoError(t, selected.ToolUsageHooks.ObserveChatToolCall(relaycommon.ToolChatObservation{
@@ -68,7 +69,7 @@ func TestOrdinaryRelayRejectsCombinedModelAndToolQuotaOverflow(t *testing.T) {
 	}))
 	t.Cleanup(func() { _ = setting.UpdateOptions(map[string]string{setting.ToolPriceOption: `{}`}) })
 	c, recorder, info := newRelayAccountingContext(t, &fixture.token, 16)
-	err := relayAndSettleWithDispatch(c, info, func(c *gin.Context, selected *RelayInfo) (*protocolkit.Usage, error) {
+	err := relayAndSettleWithDispatch(c, middleware.CaptureRelayRequestState(c), info, func(c *gin.Context, selected *RelayInfo) (*protocolkit.Usage, error) {
 		require.NoError(t, selected.ToolUsageHooks.ObserveChatToolCall(relaycommon.ToolChatObservation{
 			ChoiceIndex: 0, ArrayIndex: 0, ID: "call-one", Name: "one_quota",
 		}))

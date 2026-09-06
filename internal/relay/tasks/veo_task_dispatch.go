@@ -7,8 +7,7 @@ import (
 	"github.com/gin-gonic/gin"
 	channelssvc "github.com/tokenrouter/tokenrouter/internal/channels"
 	channelcatalog "github.com/tokenrouter/tokenrouter/internal/channels/catalog"
-	"github.com/tokenrouter/tokenrouter/internal/httpapi/middleware"
-	"github.com/tokenrouter/tokenrouter/internal/httpapi/requestctx"
+	relaycommon "github.com/tokenrouter/tokenrouter/internal/relay/contract"
 	geminiVeo "github.com/tokenrouter/tokenrouter/internal/relay/providers/task/gemini"
 	model "github.com/tokenrouter/tokenrouter/internal/store"
 	"io"
@@ -64,7 +63,7 @@ type VeoTaskChannelSelection struct {
 
 // VeoTaskChannelHandler owns the provider-specific durable lifecycle after a
 // channel has been selected by model and authorized group.
-type VeoTaskChannelHandler func(*gin.Context, VeoTaskChannelSelection)
+type VeoTaskChannelHandler func(*gin.Context, relaycommon.RequestState, VeoTaskChannelSelection)
 
 var veoTaskHandlers = struct {
 	sync.RWMutex
@@ -159,22 +158,22 @@ func veoTaskHandler(channelType channelcatalog.ChannelType) VeoTaskChannelHandle
 
 // relayVeoTask recognizes the shared four-model family, chooses one eligible
 // channel exactly once, then dispatches by that selected channel's type.
-func relayVeoTask(c *gin.Context, raw []byte, contentType string) bool {
+func relayVeoTask(c *gin.Context, state relaycommon.RequestState, raw []byte, contentType string) bool {
 	originModel := declaredVeoTaskModel(raw, contentType)
 	if !geminiVeo.IsModel(originModel) {
 		return false
 	}
 	c.Request.Body = io.NopCloser(bytes.NewReader(raw))
-	if requestctx.GetUserId(c) <= 0 || middleware.GetRelayToken(c) == nil {
+	if state.UserID <= 0 || state.Token == nil {
 		writeVideoTaskError(c, http.StatusInternalServerError, "auth_context_missing", "relay token context is missing", nil)
 		return true
 	}
-	groups := middleware.GetTokenGroups(c)
+	groups := state.Groups
 	if len(groups) == 0 {
 		writeVideoTaskError(c, http.StatusForbidden, "group_not_allowed", "token group is unavailable", nil)
 		return true
 	}
-	if !middleware.RelayModelAllowed(c, originModel) {
+	if !state.Allows(originModel) {
 		writeVideoTaskError(c, http.StatusForbidden, "model_not_allowed", "token is not allowed to access model "+originModel, nil)
 		return true
 	}
@@ -188,7 +187,7 @@ func relayVeoTask(c *gin.Context, raw []byte, contentType string) bool {
 		writeVideoTaskError(c, http.StatusServiceUnavailable, "channel_not_supported", "selected Veo channel is unavailable", nil)
 		return true
 	}
-	handler(c, VeoTaskChannelSelection{
+	handler(c, state, VeoTaskChannelSelection{
 		RawRequest: append([]byte(nil), raw...), ContentType: contentType,
 		OriginModel: originModel, UsingGroup: usingGroup, Channel: channel,
 	})

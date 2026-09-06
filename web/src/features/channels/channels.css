@@ -1,0 +1,257 @@
+.channel-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.channel-heading p {
+  margin: 0 0 1rem;
+}
+
+.channel-heading .link,
+.channel-actions .link {
+  margin-left: 0;
+}
+
+.channel-filters {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 1rem;
+  padding: 1rem;
+  margin: 0.75rem 0 1rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.12);
+}
+
+.channel-toolbar,
+.channel-bulk,
+.channel-inline-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 0.75rem;
+}
+
+.channel-toolbar {
+  padding: 0.75rem;
+  margin: 0.75rem 0;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.channel-toolbar label,
+.channel-inline-form label {
+  min-width: 12rem;
+  margin: 0;
+}
+
+.channel-bulk {
+  justify-content: space-between;
+  padding: 0.75rem 1rem;
+  margin-bottom: 1rem;
+  border: 1px solid var(--accent);
+  border-radius: 10px;
+  background: rgba(76, 139, 245, 0.08);
+}
+
+.channel-bulk p,
+.channel-bulk .channel-filter-actions {
+  margin: 0;
+}
+
+.channel-checkbox {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.channel-filter-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.8rem;
+  margin-bottom: 0.9rem;
+}
+
+.channel-filter-actions .link {
+  margin-left: 0;
+}
+
+.channel-admin table {
+  min-width: 710px;
+}
+
+.channel-admin td {
+  vertical-align: top;
+}
+
+.channel-meta {
+  display: block;
+  max-width: 11rem;
+  margin-top: 0.25rem;
+  color: var(--muted);
+  font-size: 0.78rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.channel-model-summary {
+  max-width: 12rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.channel-secret-textarea {
+  -webkit-text-security: disc;
+}
+
+.channel-key-reveal-value {
+  width: 100%;
+  overflow-wrap: anywhere;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.channel-key-verification {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.channel-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.15rem 0.75rem;
+  min-width: 12rem;
+}
+
+.channel-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 1rem;
+  margin-top: 1rem;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.channel-subpanel,
+.channel-create {
+  padding: 1rem;
+  margin-top: 1rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.channel-subpanel h3 {
+  margin: 0 0 0.8rem;
+  font-size: 1rem;
+}
+
+.channel-subpanel h4 {
+  margin: 0 0 0.6rem;
+}
+
+.channel-stats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.75rem;
+  margin: 0 0 1rem;
+}
+
+.channel-stats div {
+  padding: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.channel-stats dt {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.channel-stats dd {
+  margin: 0.2rem 0 0;
+  font-size: 1.2rem;
+  font-weight: 700;
+}
+
+.channel-columns {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+}
+
+.channel-columns fieldset,
+.channel-columns section {
+  min-width: 0;
+  padding: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.channel-columns fieldset label {
+  display: block;
+  margin: 0.4rem 0;
+}
+
+.channel-document {
+  max-height: 18rem;
+  padding: 0.75rem;
+  margin: 0;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.16);
+}
+
+.channel-operation-list {
+  max-height: 20rem;
+  padding: 0;
+  overflow: auto;
+  list-style: none;
+}
+
+.channel-operation-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.5rem 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.channel-model-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
+  gap: 0.4rem 1rem;
+  max-height: 16rem;
+  padding-left: 1.25rem;
+  overflow: auto;
+}
+
+.channel-create summary {
+  color: var(--accent);
+  cursor: pointer;
+}
+
+.channel-create form {
+  margin-top: 1rem;
+}
+
+.channel-state {
+  padding: 1rem;
+  text-align: center;
+}
+
+@media (max-width: 620px) {
+  .channel-filters {
+    grid-template-columns: 1fr;
+  }
+
+  .channel-columns,
+.channel-stats {
+    grid-template-columns: 1fr;
+  }
+}

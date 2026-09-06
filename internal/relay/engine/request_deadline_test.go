@@ -77,13 +77,15 @@ func TestRelayDeadlineCancelsUpstreamAndStillRefundsDurably(t *testing.T) {
 	})}
 	t.Cleanup(func() { relayHTTPClient = previousClient })
 
-	c, recorder, _ := newRelayAccountingContext(t, &fixture.token, 64)
+	c, recorder, info := newRelayAccountingContext(t, &fixture.token, 64)
 	middleware.SetRelayGroupPolicy(c, billingsvc.RelayGroupPolicy{Groups: []string{"default"}})
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(
 		`{"model":"accounting-model","messages":[{"role":"user","content":"hello"}],"max_tokens":64}`,
 	))
 	c.Request.Header.Set("Content-Type", "application/json")
-	Relay(c)
+	cancel := applyRelayRequestDeadline(c)
+	defer cancel()
+	_ = Execute(c, middleware.CaptureRelayRequestState(c), info)
 
 	var observation relayDeadlineObservation
 	select {

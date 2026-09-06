@@ -7,8 +7,6 @@ import (
 	billingsvc "github.com/tokenrouter/tokenrouter/internal/billing"
 	channelssvc "github.com/tokenrouter/tokenrouter/internal/channels"
 	channelcatalog "github.com/tokenrouter/tokenrouter/internal/channels/catalog"
-	"github.com/tokenrouter/tokenrouter/internal/httpapi/middleware"
-	"github.com/tokenrouter/tokenrouter/internal/httpapi/requestctx"
 	wallclock "github.com/tokenrouter/tokenrouter/internal/platform/clock"
 	"github.com/tokenrouter/tokenrouter/internal/platform/cryptoutil"
 	"github.com/tokenrouter/tokenrouter/internal/platform/jsonutil"
@@ -99,20 +97,7 @@ type jimengVideoError struct {
 	Code    string `json:"code"`
 }
 
-func RelayJimeng(c *gin.Context) {
-	requestContext, ok := middleware.GetJimengRequest(c)
-	if !ok {
-		writeJimengTaskError(c, http.StatusInternalServerError, "invalid_request", "Jimeng request context is missing")
-		return
-	}
-	if requestContext.Action == jimeng.FetchAction {
-		relayJimengFetch(c, requestContext.Request)
-		return
-	}
-	relayJimengSubmit(c, requestContext.Request, requestContext.RawBody)
-}
-
-func relayJimengSubmit(c *gin.Context, request jimeng.Request, rawBody []byte) {
+func RelayJimengSubmit(c *gin.Context, state relaycommon.RequestState, request jimeng.Request, rawBody []byte) {
 	originModel := strings.TrimSpace(request.ReqKey)
 	if originModel == "" {
 		writeJimengTaskError(c, http.StatusBadRequest, "invalid_request", "req_key is required")
@@ -127,7 +112,7 @@ func relayJimengSubmit(c *gin.Context, request jimeng.Request, rawBody []byte) {
 	if validated.Frames == jimeng.LongVideoFrames {
 		billingUnits = 2
 	}
-	groups := middleware.GetTokenGroups(c)
+	groups := state.Groups
 	if len(groups) == 0 {
 		writeJimengTaskError(c, http.StatusForbidden, "group_not_allowed", "令牌分组不可用")
 		return
@@ -137,20 +122,20 @@ func relayJimengSubmit(c *gin.Context, request jimeng.Request, rawBody []byte) {
 		writeJimengUpstreamError(c, err)
 		return
 	}
-	c.Set(requestctx.ContextKeyGroup, group)
-	userGroup := requestctx.GetUserGroup(c)
+	state.SelectGroup(group)
+	userGroup := state.UserGroup
 	quota, err := billingsvc.ComputePerCallQuotaForUser(originModel, userGroup, group, billingUnits)
 	if err != nil {
 		writeJimengTaskError(c, http.StatusBadRequest, "model_price_error", err.Error())
 		return
 	}
 
-	token := middleware.GetRelayToken(c)
+	token := state.Token
 	if token == nil {
 		writeJimengTaskError(c, http.StatusInternalServerError, "pre_consume_failed", "令牌上下文缺失")
 		return
 	}
-	userID := requestctx.GetUserId(c)
+	userID := state.UserID
 	now := wallclock.NowTimestamp()
 	taskID, err := model.GenerateSecureTaskID()
 	if err != nil {
@@ -976,8 +961,8 @@ func isAmbiguousJimengSubmitError(err error) bool {
 	return jimeng.SubmitMayHaveBeenAccepted(err)
 }
 
-func relayJimengFetch(c *gin.Context, request jimeng.Request) {
-	userID := requestctx.GetUserId(c)
+func RelayJimengFetch(c *gin.Context, state relaycommon.RequestState, request jimeng.Request) {
+	userID := state.UserID
 	var task model.Task
 	if err := model.DB.Where("task_id = ? AND user_id = ?", request.TaskID, userID).First(&task).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -991,7 +976,7 @@ func relayJimengFetch(c *gin.Context, request jimeng.Request) {
 		writeJimengTaskError(c, http.StatusBadRequest, "invalid_api_platform", "task is not a Jimeng task")
 		return
 	}
-	if !containsRelayGroup(middleware.GetTokenGroups(c), task.Group) {
+	if !containsRelayGroup(state.Groups, task.Group) {
 		writeJimengTaskError(c, http.StatusForbidden, "group_not_allowed", "令牌无权访问任务分组")
 		return
 	}
@@ -1741,7 +1726,7 @@ func durableJimengProviderPayload(raw []byte) []byte {
 		Outcome            string `json:"outcome,omitempty"`
 		Status             string `json:"status,omitempty"`
 		RequestFingerprint string `json:"request_fingerprint,omitempty"`
-	}{Code: decoded.Code, RequestFingerprint: requestctx.NormalizeProviderCorrelationID(decoded.RequestID)}
+	}{Code: decoded.Code, RequestFingerprint: cryptoutil.NormalizeProviderCorrelationID(decoded.RequestID)}
 	if strings.TrimSpace(decoded.Data.TaskID) != "" {
 		canonical.Outcome = "accepted"
 	} else if decoded.Code != 0 && decoded.Code != 10000 {

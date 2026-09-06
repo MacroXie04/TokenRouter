@@ -2,104 +2,22 @@ package router_test
 
 import (
 	"encoding/json"
-	"github.com/gin-gonic/gin"
-	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/tokenrouter/tokenrouter/internal/auth"
 	"github.com/tokenrouter/tokenrouter/internal/auth/roles"
-	billingsvc "github.com/tokenrouter/tokenrouter/internal/billing"
 	channelcatalog "github.com/tokenrouter/tokenrouter/internal/channels/catalog"
-	"github.com/tokenrouter/tokenrouter/internal/httpapi/router"
 	operationssvc "github.com/tokenrouter/tokenrouter/internal/operations"
-	"github.com/tokenrouter/tokenrouter/internal/platform/httpx"
 	"github.com/tokenrouter/tokenrouter/internal/platform/textutil"
 	setting "github.com/tokenrouter/tokenrouter/internal/settings"
 	model "github.com/tokenrouter/tokenrouter/internal/store"
-	"gorm.io/gorm"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 )
 
-// setupChannelRead builds an isolated admin session with the channel-read
-// surface migrated (catalog, system tasks, locks).
-func setupChannelRead(t *testing.T, role int) (http.Handler, func(method, path, body string) *httptest.ResponseRecorder, int) {
-	t.Helper()
-	gin.SetMode(gin.TestMode)
-	t.Setenv("CRITICAL_RATE_LIMIT", "1000000")
-	t.Setenv("GLOBAL_API_RATE_LIMIT", "1000000")
-	t.Cleanup(httpx.InitSSRF)
-	t.Setenv("SSRF_DISABLE", "true")
-	httpx.InitSSRF()
-	dsn := "file:" + filepath.Join(t.TempDir(), "channelread.db") + "?_pragma=busy_timeout(5000)"
-	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
-	require.NoError(t, err)
-	require.NoError(t, db.AutoMigrate(&model.User{}, &model.Token{}, &model.UserSession{},
-		&model.Channel{}, &model.TwoFA{}, &model.PasskeyCredential{}, &model.AuthFlow{}, &model.Log{},
-		&model.Option{}, &model.Model{}, &model.SystemTask{}, &model.SystemTaskLock{}, &model.Ability{},
-		&model.Redemption{}, &model.AuthzRole{}, &model.CasbinRule{}, &model.TopUp{}, &model.QuotaData{},
-		&model.CustomOAuthProvider{}, &model.UserOAuthBinding{}, &model.SystemInstance{}, &model.PerfMetric{},
-		&model.PrefillGroup{}, &model.AuditLogOutbox{}))
-	model.DB = db
-	model.LOG_DB = db
-	require.NoError(t, auth.InitCasbin())
-	require.NoError(t, auth.InitPermissionAuthz())
-	billingsvc.ResetQuotaDataCache()
-	require.NoError(t, setting.UpdateOption(setting.QuotaPerUnitOption, "500000"))
-
-	user := model.User{Username: "chreader", Password: "pw", Role: role, Status: model.UserStatusEnabled,
-		Quota: 1000, AuthVersion: 1}
-	require.NoError(t, model.DB.Create(&user).Error)
-	sid, access, refresh, err := auth.CompleteLogin(&user, "127.0.0.1", "ua", "test")
-	require.NoError(t, err)
-
-	r := router.SetUpRouter()
-	do := func(method, path, body string) *httptest.ResponseRecorder {
-		req := httptest.NewRequest(method, path, strings.NewReader(body))
-		req.Header.Set("Content-Type", "application/json")
-		req.AddCookie(&http.Cookie{Name: "access_token", Value: access})
-		req.AddCookie(&http.Cookie{Name: "refresh_token", Value: sid + "." + refresh})
-		rec := httptest.NewRecorder()
-		r.ServeHTTP(rec, req)
-		return rec
-	}
-	return r, do, user.Id
-}
-
-func createSearchChannel(t *testing.T, name string, typ, status int, group, models, tag string, priority int64) model.Channel {
-	t.Helper()
-	ch := model.Channel{
-		Type: typ, Key: "sk-secret-" + name, Name: name, Status: status, Group: group,
-		Models: models, Tag: tag, Priority: &priority,
-	}
-	require.NoError(t, model.DB.Create(&ch).Error)
-	return ch
-}
-
-func searchItems(t *testing.T, rec *httptest.ResponseRecorder) ([]map[string]any, map[string]any) {
-	t.Helper()
-	body := decodeBody(t, rec)
-	require.Equal(t, true, body["success"], "body: %s", rec.Body.String())
-	assert.Equal(t, "", body["message"])
-	data, ok := body["data"].(map[string]any)
-	require.True(t, ok, "data missing: %s", rec.Body.String())
-	items, ok := data["items"].([]any)
-	require.True(t, ok, "items missing: %s", rec.Body.String())
-	out := make([]map[string]any, 0, len(items))
-	for _, it := range items {
-		m, ok := it.(map[string]any)
-		require.True(t, ok)
-		out = append(out, m)
-	}
-	return out, data
-}
-
 func TestChannelSearchContract(t *testing.T) {
-	_, do, _ := setupChannelRead(t, roles.RoleRootUser)
+	_, do, _ := setupDashboardSession(t, roles.RoleRootUser)
 	createSearchChannel(t, "alpha-gateway", 1, channelcatalog.ChannelStatusEnabled, "default", "gpt-4o,text-embedding-3-small", "fast", 10)
 	beta := createSearchChannel(t, "beta-gateway", 3, channelcatalog.ChannelStatusEnabled, "vip", "claude-sonnet-4", "fast", 20)
 	createSearchChannel(t, "gamma-gateway", 1, channelcatalog.ChannelStatusManuallyDisabled, "vip", "gpt-4o-mini", "slow", 5)
@@ -208,13 +126,13 @@ func TestChannelSearchContract(t *testing.T) {
 }
 
 func TestChannelSearchRequiresAdmin(t *testing.T) {
-	_, do, _ := setupChannelRead(t, roles.RoleCommonUser)
+	_, do, _ := setupDashboardSession(t, roles.RoleCommonUser)
 	rec := do(http.MethodGet, "/api/channel/search", "")
 	assert.NotEqual(t, http.StatusOK, rec.Code)
 }
 
 func TestChannelReadResponseRedactsSensitiveFieldsByCapability(t *testing.T) {
-	_, doAdmin, _ := setupChannelRead(t, roles.RoleAdminUser)
+	_, doAdmin, _ := setupDashboardSession(t, roles.RoleAdminUser)
 	priority := int64(1)
 	weight := uint(1)
 	channel := model.Channel{
@@ -247,7 +165,7 @@ func TestChannelReadResponseRedactsSensitiveFieldsByCapability(t *testing.T) {
 		assert.NotContains(t, rec.Body.String(), "Authorization", path)
 	}
 
-	_, doRoot, _ := setupChannelRead(t, roles.RoleRootUser)
+	_, doRoot, _ := setupDashboardSession(t, roles.RoleRootUser)
 	rootChannel := channel
 	rootChannel.Id = 0
 	require.NoError(t, model.DB.Create(&rootChannel).Error)
@@ -260,7 +178,7 @@ func TestChannelReadResponseRedactsSensitiveFieldsByCapability(t *testing.T) {
 }
 
 func TestChannelListModelsAndEnabledModels(t *testing.T) {
-	_, do, _ := setupChannelRead(t, roles.RoleRootUser)
+	_, do, _ := setupDashboardSession(t, roles.RoleRootUser)
 	require.NoError(t, model.DB.Create(&model.Model{ModelName: "gpt-4o"}).Error)
 	require.NoError(t, model.DB.Create(&model.Model{ModelName: "claude-sonnet-4"}).Error)
 	createSearchChannel(t, "en1", 1, channelcatalog.ChannelStatusEnabled, "default", "gpt-4o, text-embedding-3-small", "", 0)
@@ -291,7 +209,7 @@ func TestChannelListModelsAndEnabledModels(t *testing.T) {
 }
 
 func TestChannelOpsContract(t *testing.T) {
-	_, do, _ := setupChannelRead(t, roles.RoleRootUser)
+	_, do, _ := setupDashboardSession(t, roles.RoleRootUser)
 	require.NoError(t, setting.UpdateOption(setting.RetryTimesOption, "7"))
 	rec := do(http.MethodGet, "/api/channel/ops", "")
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
@@ -303,7 +221,7 @@ func TestChannelOpsContract(t *testing.T) {
 }
 
 func TestChannelTestSingleContract(t *testing.T) {
-	_, do, _ := setupChannelRead(t, roles.RoleRootUser)
+	_, do, _ := setupDashboardSession(t, roles.RoleRootUser)
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, "/v1/chat/completions", r.URL.Path)
 		assert.Equal(t, "Bearer sk-live", r.Header.Get("Authorization"))
@@ -359,7 +277,7 @@ func TestChannelTestSingleContract(t *testing.T) {
 }
 
 func TestChannelTestAllSystemTask(t *testing.T) {
-	_, do, _ := setupChannelRead(t, roles.RoleRootUser)
+	_, do, _ := setupDashboardSession(t, roles.RoleRootUser)
 
 	// A slow upstream keeps the task pending/running long enough to observe
 	// the conflict contract.

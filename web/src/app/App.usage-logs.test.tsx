@@ -31,10 +31,6 @@ vi.mock('../features/usage-logs/UsageLogsView', () => ({
   ),
 }));
 
-vi.mock('../features/admin/AdminConsole', () => ({
-  AdminConsole: () => <main aria-label="admin console">Legacy admin console</main>,
-}));
-
 const mockedGetData = vi.mocked(getData);
 
 function bootAs(role: number) {
@@ -77,7 +73,6 @@ describe('/usage-logs integration', () => {
       'textContent',
       'section taskuser operatorrole 10',
     );
-    expect(screen.queryByRole('main', { name: 'admin console' })).toBeNull();
   });
 
   it('routes an ordinary user drawing section to the same scoped feature with self access', async () => {
@@ -89,6 +84,5 @@ describe('/usage-logs integration', () => {
       'textContent',
       'section drawinguser alicerole 1',
     );
-    expect(screen.queryByRole('main', { name: 'admin console' })).toBeNull();
   });
 });

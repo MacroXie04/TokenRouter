@@ -2,6 +2,7 @@ package engine
 
 import (
 	"errors"
+	relaycommon "github.com/tokenrouter/tokenrouter/internal/relay/contract"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -22,12 +23,12 @@ func paddedInboundJSON(base string, size int64) string {
 	return base + strings.Repeat(" ", int(size)-len(base))
 }
 
-func callInboundHandler(handler gin.HandlerFunc, path string, body io.Reader) *httptest.ResponseRecorder {
+func callInboundHandler(handler func(*gin.Context, relaycommon.RequestState), path string, body io.Reader) *httptest.ResponseRecorder {
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(recorder)
 	ctx.Request = httptest.NewRequest(http.MethodPost, path, body)
-	handler(ctx)
+	handler(ctx, relaycommon.RequestState{})
 	return recorder
 }
 

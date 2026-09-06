@@ -200,7 +200,7 @@ func TestAliWanGenericVideoSubmitFetchAndEncryptedReservationLifecycle(t *testin
 	})
 	c, recorder := aliWanLifecycleContext(t, fixture, http.MethodPost, "/v1/videos",
 		`{"model":"wan2.7-t2v","prompt":"mapped request","duration":10,"size":"1920*1080"}`, "")
-	RelayVideoTask(c)
+	RelayVideoTask(c, middleware.CaptureRelayRequestState(c))
 	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 	taskID := decodeAliWanPublicID(t, recorder)
 	assert.NotContains(t, recorder.Body.String(), "provider-ali-wan-1")
@@ -231,7 +231,7 @@ func TestAliWanGenericVideoSubmitFetchAndEncryptedReservationLifecycle(t *testin
 
 	for _, route := range []string{"/v1/videos/", "/v1/video/generations/"} {
 		c, recorder = aliWanLifecycleContext(t, fixture, http.MethodGet, route+taskID, "", taskID)
-		RelayVideoTaskFetch(c)
+		RelayVideoTaskFetch(c, middleware.CaptureRelayRequestState(c))
 		require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 		assert.Contains(t, recorder.Body.String(), taskID)
 		assert.NotContains(t, recorder.Body.String(), "provider-ali-wan-1")
@@ -242,12 +242,12 @@ func TestAliWanGenericVideoSubmitFetchAndEncryptedReservationLifecycle(t *testin
 
 	c, recorder = aliWanLifecycleContext(t, fixture, http.MethodGet, "/v1/videos/"+taskID, "", taskID)
 	requestctx.SetUserId(c, fixture.user.Id+1)
-	RelayVideoTaskFetch(c)
+	RelayVideoTaskFetch(c, middleware.CaptureRelayRequestState(c))
 	assert.Equal(t, http.StatusNotFound, recorder.Code)
 
 	c, recorder = aliWanLifecycleContext(t, fixture, http.MethodGet, "/v1/videos/"+taskID, "", taskID)
 	middleware.SetRelayGroupPolicy(c, billingsvc.RelayGroupPolicy{Groups: []string{"other-group"}})
-	RelayVideoTaskFetch(c)
+	RelayVideoTaskFetch(c, middleware.CaptureRelayRequestState(c))
 	assert.Equal(t, http.StatusForbidden, recorder.Code)
 
 	c, recorder = aliWanLifecycleContext(t, fixture, http.MethodGet, "/v1/videos/"+taskID, "", taskID)
@@ -255,7 +255,7 @@ func TestAliWanGenericVideoSubmitFetchAndEncryptedReservationLifecycle(t *testin
 	restricted.ModelLimitsEnabled = true
 	restricted.ModelLimits = "some-other-model"
 	middleware.SetupRelayTokenContext(c, &restricted)
-	RelayVideoTaskFetch(c)
+	RelayVideoTaskFetch(c, middleware.CaptureRelayRequestState(c))
 	assert.Equal(t, http.StatusForbidden, recorder.Code)
 
 	shadow := task
@@ -265,7 +265,7 @@ func TestAliWanGenericVideoSubmitFetchAndEncryptedReservationLifecycle(t *testin
 	shadow.PrivateData = ""
 	require.NoError(t, model.DB.Create(&shadow).Error)
 	c, recorder = aliWanLifecycleContext(t, fixture, http.MethodGet, "/v1/videos/"+taskID, "", taskID)
-	RelayVideoTaskFetch(c)
+	RelayVideoTaskFetch(c, middleware.CaptureRelayRequestState(c))
 	assert.Equal(t, http.StatusOK, recorder.Code, "wrong-platform shadow rows must not affect Alibaba lookup")
 }
 
@@ -299,7 +299,7 @@ func TestAliWanRecoveryPollUsesSnapshotsAndContentIsOwnerScoped(t *testing.T) {
 	t.Cleanup(func() { newAliWanContentHTTPClient = previousContentClient })
 	c, recorder := aliWanLifecycleContext(t, fixture, http.MethodPost, "/v1/videos",
 		`{"model":"wan2.7-t2v","prompt":"content"}`, "")
-	RelayVideoTask(c)
+	RelayVideoTask(c, middleware.CaptureRelayRequestState(c))
 	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 	taskID := decodeAliWanPublicID(t, recorder)
 
@@ -327,7 +327,7 @@ func TestAliWanRecoveryPollUsesSnapshotsAndContentIsOwnerScoped(t *testing.T) {
 	assert.Equal(t, int32(1), fetchCalls.Load())
 
 	c, recorder = aliWanLifecycleContext(t, fixture, http.MethodGet, "/v1/videos/"+taskID+"/content", "", taskID)
-	VideoProxy(c)
+	VideoProxy(c, middleware.CaptureRelayRequestState(c))
 	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 	assert.Equal(t, "ali-wan-video", recorder.Body.String())
 	assert.Equal(t, "video/mp4", recorder.Header().Get("Content-Type"))
@@ -342,7 +342,7 @@ func TestAliWanRecoveryPollUsesSnapshotsAndContentIsOwnerScoped(t *testing.T) {
 		})}
 	}
 	c, recorder = aliWanLifecycleContext(t, fixture, http.MethodGet, "/v1/videos/"+taskID+"/content", "", taskID)
-	VideoProxy(c)
+	VideoProxy(c, middleware.CaptureRelayRequestState(c))
 	assert.Equal(t, http.StatusBadGateway, recorder.Code)
 	assert.NotContains(t, recorder.Body.String(), "must-not-stream")
 
@@ -355,13 +355,13 @@ func TestAliWanRecoveryPollUsesSnapshotsAndContentIsOwnerScoped(t *testing.T) {
 		})}
 	}
 	c, recorder = aliWanLifecycleContext(t, fixture, http.MethodGet, "/v1/videos/"+taskID+"/content", "", taskID)
-	VideoProxy(c)
+	VideoProxy(c, middleware.CaptureRelayRequestState(c))
 	assert.Equal(t, http.StatusBadGateway, recorder.Code)
 	assert.NotContains(t, recorder.Body.String(), "<script>")
 
 	c, recorder = aliWanLifecycleContext(t, fixture, http.MethodGet, "/v1/videos/"+taskID+"/content", "", taskID)
 	requestctx.SetUserId(c, fixture.user.Id+1)
-	VideoProxy(c)
+	VideoProxy(c, middleware.CaptureRelayRequestState(c))
 	assert.Equal(t, http.StatusNotFound, recorder.Code)
 	assert.Equal(t, int32(3), contentCalls.Load())
 }
@@ -383,7 +383,7 @@ func TestAliWanDefinitiveRejectionRefundsAndAmbiguityNeverReplays(t *testing.T) 
 		})
 		c, recorder := aliWanLifecycleContext(t, fixture, http.MethodPost, "/v1/videos",
 			`{"model":"wan2.7-t2v","prompt":"reject"}`, "")
-		RelayVideoTask(c)
+		RelayVideoTask(c, middleware.CaptureRelayRequestState(c))
 		require.Equal(t, http.StatusBadRequest, recorder.Code, recorder.Body.String())
 		assert.NotContains(t, recorder.Body.String(), "upstream-ali-wan-key")
 		assert.Equal(t, int32(1), submitCalls.Load())
@@ -403,7 +403,7 @@ func TestAliWanDefinitiveRejectionRefundsAndAmbiguityNeverReplays(t *testing.T) 
 		})
 		c, recorder := aliWanLifecycleContext(t, fixture, http.MethodPost, "/v1/videos",
 			`{"model":"wan2.7-t2v","prompt":"business reject"}`, "")
-		RelayVideoTask(c)
+		RelayVideoTask(c, middleware.CaptureRelayRequestState(c))
 		require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 		assert.NotContains(t, recorder.Body.String(), "upstream-ali-wan-key")
 		assertAliWanRefunded(t, fixture)
@@ -424,7 +424,7 @@ func TestAliWanDefinitiveRejectionRefundsAndAmbiguityNeverReplays(t *testing.T) 
 		})
 		c, recorder := aliWanLifecycleContext(t, fixture, http.MethodPost, "/v1/videos",
 			`{"model":"wan2.7-t2v","prompt":"ambiguous"}`, "")
-		RelayVideoTask(c)
+		RelayVideoTask(c, middleware.CaptureRelayRequestState(c))
 		require.Equal(t, http.StatusAccepted, recorder.Code, recorder.Body.String())
 		var task model.Task
 		var operation model.TaskOperation
@@ -495,7 +495,7 @@ func TestAliWanTerminalFailureReversesSettledChargeExactlyOnce(t *testing.T) {
 	})
 	c, recorder := aliWanLifecycleContext(t, fixture, http.MethodPost, "/v1/videos",
 		`{"model":"wan2.7-t2v","prompt":"fail later"}`, "")
-	RelayVideoTask(c)
+	RelayVideoTask(c, middleware.CaptureRelayRequestState(c))
 	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 	taskID := decodeAliWanPublicID(t, recorder)
 	forceAliWanRecoveryDue(t, taskID)
@@ -618,7 +618,7 @@ func TestRetryAliWanPollReviewIsAuditedAndDoesNotRebill(t *testing.T) {
 	})
 	c, recorder := aliWanLifecycleContext(t, fixture, http.MethodPost, "/v1/videos",
 		`{"model":"wan2.7-t2v","prompt":"manual poll"}`, "")
-	RelayVideoTask(c)
+	RelayVideoTask(c, middleware.CaptureRelayRequestState(c))
 	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 	taskID := decodeAliWanPublicID(t, recorder)
 	var task model.Task
@@ -699,7 +699,7 @@ func TestAliWanRecoveryLeasePreventsConcurrentPolls(t *testing.T) {
 	})
 	c, recorder := aliWanLifecycleContext(t, fixture, http.MethodPost, "/v1/videos",
 		`{"model":"wan2.7-t2v","prompt":"concurrent"}`, "")
-	RelayVideoTask(c)
+	RelayVideoTask(c, middleware.CaptureRelayRequestState(c))
 	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 	taskID := decodeAliWanPublicID(t, recorder)
 	forceAliWanRecoveryDue(t, taskID)

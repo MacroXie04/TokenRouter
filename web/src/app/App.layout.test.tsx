@@ -29,11 +29,14 @@ vi.mock('../features/dashboard', () => ({
   DashboardView: () => <main aria-label="dashboard route">Dashboard route</main>,
 }));
 
-vi.mock('../features/home/home-api', () => ({
+vi.mock('../features/public-documents/public-content-api', () => ({
   MAX_PUBLIC_CONTENT_CHARACTERS: 1_000_000,
+  loadPublicContent: vi.fn(async () => ''),
+}));
+
+vi.mock('../features/home/home-api', () => ({
   loadBasicRankings: vi.fn(async () => []),
   loadPerformanceSummary: vi.fn(async () => []),
-  loadPublicContent: vi.fn(async () => ''),
 }));
 
 vi.mock('../features/pricing/pricing-api', () => ({

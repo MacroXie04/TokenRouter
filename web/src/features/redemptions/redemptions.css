@@ -1,0 +1,143 @@
+.redemption-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.redemption-heading h2,
+.redemption-heading p,
+.redemption-subpanel h3,
+.redemption-secret-panel h3 {
+  margin-top: 0;
+}
+
+.redemption-heading-actions,
+.redemption-filter-actions,
+.redemption-secret-actions,
+.redemption-edit-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.8rem;
+}
+
+.redemption-heading-actions .link,
+.redemption-filter-actions .link,
+.redemption-secret-actions .link,
+.redemption-edit-actions .link,
+.redemption-actions .link,
+.redemption-copy.link {
+  margin-left: 0;
+}
+
+.redemption-filters {
+  display: grid;
+  grid-template-columns: minmax(12rem, 1fr) minmax(9rem, 0.5fr) auto;
+  gap: 0 1rem;
+  align-items: end;
+  padding: 1rem;
+  margin: 0.75rem 0 1rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.12);
+}
+
+.redemption-filters label,
+.redemption-filter-actions {
+  margin-bottom: 0;
+}
+
+.redemption-admin table {
+  min-width: 860px;
+}
+
+.redemption-admin td {
+  vertical-align: top;
+}
+
+.redemption-meta {
+  display: block;
+  margin-top: 0.25rem;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.redemption-copy {
+  display: block;
+  font-size: 0.8rem;
+}
+
+.redemption-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.2rem 0.7rem;
+  min-width: 9rem;
+}
+
+.redemption-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 1rem;
+  margin-top: 1rem;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.redemption-subpanel,
+.redemption-secret-panel {
+  padding: 1rem;
+  margin: 1rem 0;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.redemption-subpanel h3,
+.redemption-form-note {
+  grid-column: 1 / -1;
+}
+
+.redemption-form-note {
+  align-self: center;
+  margin: 0;
+  font-size: 0.82rem;
+}
+
+.redemption-secret-panel {
+  border-color: color-mix(in srgb, var(--accent), transparent 45%);
+  background: rgba(108, 140, 255, 0.08);
+}
+
+.redemption-secret-panel p {
+  color: var(--muted);
+}
+
+.redemption-secret-panel ul {
+  max-height: 12rem;
+  padding: 0.75rem 0.75rem 0.75rem 2rem;
+  overflow: auto;
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: 8px;
+}
+
+.redemption-secret-panel code {
+  overflow-wrap: anywhere;
+}
+
+.redemption-state {
+  padding: 1rem;
+  text-align: center;
+}
+
+@media (max-width: 620px) {
+  .redemption-heading,
+.redemption-heading-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .redemption-filters {
+    grid-template-columns: 1fr;
+    gap: 0.75rem;
+  }
+}

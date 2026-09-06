@@ -11,8 +11,7 @@ import (
 	billingexpr "github.com/tokenrouter/tokenrouter/internal/billing/expression"
 	channelssvc "github.com/tokenrouter/tokenrouter/internal/channels"
 	channelcatalog "github.com/tokenrouter/tokenrouter/internal/channels/catalog"
-	"github.com/tokenrouter/tokenrouter/internal/httpapi/middleware"
-	"github.com/tokenrouter/tokenrouter/internal/httpapi/requestctx"
+	"github.com/tokenrouter/tokenrouter/internal/platform/cryptoutil"
 	"github.com/tokenrouter/tokenrouter/internal/platform/env"
 	"github.com/tokenrouter/tokenrouter/internal/platform/httpx"
 	"github.com/tokenrouter/tokenrouter/internal/platform/jsonutil"
@@ -220,23 +219,23 @@ func productionRealtimeDependencies() realtimeDependencies {
 
 // RelayWebSocket proxies an OpenAI Realtime WebSocket through a bounded,
 // pre-funded accounting session.
-func RelayWebSocket(c *gin.Context) {
-	relayWebSocket(c, productionRealtimeDependencies())
+func RelayWebSocket(c *gin.Context, state relaycommon.RequestState) {
+	relayWebSocket(c, state, productionRealtimeDependencies())
 }
 
-func relayWebSocket(c *gin.Context, deps realtimeDependencies) {
-	token := middleware.GetRelayToken(c)
+func relayWebSocket(c *gin.Context, state relaycommon.RequestState, deps realtimeDependencies) {
+	token := state.Token
 	if token == nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid token"})
 		return
 	}
-	userId := requestctx.GetUserId(c)
-	userGroup := requestctx.GetUserGroup(c)
+	userId := state.UserID
+	userGroup := state.UserGroup
 	if userId <= 0 || token.UserId != userId {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid token owner"})
 		return
 	}
-	groups := middleware.GetTokenGroups(c)
+	groups := state.Groups
 	if len(groups) == 0 {
 		c.JSON(http.StatusForbidden, gin.H{"error": "no authorized group"})
 		return
@@ -266,7 +265,7 @@ func relayWebSocket(c *gin.Context, deps realtimeDependencies) {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "no available channel"})
 		return
 	}
-	c.Set(requestctx.ContextKeyGroup, group)
+	state.SelectGroup(group)
 	pricing, err := resolveRealtimePricingSnapshot(deps, userId, modelName, userGroup, group)
 	if err != nil || pricing.reservationQuota < 0 || pricing.reservationQuota == 0 && !pricing.allowZero {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "invalid realtime reservation"})
@@ -293,10 +292,10 @@ func relayWebSocket(c *gin.Context, deps realtimeDependencies) {
 		pricing:          pricing,
 		token:            token,
 		log: realtimeLogEntry{
-			userId: userId, username: requestctx.GetUsername(c),
-			tokenName: requestctx.GetString(c, requestctx.ContextKeyTokenName),
+			userId: userId, username: state.Username,
+			tokenName: state.TokenName,
 			modelName: modelName, channelId: channel.Id, userGroup: userGroup, group: group,
-			ip: c.ClientIP(), requestId: requestctx.GetRequestId(c), tokenId: token.Id,
+			ip: c.ClientIP(), requestId: state.RequestID, tokenId: token.Id,
 		},
 		startedAt: deps.now(),
 	})
@@ -551,7 +550,7 @@ func (a *realtimeAccountant) processUpstreamMessage(data []byte) (bool, error) {
 	if event.Response != nil && event.Response.Id != "" {
 		responseId = event.Response.Id
 	}
-	responseId = requestctx.NormalizeProviderCorrelationID(responseId)
+	responseId = cryptoutil.NormalizeProviderCorrelationID(responseId)
 	if responseId != "" {
 		if _, duplicate := a.seenResponses[responseId]; duplicate {
 			return true, nil
@@ -666,7 +665,7 @@ func realtimeProtocolUsage(usage normalizedRealtimeUsage) *protocolkit.Usage {
 }
 
 func (a *realtimeAccountant) recordUsage(responseId string, usage normalizedRealtimeUsage, quota int, settled realtimeReservation, billingFields map[string]any, fallbackErr, settlementErr error) error {
-	responseId = requestctx.NormalizeProviderCorrelationID(responseId)
+	responseId = cryptoutil.NormalizeProviderCorrelationID(responseId)
 	entry := a.log
 	entry.promptTokens = usage.inputTokens
 	entry.completionTokens = usage.outputTokens

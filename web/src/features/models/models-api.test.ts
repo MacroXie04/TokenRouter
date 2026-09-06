@@ -1,22 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { api } from '../../shared/api/client';
+import { ModelsAccessError, ModelsContractError, assertModelsAdministrator } from "./model-response";
 import {
-  ModelsAccessError,
-  ModelsContractError,
-  assertModelsAdministrator,
   checkDeploymentName,
   createDeployment,
-  createModel,
-  createVendor,
   deleteDeployment,
-  deleteModel,
-  deleteVendor,
   estimateDeploymentPrice,
   extendDeployment,
   getDeployment,
   getDeploymentContainer,
-  getModel,
-  getVendor,
   loadDeploymentAccess,
   loadDeploymentContainers,
   loadDeploymentHardware,
@@ -25,9 +17,27 @@ import {
   loadDeploymentReplicas,
   loadDeploymentSettings,
   loadDeployments,
+  renameDeployment,
+  testDeploymentConnection,
+  updateDeployment,
+} from "./deployment-api";
+import {
+  createModel,
+  createVendor,
+  deleteModel,
+  deleteVendor,
+  getModel,
+  getVendor,
   loadMissingModels,
   loadModels,
   loadVendors,
+  previewUpstream,
+  setModelStatus,
+  syncUpstream,
+  updateModel,
+  updateVendor,
+} from "./metadata-api";
+import {
   parseContainerResponse,
   parseContainersResponse,
   parseDeploymentDetailResponse,
@@ -39,20 +49,14 @@ import {
   parseDeploymentReplicasResponse,
   parseDeploymentSettingsResponse,
   parseLogsResponse,
+  type DeploymentCreateInput,
+} from "./deployment-contracts";
+import {
   parseModelPageResponse,
   parseSyncPreviewResponse,
-  previewUpstream,
-  renameDeployment,
-  setModelStatus,
-  syncUpstream,
-  testDeploymentConnection,
-  updateDeployment,
-  updateModel,
-  updateVendor,
-  type DeploymentCreateInput,
   type ModelMutationInput,
   type VendorMutationInput,
-} from './models-api';
+} from "./metadata-contracts";
 
 vi.mock('../../shared/api/client', () => ({ api: { get: vi.fn(), post: vi.fn(), put: vi.fn(), delete: vi.fn() } }));
 
@@ -71,110 +75,48 @@ function success(data: unknown) {
 
 function model(overrides: Record<string, unknown> = {}) {
   return {
-    id: 7,
-    model_name: 'gpt-4o',
-    description: 'Fast model',
-    icon: 'openai',
-    tags: 'chat,vision',
-    vendor_id: 3,
-    endpoints: '["chat"]',
-    status: 1,
-    sync_official: 1,
-    created_time: 1_780_000_000,
-    updated_time: 1_780_000_100,
-    name_rule: 0,
-    bound_channels: [{ name: 'primary', type: 1 }],
-    enable_groups: ['default'],
-    quota_types: [1],
-    matched_models: [],
-    matched_count: 0,
-    supported_endpoint_types: ['openai'],
-    ...overrides,
+    id: 7, model_name: 'gpt-4o', description: 'Fast model', icon: 'openai',
+    tags: 'chat,vision', vendor_id: 3, endpoints: '["chat"]', status: 1,
+    sync_official: 1, created_time: 1_780_000_000, updated_time: 1_780_000_100, name_rule: 0,
+    bound_channels: [{ name: 'primary', type: 1 }], enable_groups: ['default'], quota_types: [1], matched_models: [],
+    matched_count: 0, supported_endpoint_types: ['openai'], ...overrides,
   };
 }
 
 function vendor(overrides: Record<string, unknown> = {}) {
   return {
-    id: 3,
-    name: 'OpenAI',
-    description: 'Provider',
-    icon: 'openai',
-    status: 1,
-    created_time: 1_780_000_000,
-    updated_time: 1_780_000_100,
-    ...overrides,
+    id: 3, name: 'OpenAI', description: 'Provider', icon: 'openai',
+    status: 1, created_time: 1_780_000_000, updated_time: 1_780_000_100, ...overrides,
   };
 }
 
 function deployment(overrides: Record<string, unknown> = {}) {
   return {
-    id: 'cluster:abc',
-    deployment_name: 'production-chat',
-    container_name: 'production-chat',
-    status: 'running',
-    type: 'Container',
-    time_remaining: '2 hour 10 minutes',
-    time_remaining_minutes: 130,
-    hardware_info: 'NVIDIA H100 x2',
-    hardware_name: 'H100',
-    brand_name: 'NVIDIA',
-    hardware_quantity: 2,
-    completed_percent: 12.5,
-    compute_minutes_served: 20,
-    compute_minutes_remaining: 130,
-    created_at: 1_780_000_000,
-    updated_at: 1_780_000_000,
-    model_name: '',
-    model_version: '',
-    instance_count: 2,
-    resource_config: { cpu: '', memory: '', gpu: '2' },
-    description: '',
-    provider: 'io.net',
-    ...overrides,
+    id: 'cluster:abc', deployment_name: 'production-chat', container_name: 'production-chat', status: 'running',
+    type: 'Container', time_remaining: '2 hour 10 minutes', time_remaining_minutes: 130, hardware_info: 'NVIDIA H100 x2',
+    hardware_name: 'H100', brand_name: 'NVIDIA', hardware_quantity: 2, completed_percent: 12.5,
+    compute_minutes_served: 20, compute_minutes_remaining: 130, created_at: 1_780_000_000, updated_at: 1_780_000_000,
+    model_name: '', model_version: '', instance_count: 2, resource_config: { cpu: '', memory: '', gpu: '2' },
+    description: '', provider: 'io.net', ...overrides,
   };
 }
 
 function detail(overrides: Record<string, unknown> = {}) {
   return {
-    id: 'cluster:abc',
-    deployment_name: 'cluster:abc',
-    model_name: '',
-    model_version: '',
-    status: 'running',
-    instance_count: 2,
-    hardware_id: 9,
-    resource_config: { cpu: '', memory: '', gpu: '2' },
-    created_at: 1_780_000_000,
-    updated_at: 1_780_000_000,
-    description: '',
-    amount_paid: 1.25,
-    completed_percent: 12.5,
-    gpus_per_container: 1,
-    total_gpus: 2,
-    total_containers: 2,
-    hardware_name: 'H100',
-    brand_name: 'NVIDIA',
-    compute_minutes_served: 20,
-    compute_minutes_remaining: 130,
-    locations: [{ id: 4, iso2: 'US', name: 'California' }],
-    container_config: { env_variables: { OPENAI_API_KEY: 'sk-never-render' }, image_url: 'private/image' },
-    ...overrides,
+    id: 'cluster:abc', deployment_name: 'cluster:abc', model_name: '', model_version: '',
+    status: 'running', instance_count: 2, hardware_id: 9, resource_config: { cpu: '', memory: '', gpu: '2' },
+    created_at: 1_780_000_000, updated_at: 1_780_000_000, description: '', amount_paid: 1.25,
+    completed_percent: 12.5, gpus_per_container: 1, total_gpus: 2, total_containers: 2,
+    hardware_name: 'H100', brand_name: 'NVIDIA', compute_minutes_served: 20, compute_minutes_remaining: 130,
+    locations: [{ id: 4, iso2: 'US', name: 'California' }], container_config: { env_variables: { OPENAI_API_KEY: 'sk-never-render' }, image_url: 'private/image' }, ...overrides,
   };
 }
 
 function container(overrides: Record<string, unknown> = {}) {
   return {
-    container_id: 'worker:1',
-    device_id: 'device-1',
-    status: 'running',
-    hardware: 'H100',
-    brand_name: 'NVIDIA',
-    created_at: 1_780_000_000,
-    uptime_percent: 99,
-    gpus_per_container: 1,
-    public_url: 'https://worker.example.test/',
-    events: [{ time: 1_780_000_100, message: 'Started' }],
-    ...overrides,
+    container_id: 'worker:1', device_id: 'device-1', status: 'running', hardware: 'H100',
+    brand_name: 'NVIDIA', created_at: 1_780_000_000, uptime_percent: 99, gpus_per_container: 1,
+    public_url: 'https://worker.example.test/', events: [{ time: 1_780_000_100, message: 'Started' }], ...overrides,
   };
 }
 

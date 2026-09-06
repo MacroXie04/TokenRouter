@@ -9,6 +9,7 @@ import (
 	billingsvc "github.com/tokenrouter/tokenrouter/internal/billing"
 	quotamath "github.com/tokenrouter/tokenrouter/internal/billing/quota"
 	channelssvc "github.com/tokenrouter/tokenrouter/internal/channels"
+	"github.com/tokenrouter/tokenrouter/internal/httpapi/middleware"
 	model "github.com/tokenrouter/tokenrouter/internal/store"
 	"github.com/tokenrouter/tokenrouter/protocolkit"
 	"net/http"
@@ -24,7 +25,7 @@ func TestOrdinaryRelayTrustQuotaUsesDurableZeroHoldAndSettlesActual(t *testing.T
 	c, recorder, info := newRelayAccountingContext(t, &fixture.token, maxTokens)
 	usage := &protocolkit.Usage{PromptTokens: 3, CompletionTokens: 2, TotalTokens: 5}
 
-	err := relayAndSettleWithDispatch(c, info, func(c *gin.Context, _ *RelayInfo) (*protocolkit.Usage, error) {
+	err := relayAndSettleWithDispatch(c, middleware.CaptureRelayRequestState(c), info, func(c *gin.Context, _ *RelayInfo) (*protocolkit.Usage, error) {
 		var record model.RelayQuotaReservationRecord
 		require.NoError(t, model.DB.Order("id desc").First(&record).Error)
 		assert.Equal(t, model.RelayQuotaReservationStatusDispatched, record.Status)
@@ -88,7 +89,7 @@ func TestOrdinaryRelayTrustQuotaRetryFailureRefundsZeroHoldExactlyOnce(t *testin
 
 	c, recorder, info := newRelayAccountingContext(t, &fixture.token, 24)
 	dispatches := 0
-	err := relayAndSettleWithDispatch(c, info, func(_ *gin.Context, _ *RelayInfo) (*protocolkit.Usage, error) {
+	err := relayAndSettleWithDispatch(c, middleware.CaptureRelayRequestState(c), info, func(_ *gin.Context, _ *RelayInfo) (*protocolkit.Usage, error) {
 		dispatches++
 		return nil, errors.New("upstream unavailable")
 	})

@@ -28,7 +28,7 @@ const customOAuthPayload = `{
 
 func setupCustomOAuthTest(t *testing.T) (http.Handler, func(method, path, body string) *httptest.ResponseRecorder, int) {
 	t.Helper()
-	handler, do, uid := setupChannelRead(t, roles.RoleRootUser)
+	handler, do, uid := setupDashboardSession(t, roles.RoleRootUser)
 	require.NoError(t, model.DB.AutoMigrate(&model.CustomOAuthProvider{}, &model.UserOAuthBinding{}))
 	return handler, do, uid
 }

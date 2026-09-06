@@ -12,6 +12,7 @@ import (
 	"github.com/tokenrouter/tokenrouter/internal/platform/httpx"
 	"github.com/tokenrouter/tokenrouter/internal/platform/jsonutil"
 	"github.com/tokenrouter/tokenrouter/internal/relay/engine"
+	"github.com/tokenrouter/tokenrouter/internal/relay/providers/jimeng"
 	"github.com/tokenrouter/tokenrouter/internal/relay/tasks"
 	model "github.com/tokenrouter/tokenrouter/internal/store"
 	userssvc "github.com/tokenrouter/tokenrouter/internal/users"
@@ -25,30 +26,50 @@ import (
 const maxPlaygroundRequestBodyBytes int64 = 16 << 20
 
 // Relay handler wrappers dispatch to the shared relay engine.
-func RelayChatCompletions(c *gin.Context)    { engine.Relay(c) }
-func RelayCompletions(c *gin.Context)        { engine.Relay(c) }
-func RelayEmbeddings(c *gin.Context)         { engine.Relay(c) }
-func RelayModerations(c *gin.Context)        { engine.Relay(c) }
-func RelayImageGenerations(c *gin.Context)   { engine.Relay(c) }
-func RelayImageEdits(c *gin.Context)         { engine.Relay(c) }
-func RelayEdits(c *gin.Context)              { engine.Relay(c) }
-func RelayAudioSpeech(c *gin.Context)        { engine.Relay(c) }
-func RelayAudioTranscription(c *gin.Context) { engine.Relay(c) }
-func RelayAudioTranslation(c *gin.Context)   { engine.Relay(c) }
-func RelayResponses(c *gin.Context)          { engine.Relay(c) }
-func RelayResponsesCompact(c *gin.Context)   { engine.Relay(c) }
-func RelayAlphaSearch(c *gin.Context)        { engine.Relay(c) }
-func RelayEnginesEmbeddings(c *gin.Context)  { engine.Relay(c) }
-func RelayRerank(c *gin.Context)             { engine.Relay(c) }
-func RelayRealtime(c *gin.Context)           { engine.RelayWebSocket(c) }
-func RelayClaudeMessages(c *gin.Context)     { engine.RelayClaudeMessages(c) }
-func RelayGeminiNative(c *gin.Context)       { engine.RelayGeminiNative(c) }
-func RelayJimeng(c *gin.Context)             { tasks.RelayJimeng(c) }
-func RelayKlingTask(c *gin.Context)          { tasks.RelayKlingTask(c) }
-func RelayKlingTaskFetch(c *gin.Context)     { tasks.RelayKlingTaskFetch(c) }
-func RelayTask(c *gin.Context)               { tasks.RelayVideoTask(c) }
-func RelayTaskFetch(c *gin.Context)          { tasks.RelayVideoTaskFetch(c) }
-func VideoProxy(c *gin.Context)              { tasks.VideoProxy(c) }
+func RelayChatCompletions(c *gin.Context)    { relayOpenAI(c) }
+func RelayCompletions(c *gin.Context)        { relayOpenAI(c) }
+func RelayEmbeddings(c *gin.Context)         { relayOpenAI(c) }
+func RelayModerations(c *gin.Context)        { relayOpenAI(c) }
+func RelayImageGenerations(c *gin.Context)   { relayOpenAI(c) }
+func RelayImageEdits(c *gin.Context)         { relayOpenAI(c) }
+func RelayEdits(c *gin.Context)              { relayOpenAI(c) }
+func RelayAudioSpeech(c *gin.Context)        { relayOpenAI(c) }
+func RelayAudioTranscription(c *gin.Context) { relayOpenAI(c) }
+func RelayAudioTranslation(c *gin.Context)   { relayOpenAI(c) }
+func RelayResponses(c *gin.Context)          { relayOpenAI(c) }
+func RelayResponsesCompact(c *gin.Context)   { relayOpenAI(c) }
+func RelayAlphaSearch(c *gin.Context)        { relayOpenAI(c) }
+func RelayEnginesEmbeddings(c *gin.Context)  { relayOpenAI(c) }
+func RelayRerank(c *gin.Context)             { relayOpenAI(c) }
+func RelayRealtime(c *gin.Context)           { engine.RelayWebSocket(c, middleware.CaptureRelayRequestState(c)) }
+func RelayClaudeMessages(c *gin.Context) {
+	engine.RelayClaudeMessages(c, middleware.CaptureRelayRequestState(c))
+}
+func RelayGeminiNative(c *gin.Context) {
+	engine.RelayGeminiNative(c, middleware.CaptureRelayRequestState(c))
+}
+func RelayJimeng(c *gin.Context) {
+	request, ok := middleware.GetJimengRequest(c)
+	if !ok {
+		c.JSON(http.StatusInternalServerError, gin.H{"code": "invalid_request", "message": "Jimeng request context is missing", "data": nil})
+		return
+	}
+	state := middleware.CaptureRelayRequestState(c)
+	if request.Action == jimeng.FetchAction {
+		tasks.RelayJimengFetch(c, state, request.Request)
+		return
+	}
+	tasks.RelayJimengSubmit(c, state, request.Request, request.RawBody)
+}
+func RelayKlingTask(c *gin.Context) { tasks.RelayKlingTask(c, middleware.CaptureRelayRequestState(c)) }
+func RelayKlingTaskFetch(c *gin.Context) {
+	tasks.RelayKlingTaskFetch(c, middleware.CaptureRelayRequestState(c))
+}
+func RelayTask(c *gin.Context) { tasks.RelayVideoTask(c, middleware.CaptureRelayRequestState(c)) }
+func RelayTaskFetch(c *gin.Context) {
+	tasks.RelayVideoTaskFetch(c, middleware.CaptureRelayRequestState(c))
+}
+func VideoProxy(c *gin.Context) { tasks.VideoProxy(c, middleware.CaptureRelayRequestState(c)) }
 
 func playgroundRequestGroup(c *gin.Context) (string, error) {
 	body, err := httpx.ReadAllLimited(c.Request.Body, maxPlaygroundRequestBodyBytes)
@@ -120,7 +141,7 @@ func Playground(c *gin.Context) {
 		UserId: userID, Name: fmt.Sprintf("playground-%s", group), Group: group,
 		UnlimitedQuota: true,
 	})
-	engine.Relay(c)
+	relayOpenAI(c)
 }
 
 func writePlaygroundRequestError(c *gin.Context, err error) {
@@ -137,13 +158,25 @@ func writePlaygroundRequestError(c *gin.Context, err error) {
 	}})
 }
 
-func RelaySunoSubmit(c *gin.Context)        { tasks.RelaySunoTask(c) }
-func RelaySunoFetch(c *gin.Context)         { tasks.RelaySunoTaskFetch(c) }
-func RelayVideoSubmit(c *gin.Context)       { tasks.RelayVideoTask(c) }
-func RelayVideoFetch(c *gin.Context)        { tasks.RelayVideoTaskFetch(c) }
-func RelayMidjourney(c *gin.Context)        { tasks.RelayMidjourney(c) }
-func RelayMidjourneyImagine(c *gin.Context) { tasks.RelayMidjourney(c) }
-func RelayMidjourneyFetch(c *gin.Context)   { tasks.RelayMidjourney(c) }
+func RelaySunoSubmit(c *gin.Context) { tasks.RelaySunoTask(c, middleware.CaptureRelayRequestState(c)) }
+func RelaySunoFetch(c *gin.Context) {
+	tasks.RelaySunoTaskFetch(c, middleware.CaptureRelayRequestState(c))
+}
+func RelayVideoSubmit(c *gin.Context) {
+	tasks.RelayVideoTask(c, middleware.CaptureRelayRequestState(c))
+}
+func RelayVideoFetch(c *gin.Context) {
+	tasks.RelayVideoTaskFetch(c, middleware.CaptureRelayRequestState(c))
+}
+func RelayMidjourney(c *gin.Context) {
+	tasks.RelayMidjourney(c, middleware.CaptureRelayRequestState(c))
+}
+func RelayMidjourneyImagine(c *gin.Context) {
+	tasks.RelayMidjourney(c, middleware.CaptureRelayRequestState(c))
+}
+func RelayMidjourneyFetch(c *gin.Context) {
+	tasks.RelayMidjourney(c, middleware.CaptureRelayRequestState(c))
+}
 
 // RelayListModels returns the models available to the token's group in the
 // OpenAI-compatible /v1/models shape. Gemini clients (x-goog-api-key header or

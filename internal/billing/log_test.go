@@ -4,7 +4,7 @@ import (
 	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/tokenrouter/tokenrouter/internal/httpapi/requestctx"
+	"github.com/tokenrouter/tokenrouter/internal/platform/cryptoutil"
 	model "github.com/tokenrouter/tokenrouter/internal/store"
 	"gorm.io/gorm"
 	"strings"
@@ -58,7 +58,7 @@ func TestRecordConsumeLogCheckedNormalizesProviderControlledRequestID(t *testing
 	))
 	got = model.Log{}
 	require.NoError(t, db.Order("id desc").First(&got).Error)
-	assert.Equal(t, requestctx.NormalizeProviderCorrelationID("req_safe-123"), got.UpstreamRequestId)
+	assert.Equal(t, cryptoutil.NormalizeProviderCorrelationID("req_safe-123"), got.UpstreamRequestId)
 
 	logs, total, err := GetAllLogs(
 		LogTypeUnknown, 0, 0, "", "", "", 0, 10, 0, "", "", "req_safe-123",
@@ -66,7 +66,7 @@ func TestRecordConsumeLogCheckedNormalizesProviderControlledRequestID(t *testing
 	require.NoError(t, err)
 	assert.Equal(t, int64(1), total)
 	require.Len(t, logs, 1)
-	assert.Equal(t, requestctx.NormalizeProviderCorrelationID("req_safe-123"), logs[0].UpstreamRequestId)
+	assert.Equal(t, cryptoutil.NormalizeProviderCorrelationID("req_safe-123"), logs[0].UpstreamRequestId)
 
 	require.NoError(t, db.Create(&model.Log{
 		UserId: 1, Type: LogTypeConsume, UpstreamRequestId: "req_safe-123", CreatedAt: 1,

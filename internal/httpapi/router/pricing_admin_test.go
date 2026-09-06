@@ -18,7 +18,7 @@ import (
 )
 
 func TestResetModelRatioContract(t *testing.T) {
-	_, do, rootID := setupChannelRead(t, roles.RoleRootUser)
+	_, do, rootID := setupDashboardSession(t, roles.RoleRootUser)
 	previousPrices := billingsvc.ExportedModelPrices()
 	previousRatios := billingsvc.ExportedGroupRatios()
 	previousSpecialRatios := billingsvc.ExportedGroupGroupRatios()
@@ -57,7 +57,7 @@ func TestResetModelRatioContract(t *testing.T) {
 }
 
 func TestPricingOptionsWriteThroughToLiveBilling(t *testing.T) {
-	_, do, _ := setupChannelRead(t, roles.RoleRootUser)
+	_, do, _ := setupDashboardSession(t, roles.RoleRootUser)
 	previousPrices := billingsvc.ExportedModelPrices()
 	previousRatios := billingsvc.ExportedGroupRatios()
 	previousSpecialRatios := billingsvc.ExportedGroupGroupRatios()
@@ -149,7 +149,7 @@ func TestPricingOptionsWriteThroughToLiveBilling(t *testing.T) {
 }
 
 func TestQuotaPerUnitIsAnImmutablePublicOption(t *testing.T) {
-	_, do, _ := setupChannelRead(t, roles.RoleRootUser)
+	_, do, _ := setupDashboardSession(t, roles.RoleRootUser)
 	require.NoError(t, setting.UpdateOption(setting.QuotaPerUnitOption, strconv.Itoa(quotamath.QuotaPerUnit)))
 
 	requestBody, err := json.Marshal(map[string]any{
@@ -189,14 +189,14 @@ func TestQuotaPerUnitIsAnImmutablePublicOption(t *testing.T) {
 }
 
 func TestResetModelRatioRoleGuard(t *testing.T) {
-	handler, _, _ := setupChannelRead(t, roles.RoleRootUser)
+	handler, _, _ := setupDashboardSession(t, roles.RoleRootUser)
 	req := httptest.NewRequest(http.MethodPost, "/api/option/rest_model_ratio", strings.NewReader(""))
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 
 	for _, role := range []int{roles.RoleCommonUser, roles.RoleAdminUser} {
-		_, do, _ := setupChannelRead(t, role)
+		_, do, _ := setupDashboardSession(t, role)
 		assert.Equal(t, http.StatusForbidden, do(http.MethodPost, "/api/option/rest_model_ratio", "").Code)
 	}
 }

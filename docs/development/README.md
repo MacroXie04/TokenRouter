@@ -29,6 +29,10 @@ external-store CI selector. Update `scripts/manifests/go-tests.json` only after
 reviewing an intentional test move/addition/removal:
 `node scripts/verify-repository-layout.mjs --update-manifest`.
 
+The [boundary cleanup record](structure-boundaries.md) describes the follow-up
+ownership changes. Backend dependency rules run with the layout guard;
+frontend feature-boundary checks and their self-tests run with `npm run lint`.
+
 `scripts/list-source-files.mjs` enumerates the actual tracked/non-ignored
 snapshot, including new paths and excluding Git-confirmed worktree deletions.
 This allows validation of uncommitted moves without staging them. Unreadable

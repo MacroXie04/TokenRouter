@@ -7,6 +7,7 @@ import (
 	billingsvc "github.com/tokenrouter/tokenrouter/internal/billing"
 	channelssvc "github.com/tokenrouter/tokenrouter/internal/channels"
 	channelcatalog "github.com/tokenrouter/tokenrouter/internal/channels/catalog"
+	"github.com/tokenrouter/tokenrouter/internal/httpapi/middleware"
 	model "github.com/tokenrouter/tokenrouter/internal/store"
 	"github.com/tokenrouter/tokenrouter/protocolkit"
 	"io"
@@ -77,7 +78,7 @@ func TestVertexRelayMapsRegionAndModelBeforeIOAndSettlesGeminiUsage(t *testing.T
 	info.Request.Messages = []protocolkit.Message{{Role: "user", Content: "hello from the lifecycle"}}
 	info.RawBody = []byte(`{"model":"accounting-model","messages":[{"role":"user","content":"hello from the lifecycle"}],"max_tokens":64}`)
 	context.Request.Header.Set("Content-Type", "application/json")
-	require.NoError(t, relayAndSettle(context, info))
+	require.NoError(t, relayAndSettle(context, middleware.CaptureRelayRequestState(context), info))
 	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 	assert.Contains(t, recorder.Body.String(), "vertex lifecycle reply")
 	assert.Contains(t, recorder.Body.String(), `"model":"accounting-model"`)
@@ -173,7 +174,7 @@ func TestVertexNativeClaudeMapsRequestAndSettlesNativeUsage(t *testing.T) {
 	info.ClaudeRequest = &claudeRequest
 	info.RawBody = rawBody
 	info.ModelName = claudeRequest.Model
-	require.NoError(t, relayAndSettleWithDispatch(context, info, dispatchClaudeUpstream))
+	require.NoError(t, relayAndSettleWithDispatch(context, middleware.CaptureRelayRequestState(context), info, dispatchClaudeUpstream))
 	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 	assert.Contains(t, recorder.Body.String(), `"type":"message"`)
 	assert.Contains(t, recorder.Body.String(), "native Vertex Claude reply")

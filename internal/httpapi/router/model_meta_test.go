@@ -16,7 +16,7 @@ import (
 )
 
 func TestModelMetadataCRUDSearchAndEnrichment(t *testing.T) {
-	_, do, _ := setupChannelRead(t, roles.RoleRootUser)
+	_, do, _ := setupDashboardSession(t, roles.RoleRootUser)
 	require.NoError(t, model.DB.AutoMigrate(&model.Vendor{}))
 	vendor := model.Vendor{Name: "Acme", Status: 1}
 	require.NoError(t, model.DB.Create(&vendor).Error)
@@ -90,7 +90,7 @@ func TestModelMetadataCRUDSearchAndEnrichment(t *testing.T) {
 }
 
 func TestModelMetadataRuleEnrichment(t *testing.T) {
-	_, do, _ := setupChannelRead(t, roles.RoleAdminUser)
+	_, do, _ := setupDashboardSession(t, roles.RoleAdminUser)
 	previousPrices := billingsvc.ExportedModelPrices()
 	billingsvc.SetModelPriceRegistry(map[string]billingsvc.ModelPrice{
 		"claude-alpha": {Prompt: 1, Completion: 2},
@@ -113,7 +113,7 @@ func TestModelMetadataRuleEnrichment(t *testing.T) {
 }
 
 func TestModelMetadataAuthorization(t *testing.T) {
-	r, do, _ := setupChannelRead(t, roles.RoleCommonUser)
+	r, do, _ := setupDashboardSession(t, roles.RoleCommonUser)
 	rec := do(http.MethodGet, "/api/models/search", "")
 	assert.Equal(t, http.StatusForbidden, rec.Code)
 
@@ -125,7 +125,7 @@ func TestModelMetadataAuthorization(t *testing.T) {
 }
 
 func TestModelMetadataMissingPreviewAndSync(t *testing.T) {
-	_, do, _ := setupChannelRead(t, roles.RoleAdminUser)
+	_, do, _ := setupDashboardSession(t, roles.RoleAdminUser)
 	require.NoError(t, model.DB.AutoMigrate(&model.Vendor{}))
 	localVendor := model.Vendor{Name: "Local", Status: 1}
 	require.NoError(t, model.DB.Create(&localVendor).Error)
@@ -208,7 +208,7 @@ func TestModelMetadataMissingPreviewAndSync(t *testing.T) {
 }
 
 func TestModelMetadataSyncUpstreamFailureContract(t *testing.T) {
-	_, do, _ := setupChannelRead(t, roles.RoleAdminUser)
+	_, do, _ := setupDashboardSession(t, roles.RoleAdminUser)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "unavailable", http.StatusServiceUnavailable)
 	}))
@@ -225,7 +225,7 @@ func TestModelMetadataSyncUpstreamFailureContract(t *testing.T) {
 }
 
 func TestModelMetadataSyncRejectsVendorFailureEnvelope(t *testing.T) {
-	_, do, _ := setupChannelRead(t, roles.RoleAdminUser)
+	_, do, _ := setupDashboardSession(t, roles.RoleAdminUser)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/models.json") {
 			_, _ = w.Write([]byte(`[]`))

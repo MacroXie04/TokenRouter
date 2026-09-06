@@ -1,0 +1,192 @@
+.usage-logs-page {
+  max-width: 1280px;
+}
+
+.usage-logs-heading,
+.usage-log-panel-heading,
+.usage-log-pagination {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.usage-logs-heading {
+  margin-bottom: 1rem;
+}
+
+.usage-logs-heading .tagline,
+.usage-log-panel-heading h2,
+.usage-log-panel-heading p {
+  margin-top: 0;
+}
+
+.usage-log-sections {
+  display: flex;
+  gap: 0.3rem;
+  margin-bottom: 1rem;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--border);
+}
+
+.usage-log-sections a {
+  flex: 0 0 auto;
+  padding: 0.7rem 1rem;
+  color: var(--muted);
+  text-decoration: none;
+  border-radius: 8px 8px 0 0;
+}
+
+.usage-log-sections a:hover,
+.usage-log-sections a:focus-visible,
+.usage-log-sections a.active {
+  color: var(--text);
+  background: rgba(108, 140, 255, 0.1);
+}
+
+.usage-log-panel-heading .link,
+.usage-log-filter-actions .link,
+.usage-log-pagination .link {
+  margin-left: 0;
+}
+
+.usage-log-heading-actions,
+.usage-log-scope {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.usage-log-scope {
+  padding-right: 0.75rem;
+  border-right: 1px solid var(--border);
+}
+
+.usage-log-scope .link[aria-pressed='true'] {
+  color: var(--text);
+  text-decoration: underline;
+  text-underline-offset: 0.25rem;
+}
+
+.usage-log-filters {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0 0.8rem;
+  padding: 1rem;
+  margin: 0.75rem 0 1rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.12);
+}
+
+.usage-log-filter-actions {
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+  margin-bottom: 0.9rem;
+}
+
+.usage-log-filter-error {
+  grid-column: 1 / -1;
+  margin: 0;
+}
+
+.usage-log-stats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.8rem;
+  margin: 0 0 1rem;
+}
+
+.usage-log-stats div {
+  padding: 0.8rem 1rem;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+}
+
+.usage-log-stats dt {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.usage-log-stats dd {
+  margin: 0.2rem 0 0;
+  overflow: hidden;
+  font-size: 1.25rem;
+  font-weight: 700;
+  text-overflow: ellipsis;
+}
+
+.usage-log-results {
+  min-height: 9rem;
+}
+
+.usage-log-state {
+  padding: 2rem 1rem;
+  text-align: center;
+}
+
+.usage-log-state.error-panel p {
+  margin-top: 0;
+}
+
+.usage-log-table {
+  min-width: 920px;
+}
+
+.usage-log-table td {
+  max-width: 16rem;
+  overflow: hidden;
+  font-size: 0.82rem;
+  text-overflow: ellipsis;
+  vertical-align: top;
+  white-space: nowrap;
+}
+
+.usage-log-table code {
+  font-size: 0.76rem;
+}
+
+.usage-log-meta {
+  display: block;
+  max-width: 13rem;
+  margin-top: 0.25rem;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 0.72rem;
+  text-overflow: ellipsis;
+}
+
+.usage-log-pagination {
+  align-items: center;
+  justify-content: flex-end;
+  padding-top: 1rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+@media (max-width: 920px) {
+  .usage-log-filters {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 620px) {
+  .usage-logs-heading,
+.usage-log-panel-heading,
+.usage-log-pagination {
+    flex-wrap: wrap;
+  }
+
+  .usage-log-heading-actions {
+    flex-wrap: wrap;
+  }
+
+  .usage-log-filters {
+    grid-template-columns: 1fr;
+  }
+
+  .usage-log-stats {
+    grid-template-columns: 1fr;
+  }
+}

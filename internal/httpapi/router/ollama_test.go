@@ -53,7 +53,7 @@ func TestOllamaManagementRoutesUseNativeWireAndExactResponses(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	_, do, _ := setupChannelRead(t, roles.RoleRootUser)
+	_, do, _ := setupDashboardSession(t, roles.RoleRootUser)
 	channel := createSearchChannel(t, "ollama-ops", int(channelcatalog.ChannelTypeOllama), channelcatalog.ChannelStatusEnabled, "default", "llama3.2:latest", "", 0)
 	require.NoError(t, model.DB.Model(&channel).Updates(map[string]any{
 		"base_url": upstream.URL,
@@ -118,7 +118,7 @@ func TestOllamaManagementRoutesValidateChannelAndKeepCredentialsPrivate(t *testi
 	}))
 	defer upstream.Close()
 
-	_, do, _ := setupChannelRead(t, roles.RoleRootUser)
+	_, do, _ := setupDashboardSession(t, roles.RoleRootUser)
 	ollamaChannel := createSearchChannel(t, "ollama-error", int(channelcatalog.ChannelTypeOllama), channelcatalog.ChannelStatusEnabled, "default", "model", "", 0)
 	require.NoError(t, model.DB.Model(&ollamaChannel).Updates(map[string]any{
 		"base_url": upstream.URL,

@@ -33,6 +33,9 @@ const (
 	maxStripeCheckoutRedirectURLBytes        = 2048
 )
 
+// ErrStripeCheckoutResolverNotConfigured identifies an incomplete runtime assembly.
+var ErrStripeCheckoutResolverNotConfigured = errors.New("Stripe Checkout resolver is not configured")
+
 var ErrStripeCheckoutReconciliationLeaseLost = errors.New("Stripe Checkout reconciliation lease lost")
 
 var stripeReversalReviewEventTypes = map[string]struct{}{
@@ -119,7 +122,7 @@ var stripeCheckoutResolverRegistry struct {
 }
 
 // RegisterStripeCheckoutResolver installs the provider adapter used by the
-// service background job. Passing nil disables provider reconciliation.
+// service background job. A missing resolver is reported by reconciliation.
 func RegisterStripeCheckoutResolver(resolver StripeCheckoutResolver) {
 	stripeCheckoutResolverRegistry.Lock()
 	stripeCheckoutResolverRegistry.resolver = resolver
@@ -889,7 +892,10 @@ func markExhaustedStripeCheckoutReconciliations(ctx context.Context, now int64) 
 // is committed and never while a database transaction is held.
 func ReconcileStripeCheckoutOrders(ctx context.Context) error {
 	resolver := registeredStripeCheckoutResolver()
-	if resolver == nil || model.DB == nil {
+	if resolver == nil {
+		return ErrStripeCheckoutResolverNotConfigured
+	}
+	if model.DB == nil {
 		return nil
 	}
 	now, err := model.DatabaseUnixTimestamp(model.DB.WithContext(ctx))

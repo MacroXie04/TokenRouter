@@ -4,7 +4,7 @@ import (
 	"github.com/gin-gonic/gin"
 	channelcatalog "github.com/tokenrouter/tokenrouter/internal/channels/catalog"
 	"github.com/tokenrouter/tokenrouter/internal/httpapi/dto"
-	"github.com/tokenrouter/tokenrouter/internal/httpapi/handlers/pagination"
+	"github.com/tokenrouter/tokenrouter/internal/httpapi/pagination"
 	"github.com/tokenrouter/tokenrouter/internal/httpapi/requestctx"
 	operationssvc "github.com/tokenrouter/tokenrouter/internal/operations"
 	"github.com/tokenrouter/tokenrouter/internal/platform/jsonutil"

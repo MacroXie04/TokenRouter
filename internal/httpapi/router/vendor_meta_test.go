@@ -13,7 +13,7 @@ import (
 )
 
 func TestVendorMetadataCRUDSearchAndValidation(t *testing.T) {
-	_, do, _ := setupChannelRead(t, roles.RoleAdminUser)
+	_, do, _ := setupDashboardSession(t, roles.RoleAdminUser)
 	require.NoError(t, model.DB.AutoMigrate(&model.Vendor{}))
 
 	rec := do(http.MethodPost, "/api/vendors/", `{
@@ -79,7 +79,7 @@ func TestVendorMetadataCRUDSearchAndValidation(t *testing.T) {
 }
 
 func TestVendorMetadataAuthorization(t *testing.T) {
-	router, do, _ := setupChannelRead(t, roles.RoleCommonUser)
+	router, do, _ := setupDashboardSession(t, roles.RoleCommonUser)
 	require.NoError(t, model.DB.AutoMigrate(&model.Vendor{}))
 
 	rec := do(http.MethodGet, "/api/vendors/", "")

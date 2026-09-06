@@ -18,7 +18,7 @@ import (
 )
 
 func TestAddChannelRollsBackWhenAbilityCreationFails(t *testing.T) {
-	_, do, _ := setupChannelRead(t, roles.RoleRootUser)
+	_, do, _ := setupDashboardSession(t, roles.RoleRootUser)
 	var fail atomic.Bool
 	fail.Store(true)
 	callbackName := "test:fail_add_channel_ability"
@@ -51,7 +51,7 @@ func TestAddChannelRollsBackWhenAbilityCreationFails(t *testing.T) {
 }
 
 func TestUpdateChannelRollsBackWhenAbilityRebuildFails(t *testing.T) {
-	_, do, _ := setupChannelRead(t, roles.RoleRootUser)
+	_, do, _ := setupDashboardSession(t, roles.RoleRootUser)
 	channel := createSearchChannel(t, "atomic-update", int(channelcatalog.ChannelTypeOpenAI), channelcatalog.ChannelStatusEnabled, "default", "old-model", "", 0)
 	require.NoError(t, model.DB.Create(&model.Ability{
 		Group: "default", Model: "old-model", ChannelId: channel.Id, Enabled: true, Weight: 1,
@@ -88,7 +88,7 @@ func TestUpdateChannelRollsBackWhenAbilityRebuildFails(t *testing.T) {
 }
 
 func TestDeleteChannelRollsBackWhenAbilityDeleteFails(t *testing.T) {
-	_, do, _ := setupChannelRead(t, roles.RoleRootUser)
+	_, do, _ := setupDashboardSession(t, roles.RoleRootUser)
 	channel := createSearchChannel(t, "atomic-delete", int(channelcatalog.ChannelTypeOpenAI), channelcatalog.ChannelStatusEnabled, "default", "gpt-4o", "", 0)
 	require.NoError(t, model.DB.Create(&model.Ability{
 		Group: "default", Model: "gpt-4o", ChannelId: channel.Id, Enabled: true, Weight: 1,
@@ -122,7 +122,7 @@ func TestDeleteChannelRollsBackWhenAbilityDeleteFails(t *testing.T) {
 }
 
 func TestAddChannelReturnsAbilityCacheRefreshFailure(t *testing.T) {
-	_, do, _ := setupChannelRead(t, roles.RoleRootUser)
+	_, do, _ := setupDashboardSession(t, roles.RoleRootUser)
 	var fail atomic.Bool
 	fail.Store(true)
 	callbackName := "test:fail_add_channel_cache_refresh"
@@ -145,7 +145,7 @@ func TestAddChannelReturnsAbilityCacheRefreshFailure(t *testing.T) {
 }
 
 func TestDeleteChannelCacheRefreshFailureIsExplicitAndRetryable(t *testing.T) {
-	_, do, _ := setupChannelRead(t, roles.RoleRootUser)
+	_, do, _ := setupDashboardSession(t, roles.RoleRootUser)
 	channel := createSearchChannel(t, "delete-cache-refresh", int(channelcatalog.ChannelTypeOpenAI), channelcatalog.ChannelStatusEnabled, "default", "gpt-4o", "", 0)
 	require.NoError(t, model.DB.Create(&model.Ability{
 		Group: "default", Model: "gpt-4o", ChannelId: channel.Id, Enabled: true, Weight: 1,
@@ -177,7 +177,7 @@ func TestDeleteChannelCacheRefreshFailureIsExplicitAndRetryable(t *testing.T) {
 }
 
 func TestChannelStatusRollsBackWhenAbilityWriteFailsAndRetries(t *testing.T) {
-	_, do, _ := setupChannelRead(t, roles.RoleRootUser)
+	_, do, _ := setupDashboardSession(t, roles.RoleRootUser)
 	channel := createSearchChannel(t, "status-rollback", int(channelcatalog.ChannelTypeOpenAI), channelcatalog.ChannelStatusEnabled, "default", "gpt-4o", "", 0)
 	ability := model.Ability{Group: "default", Model: "gpt-4o", ChannelId: channel.Id, Enabled: true, Weight: 1}
 	require.NoError(t, model.DB.Create(&ability).Error)
@@ -213,7 +213,7 @@ func TestChannelStatusRollsBackWhenAbilityWriteFailsAndRetries(t *testing.T) {
 }
 
 func TestTagEditRollsBackAbilityRebuildFailureAndRetries(t *testing.T) {
-	_, do, _ := setupChannelRead(t, roles.RoleRootUser)
+	_, do, _ := setupDashboardSession(t, roles.RoleRootUser)
 	channel := createSearchChannel(t, "tag-rollback", int(channelcatalog.ChannelTypeOpenAI), channelcatalog.ChannelStatusEnabled, "default", "old-model", "atomic", 0)
 	tag := "atomic"
 	ability := model.Ability{Group: "default", Model: "old-model", ChannelId: channel.Id, Enabled: true, Weight: 1, Tag: &tag}
@@ -251,7 +251,7 @@ func TestTagEditRollsBackAbilityRebuildFailureAndRetries(t *testing.T) {
 }
 
 func TestTagStatusRollsBackAbilityWriteFailureAndRetries(t *testing.T) {
-	_, do, _ := setupChannelRead(t, roles.RoleRootUser)
+	_, do, _ := setupDashboardSession(t, roles.RoleRootUser)
 	channel := createSearchChannel(t, "tag-status-rollback", int(channelcatalog.ChannelTypeOpenAI), channelcatalog.ChannelStatusEnabled, "default", "gpt-4o", "atomic-status", 0)
 	tag := "atomic-status"
 	ability := model.Ability{Group: "default", Model: "gpt-4o", ChannelId: channel.Id, Enabled: true, Weight: 1, Tag: &tag}
@@ -287,7 +287,7 @@ func TestTagStatusRollsBackAbilityWriteFailureAndRetries(t *testing.T) {
 }
 
 func TestBatchDeleteRollsBackAfterAbilityDeleteAndRetries(t *testing.T) {
-	_, do, _ := setupChannelRead(t, roles.RoleRootUser)
+	_, do, _ := setupDashboardSession(t, roles.RoleRootUser)
 	channel := createSearchChannel(t, "batch-delete-rollback", int(channelcatalog.ChannelTypeOpenAI), channelcatalog.ChannelStatusEnabled, "default", "gpt-4o", "", 0)
 	ability := model.Ability{Group: "default", Model: "gpt-4o", ChannelId: channel.Id, Enabled: true, Weight: 1}
 	require.NoError(t, model.DB.Create(&ability).Error)
@@ -322,7 +322,7 @@ func TestBatchDeleteRollsBackAfterAbilityDeleteAndRetries(t *testing.T) {
 }
 
 func TestFixAbilitiesRollsBackFailedRebuildAndRetries(t *testing.T) {
-	_, do, _ := setupChannelRead(t, roles.RoleRootUser)
+	_, do, _ := setupDashboardSession(t, roles.RoleRootUser)
 	channel := createSearchChannel(t, "fix-rollback", int(channelcatalog.ChannelTypeOpenAI), channelcatalog.ChannelStatusEnabled, "default", "new-model", "", 0)
 	stale := model.Ability{Group: "default", Model: "stale-model", ChannelId: channel.Id, Enabled: true, Weight: 1}
 	require.NoError(t, model.DB.Create(&stale).Error)
@@ -354,7 +354,7 @@ func TestFixAbilitiesRollsBackFailedRebuildAndRetries(t *testing.T) {
 }
 
 func TestCopyChannelRollsBackAbilityCreationFailureAndRetries(t *testing.T) {
-	_, do, _ := setupChannelRead(t, roles.RoleRootUser)
+	_, do, _ := setupDashboardSession(t, roles.RoleRootUser)
 	origin := createSearchChannel(t, "copy-rollback", int(channelcatalog.ChannelTypeOpenAI), channelcatalog.ChannelStatusEnabled, "default", "gpt-4o", "", 0)
 
 	var fail atomic.Bool
@@ -386,7 +386,7 @@ func TestCopyChannelRollsBackAbilityCreationFailureAndRetries(t *testing.T) {
 }
 
 func TestChannelTestDoesNotClaimSuccessWhenResultPersistenceFails(t *testing.T) {
-	_, do, _ := setupChannelRead(t, roles.RoleRootUser)
+	_, do, _ := setupDashboardSession(t, roles.RoleRootUser)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))

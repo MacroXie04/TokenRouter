@@ -9,13 +9,11 @@ import (
 	billingsvc "github.com/tokenrouter/tokenrouter/internal/billing"
 	channelssvc "github.com/tokenrouter/tokenrouter/internal/channels"
 	channelcatalog "github.com/tokenrouter/tokenrouter/internal/channels/catalog"
-	"github.com/tokenrouter/tokenrouter/internal/httpapi/middleware"
-	"github.com/tokenrouter/tokenrouter/internal/httpapi/requestctx"
-	operationssvc "github.com/tokenrouter/tokenrouter/internal/operations"
 	wallclock "github.com/tokenrouter/tokenrouter/internal/platform/clock"
 	"github.com/tokenrouter/tokenrouter/internal/platform/httpx"
 	"github.com/tokenrouter/tokenrouter/internal/platform/jsonutil"
 	"github.com/tokenrouter/tokenrouter/internal/platform/logging"
+	relaycommon "github.com/tokenrouter/tokenrouter/internal/relay/contract"
 	"github.com/tokenrouter/tokenrouter/internal/relay/providers/suno"
 	model "github.com/tokenrouter/tokenrouter/internal/store"
 	"gorm.io/gorm"
@@ -30,14 +28,9 @@ type sunoProvider interface {
 
 var newSunoProvider = func() sunoProvider { return &suno.Client{} }
 
-func init() {
-	operationssvc.RegisterAsyncTaskPromoter(PromoteSunoTaskRecoveryJournalsContext)
-	operationssvc.RegisterAsyncTaskReconciler(reconcileAsyncSunoTasks)
-}
-
 // RelaySunoTask submits a MUSIC or LYRICS task. A quota reservation and
 // no-retry dispatch fence are committed before the provider can be contacted.
-func RelaySunoTask(c *gin.Context) {
+func RelaySunoTask(c *gin.Context, state relaycommon.RequestState) {
 	raw, err := httpx.ReadAllLimited(c.Request.Body, suno.MaxRequestBodyBytes)
 	if err != nil {
 		status := http.StatusBadRequest
@@ -57,9 +50,9 @@ func RelaySunoTask(c *gin.Context) {
 		return
 	}
 
-	userID := requestctx.GetUserId(c)
-	token := middleware.GetRelayToken(c)
-	groups := middleware.GetTokenGroups(c)
+	userID := state.UserID
+	token := state.Token
+	groups := state.Groups
 	if userID <= 0 || token == nil {
 		writeSunoTaskError(c, http.StatusInternalServerError, "auth_context_missing", "relay token context is missing")
 		return
@@ -68,7 +61,7 @@ func RelaySunoTask(c *gin.Context) {
 		writeSunoTaskError(c, http.StatusForbidden, "group_not_allowed", "token group is unavailable")
 		return
 	}
-	if !middleware.RelayModelAllowed(c, prepared.Model) {
+	if !state.Allows(prepared.Model) {
 		writeSunoTaskError(c, http.StatusForbidden, "model_not_allowed", "token is not allowed to access this model")
 		return
 	}
@@ -97,7 +90,7 @@ func RelaySunoTask(c *gin.Context) {
 			writeSunoTaskError(c, http.StatusBadRequest, "task_not_ready", "origin Suno task is not completed music")
 			return
 		}
-		if !containsSunoGroup(groups, origin.Group) || !middleware.RelayModelAllowed(c, originProperties.OriginModelName) {
+		if !containsSunoGroup(groups, origin.Group) || !state.Allows(originProperties.OriginModelName) {
 			writeSunoTaskError(c, http.StatusForbidden, "task_not_allowed", "token is not allowed to continue this Suno task")
 			return
 		}
@@ -172,7 +165,7 @@ func RelaySunoTask(c *gin.Context) {
 		}
 	}
 	pricing, enabled, err := billingsvc.ResolveReferenceAsyncTaskBillingPlanForUser(
-		userID, prepared.Model, requestctx.GetUserGroup(c), usingGroup,
+		userID, prepared.Model, state.UserGroup, usingGroup,
 	)
 	if err != nil || !enabled {
 		writeSunoTaskError(c, http.StatusBadRequest, "model_price_error", "Suno model requires explicit reference pricing")
@@ -314,12 +307,12 @@ func RelaySunoTask(c *gin.Context) {
 
 // RelaySunoTaskFetch implements both the exact POST batch and GET-by-id local
 // fetch surfaces. It never calls the provider and never exposes private IDs.
-func RelaySunoTaskFetch(c *gin.Context) {
+func RelaySunoTaskFetch(c *gin.Context, state relaycommon.RequestState) {
 	if c.Request.Method == http.MethodGet {
-		fetchSunoTaskByID(c)
+		fetchSunoTaskByID(c, state)
 		return
 	}
-	fetchSunoTasks(c)
+	fetchSunoTasks(c, state)
 }
 
 type sunoFetchRequest struct {
@@ -327,7 +320,7 @@ type sunoFetchRequest struct {
 	Action string   `json:"action"`
 }
 
-func fetchSunoTasks(c *gin.Context) {
+func fetchSunoTasks(c *gin.Context, state relaycommon.RequestState) {
 	raw, err := httpx.ReadAllLimited(c.Request.Body, sunoFetchRequestMaxBytes)
 	if err != nil {
 		status := http.StatusBadRequest
@@ -367,7 +360,7 @@ func fetchSunoTasks(c *gin.Context) {
 	}
 	var tasks []model.Task
 	if err := model.DB.Where("task_id IN ? AND user_id = ? AND platform = ?", request.IDs,
-		requestctx.GetUserId(c), sunoTaskPlatform).Find(&tasks).Error; err != nil {
+		state.UserID, sunoTaskPlatform).Find(&tasks).Error; err != nil {
 		writeSunoTaskError(c, http.StatusInternalServerError, "get_tasks_failed", "failed to query Suno tasks")
 		return
 	}
@@ -387,7 +380,7 @@ func fetchSunoTasks(c *gin.Context) {
 			writeSunoTaskError(c, http.StatusInternalServerError, "task_data_invalid", "Suno task metadata is invalid")
 			return
 		}
-		if !authorizeSunoTaskRead(c, task, properties) {
+		if !authorizeSunoTaskRead(c, state, task, properties) {
 			return
 		}
 		dto, err := sunoTaskDTOFromModel(task)
@@ -405,7 +398,7 @@ func fetchSunoTasks(c *gin.Context) {
 	writeSunoTaskSuccess(c, output)
 }
 
-func fetchSunoTaskByID(c *gin.Context) {
+func fetchSunoTaskByID(c *gin.Context, state relaycommon.RequestState) {
 	taskID := strings.TrimSpace(c.Param("id"))
 	if validateSunoTaskPublicID(taskID) != nil {
 		writeSunoTaskError(c, http.StatusBadRequest, "invalid_request", "Suno task id is invalid")
@@ -413,7 +406,7 @@ func fetchSunoTaskByID(c *gin.Context) {
 	}
 	var task model.Task
 	err := model.DB.Where("task_id = ? AND user_id = ? AND platform = ?", taskID,
-		requestctx.GetUserId(c), sunoTaskPlatform).First(&task).Error
+		state.UserID, sunoTaskPlatform).First(&task).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			writeSunoTaskError(c, http.StatusBadRequest, "task_not_exist", "task_not_exist")
@@ -427,7 +420,7 @@ func fetchSunoTaskByID(c *gin.Context) {
 		writeSunoTaskError(c, http.StatusInternalServerError, "task_data_invalid", "Suno task metadata is invalid")
 		return
 	}
-	if !authorizeSunoTaskRead(c, &task, properties) {
+	if !authorizeSunoTaskRead(c, state, &task, properties) {
 		return
 	}
 	dto, err := sunoTaskDTOFromModel(&task)
@@ -438,12 +431,12 @@ func fetchSunoTaskByID(c *gin.Context) {
 	writeSunoTaskSuccess(c, dto)
 }
 
-func authorizeSunoTaskRead(c *gin.Context, task *model.Task, properties sunoTaskProperties) bool {
-	if task == nil || !containsSunoGroup(middleware.GetTokenGroups(c), task.Group) {
+func authorizeSunoTaskRead(c *gin.Context, state relaycommon.RequestState, task *model.Task, properties sunoTaskProperties) bool {
+	if task == nil || !containsSunoGroup(state.Groups, task.Group) {
 		writeSunoTaskError(c, http.StatusForbidden, "group_not_allowed", "token is not allowed to access this task group")
 		return false
 	}
-	if !middleware.RelayModelAllowed(c, properties.OriginModelName) {
+	if !state.Allows(properties.OriginModelName) {
 		writeSunoTaskError(c, http.StatusForbidden, "model_not_allowed", "token is not allowed to access this model")
 		return false
 	}

@@ -73,7 +73,7 @@ func mustJSON(v any) string {
 }
 
 func TestLogsStatContract(t *testing.T) {
-	_, do, _ := setupChannelRead(t, roles.RoleRootUser)
+	_, do, _ := setupDashboardSession(t, roles.RoleRootUser)
 	now := wallclock.NowTimestamp()
 	insertLogRow(t, 1, 1, 5, "alice", "tok-a", "gpt-4o", "default", 100, 50, 60, now-10, nil)
 	insertLogRow(t, 1, 1, 5, "alice", "tok-a", "gpt-4o", "default", 40, 20, 30, now-10, nil)
@@ -112,7 +112,7 @@ func TestLogsStatContract(t *testing.T) {
 }
 
 func TestLogsSelfStatContract(t *testing.T) {
-	_, do, uid := setupChannelRead(t, roles.RoleRootUser)
+	_, do, uid := setupDashboardSession(t, roles.RoleRootUser)
 	now := wallclock.NowTimestamp()
 	insertLogRow(t, uid, 1, 5, "chreader", "tok-a", "gpt-4o", "default", 60, 10, 20, now-5, nil)
 	insertLogRow(t, 999, 1, 5, "someone-else", "tok-x", "gpt-4o", "default", 900, 0, 0, now-5, nil)
@@ -126,7 +126,7 @@ func TestLogsSelfStatContract(t *testing.T) {
 }
 
 func TestLogsListAndSelfContracts(t *testing.T) {
-	handler, doRoot, rootID := setupChannelRead(t, roles.RoleRootUser)
+	handler, doRoot, rootID := setupDashboardSession(t, roles.RoleRootUser)
 	other := model.User{Username: "loguser", Password: "pw", Role: roles.RoleCommonUser,
 		Status: model.UserStatusEnabled, Quota: 1000, AuthVersion: 1}
 	require.NoError(t, model.DB.Create(&other).Error)
@@ -201,7 +201,7 @@ func TestLogsListAndSelfContracts(t *testing.T) {
 }
 
 func TestLogByKeyContract(t *testing.T) {
-	handler, _, _ := setupChannelRead(t, roles.RoleRootUser)
+	handler, _, _ := setupDashboardSession(t, roles.RoleRootUser)
 	now := wallclock.NowTimestamp()
 	// A relay token belonging to the root user.
 	token := model.Token{UserId: 1, Key: "sk-test-token-key", Name: "logtok", Status: 1,
@@ -241,7 +241,7 @@ func TestLogByKeyContract(t *testing.T) {
 }
 
 func TestLogsStatRejectsBadPattern(t *testing.T) {
-	_, do, _ := setupChannelRead(t, roles.RoleRootUser)
+	_, do, _ := setupDashboardSession(t, roles.RoleRootUser)
 	rec := do(http.MethodGet, "/api/log/stat?model_name=%25%25", "")
 	body := decodeBody(t, rec)
 	assert.Equal(t, false, body["success"])
@@ -249,7 +249,7 @@ func TestLogsStatRejectsBadPattern(t *testing.T) {
 }
 
 func TestLogQueriesRejectOversizedControlAndDuplicateFilters(t *testing.T) {
-	_, do, _ := setupChannelRead(t, roles.RoleRootUser)
+	_, do, _ := setupDashboardSession(t, roles.RoleRootUser)
 
 	tests := []struct {
 		path        string

@@ -45,7 +45,7 @@ func configureControllerAffinity(t *testing.T) string {
 }
 
 func TestChannelAffinityCacheControllerContract(t *testing.T) {
-	_, do, _ := setupChannelRead(t, roles.RoleRootUser)
+	_, do, _ := setupDashboardSession(t, roles.RoleRootUser)
 	ruleName := configureControllerAffinity(t)
 
 	rec := do(http.MethodGet, "/api/option/channel_affinity_cache", "")
@@ -76,7 +76,7 @@ func TestChannelAffinityCacheControllerContract(t *testing.T) {
 }
 
 func TestChannelAffinityUsageControllerContractAndRoles(t *testing.T) {
-	handler, rootDo, _ := setupChannelRead(t, roles.RoleRootUser)
+	handler, rootDo, _ := setupDashboardSession(t, roles.RoleRootUser)
 
 	rec := rootDo(http.MethodGet, "/api/log/channel_affinity_usage_cache", "")
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
@@ -98,13 +98,13 @@ func TestChannelAffinityUsageControllerContractAndRoles(t *testing.T) {
 	handler.ServeHTTP(unauthenticated, httptest.NewRequest(http.MethodGet, "/api/log/channel_affinity_usage_cache?rule_name=r&key_fp=k", nil))
 	assert.Equal(t, http.StatusUnauthorized, unauthenticated.Code)
 
-	_, adminDo, _ := setupChannelRead(t, roles.RoleAdminUser)
+	_, adminDo, _ := setupDashboardSession(t, roles.RoleAdminUser)
 	assert.Equal(t, http.StatusOK, adminDo(http.MethodGet, "/api/log/channel_affinity_usage_cache?rule_name=r&key_fp=k", "").Code)
 	assert.Equal(t, http.StatusForbidden, adminDo(http.MethodGet, "/api/option/channel_affinity_cache", "").Code)
 }
 
 func TestChannelAffinityOptionValidation(t *testing.T) {
-	_, do, _ := setupChannelRead(t, roles.RoleRootUser)
+	_, do, _ := setupDashboardSession(t, roles.RoleRootUser)
 	original := setting.GetOption(setting.ChannelAffinityRulesOption)
 	requestBody, err := json.Marshal(map[string]any{
 		"key":   setting.ChannelAffinityRulesOption,

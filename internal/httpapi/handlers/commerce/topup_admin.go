@@ -5,7 +5,7 @@ import (
 	"github.com/gin-gonic/gin"
 	billingsvc "github.com/tokenrouter/tokenrouter/internal/billing"
 	"github.com/tokenrouter/tokenrouter/internal/httpapi/dto"
-	"github.com/tokenrouter/tokenrouter/internal/httpapi/handlers/pagination"
+	"github.com/tokenrouter/tokenrouter/internal/httpapi/pagination"
 	"github.com/tokenrouter/tokenrouter/internal/httpapi/requestctx"
 	"net/http"
 	"strings"

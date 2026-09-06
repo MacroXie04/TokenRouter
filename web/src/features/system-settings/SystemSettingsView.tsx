@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { WaffoPancakeAdminPanel } from '../wallet/WaffoPancakeAdminPanel';
+import { WaffoPancakeAdminPanel } from "../wallet";
 import { CustomOAuthPanel } from './CustomOAuthPanel';
 import { LogMaintenancePanel } from './LogMaintenancePanel';
 import {

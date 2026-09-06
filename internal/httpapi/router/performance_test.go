@@ -55,7 +55,7 @@ func TestPerformanceManagementRoutesRequireRoot(t *testing.T) {
 		assert.Equal(t, http.StatusUnauthorized, recorder.Code, route.method+" "+route.path)
 	}
 
-	_, adminRequest, _ := setupChannelRead(t, roles.RoleAdminUser)
+	_, adminRequest, _ := setupDashboardSession(t, roles.RoleAdminUser)
 	for _, route := range routes {
 		recorder := adminRequest(route.method, route.path, "")
 		assert.Equal(t, http.StatusForbidden, recorder.Code, route.method+" "+route.path)
@@ -86,7 +86,7 @@ func TestPerformanceStatsResetAndGCContracts(t *testing.T) {
 	operationssvc.RecordPerformanceDiskCacheHit()
 	operationssvc.RecordPerformanceMemoryCacheHit()
 
-	_, do, _ := setupChannelRead(t, roles.RoleRootUser)
+	_, do, _ := setupDashboardSession(t, roles.RoleRootUser)
 	recorder := do(http.MethodGet, "/api/performance/stats", "")
 	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 	assert.Contains(t, recorder.Header().Get("Cache-Control"), "no-store")
@@ -163,7 +163,7 @@ func TestPerformanceDiskCacheCleanupIsBoundedAndSymlinkSafe(t *testing.T) {
 
 	t.Setenv("TOKENROUTER_DISK_CACHE_PATH", cacheBase)
 	t.Setenv("TOKENROUTER_PERFORMANCE_SCAN_LIMIT", "64")
-	_, do, _ := setupChannelRead(t, roles.RoleRootUser)
+	_, do, _ := setupDashboardSession(t, roles.RoleRootUser)
 	recorder := do(http.MethodDelete, "/api/performance/disk_cache", "")
 	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 	body := decodeBody(t, recorder)
@@ -257,7 +257,7 @@ func TestPerformanceLogListAndCleanupContracts(t *testing.T) {
 
 	t.Setenv("TOKENROUTER_LOG_DIR", logDirectory)
 	t.Setenv("TOKENROUTER_PERFORMANCE_SCAN_LIMIT", "64")
-	_, do, _ := setupChannelRead(t, roles.RoleRootUser)
+	_, do, _ := setupDashboardSession(t, roles.RoleRootUser)
 	recorder := do(http.MethodGet, "/api/performance/logs", "")
 	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 	body := decodeBody(t, recorder)
@@ -306,7 +306,7 @@ func TestPerformanceLogListAndCleanupContracts(t *testing.T) {
 func TestPerformanceLogMaintenanceRejectsTraversalSymlinksBoundsAndFailures(t *testing.T) {
 	t.Setenv("TOKENROUTER_LOG_DIR", "")
 	t.Setenv("LOG_DIR", "")
-	_, do, _ := setupChannelRead(t, roles.RoleRootUser)
+	_, do, _ := setupDashboardSession(t, roles.RoleRootUser)
 
 	recorder := do(http.MethodGet, "/api/performance/logs", "")
 	body := decodeBody(t, recorder)

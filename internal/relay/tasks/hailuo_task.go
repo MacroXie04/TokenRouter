@@ -8,9 +8,6 @@ import (
 	billingsvc "github.com/tokenrouter/tokenrouter/internal/billing"
 	channelssvc "github.com/tokenrouter/tokenrouter/internal/channels"
 	channelcatalog "github.com/tokenrouter/tokenrouter/internal/channels/catalog"
-	"github.com/tokenrouter/tokenrouter/internal/httpapi/middleware"
-	"github.com/tokenrouter/tokenrouter/internal/httpapi/requestctx"
-	operationssvc "github.com/tokenrouter/tokenrouter/internal/operations"
 	wallclock "github.com/tokenrouter/tokenrouter/internal/platform/clock"
 	"github.com/tokenrouter/tokenrouter/internal/platform/httpx"
 	"github.com/tokenrouter/tokenrouter/internal/platform/logging"
@@ -30,15 +27,10 @@ type hailuoProvider interface {
 var newHailuoProvider = func() hailuoProvider { return &hailuo.Client{} }
 var newHailuoContentHTTPClient = hailuo.NewHTTPClient
 
-func init() {
-	operationssvc.RegisterAsyncTaskPromoter(PromoteHailuoTaskRecoveryJournalsContext)
-	operationssvc.RegisterAsyncTaskReconciler(reconcileAsyncHailuoTasks)
-}
-
 // RelayHailuoTask submits a Hailuo task through the generic reference video
 // surfaces. Provider identity, credentials, and pricing are snapshotted before
 // dispatch and are never returned to the caller.
-func RelayHailuoTask(c *gin.Context) {
+func RelayHailuoTask(c *gin.Context, state relaycommon.RequestState) {
 	raw, err := httpx.ReadAllLimited(c.Request.Body, hailuo.MaxRequestBodyBytes)
 	if err != nil {
 		status := http.StatusBadRequest
@@ -53,9 +45,9 @@ func RelayHailuoTask(c *gin.Context) {
 	if contentType == "" {
 		contentType = "application/json"
 	}
-	userID := requestctx.GetUserId(c)
-	token := middleware.GetRelayToken(c)
-	groups := middleware.GetTokenGroups(c)
+	userID := state.UserID
+	token := state.Token
+	groups := state.Groups
 	if userID <= 0 || token == nil {
 		writeHailuoTaskError(c, http.StatusInternalServerError, "auth_context_missing", "relay token context is missing", nil)
 		return
@@ -69,7 +61,7 @@ func RelayHailuoTask(c *gin.Context) {
 		writeHailuoTaskError(c, http.StatusBadRequest, "invalid_request", err.Error(), nil)
 		return
 	}
-	if !middleware.RelayModelAllowed(c, originModel) {
+	if !state.Allows(originModel) {
 		writeHailuoTaskError(c, http.StatusForbidden, "model_not_allowed", "token is not allowed to access model "+originModel, nil)
 		return
 	}
@@ -99,7 +91,7 @@ func RelayHailuoTask(c *gin.Context) {
 		return
 	}
 	pricing, enabled, err := billingsvc.ResolveReferenceAsyncTaskBillingPlanForUser(
-		userID, originModel, requestctx.GetUserGroup(c), usingGroup,
+		userID, originModel, state.UserGroup, usingGroup,
 	)
 	if err != nil || !enabled {
 		if err != nil {
@@ -264,7 +256,7 @@ func RelayHailuoTask(c *gin.Context) {
 
 // RelayHailuoTaskFetch returns only a user-owned local record and never contacts
 // Hailuo or decrypts the provider credential snapshot.
-func RelayHailuoTaskFetch(c *gin.Context) {
+func RelayHailuoTaskFetch(c *gin.Context, state relaycommon.RequestState) {
 	taskID := strings.TrimSpace(c.Param("task_id"))
 	if taskID == "" {
 		taskID = strings.TrimSpace(c.Query("task_id"))
@@ -275,7 +267,7 @@ func RelayHailuoTaskFetch(c *gin.Context) {
 	}
 	var tasks []model.Task
 	if err := model.DB.Where("task_id = ? AND user_id = ? AND platform = ?", taskID,
-		requestctx.GetUserId(c), hailuoTaskPlatform).Limit(2).Find(&tasks).Error; err != nil {
+		state.UserID, hailuoTaskPlatform).Limit(2).Find(&tasks).Error; err != nil {
 		writeHailuoTaskError(c, http.StatusInternalServerError, "task_query_failed", "failed to query Hailuo task", nil)
 		return
 	}
@@ -293,7 +285,7 @@ func RelayHailuoTaskFetch(c *gin.Context) {
 		writeHailuoTaskError(c, http.StatusInternalServerError, "task_data_invalid", "Hailuo task metadata is invalid", nil)
 		return
 	}
-	if !authorizeHailuoTaskRead(c, task, properties) {
+	if !authorizeHailuoTaskRead(c, state, task, properties) {
 		return
 	}
 	if strings.HasPrefix(c.Request.URL.Path, "/v1/video/generations/") || c.Request.URL.Path == "/v1/video/fetch" {
@@ -313,13 +305,13 @@ func RelayHailuoTaskFetch(c *gin.Context) {
 	c.JSON(http.StatusOK, response)
 }
 
-func relayHailuoTaskContent(c *gin.Context, task *model.Task) {
+func relayHailuoTaskContent(c *gin.Context, state relaycommon.RequestState, task *model.Task) {
 	properties, err := decodeHailuoTaskProperties(task.Properties)
 	if err != nil || string(properties.Action) != task.Action {
 		writeHailuoTaskError(c, http.StatusInternalServerError, "server_error", "Hailuo task metadata is invalid", nil)
 		return
 	}
-	if !authorizeHailuoTaskRead(c, task, properties) {
+	if !authorizeHailuoTaskRead(c, state, task, properties) {
 		return
 	}
 	if task.Status != model.TaskStatusSuccess {
@@ -386,15 +378,15 @@ func selectHailuoChannel(groups []string, modelName string) (*model.Channel, str
 	return nil, "", channelssvc.ErrChannelNotFound
 }
 
-func authorizeHailuoTaskRead(c *gin.Context, task *model.Task, properties hailuoTaskProperties) bool {
-	if middleware.GetRelayToken(c) == nil {
+func authorizeHailuoTaskRead(c *gin.Context, state relaycommon.RequestState, task *model.Task, properties hailuoTaskProperties) bool {
+	if state.Token == nil {
 		return true
 	}
-	if !containsVideoGroup(middleware.GetTokenGroups(c), task.Group) {
+	if !containsVideoGroup(state.Groups, task.Group) {
 		writeHailuoTaskError(c, http.StatusForbidden, "group_not_allowed", "token is not allowed to access this task group", nil)
 		return false
 	}
-	if !middleware.RelayModelAllowed(c, properties.OriginModelName) {
+	if !state.Allows(properties.OriginModelName) {
 		writeHailuoTaskError(c, http.StatusForbidden, "model_not_allowed", "token is not allowed to access this model", nil)
 		return false
 	}

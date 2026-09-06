@@ -10,6 +10,7 @@ import (
 	billingsvc "github.com/tokenrouter/tokenrouter/internal/billing"
 	channelssvc "github.com/tokenrouter/tokenrouter/internal/channels"
 	channelcatalog "github.com/tokenrouter/tokenrouter/internal/channels/catalog"
+	"github.com/tokenrouter/tokenrouter/internal/httpapi/middleware"
 	relaycommon "github.com/tokenrouter/tokenrouter/internal/relay/contract"
 	"github.com/tokenrouter/tokenrouter/internal/relay/providers/xunfei"
 	model "github.com/tokenrouter/tokenrouter/internal/store"
@@ -140,7 +141,7 @@ func TestXunfeiLifecycleSettlesExactUsageAndUsesFixedSignedWire(t *testing.T) {
 	adaptor := &xunfei.Adaptor{DialContext: dial, Now: func() time.Time {
 		return time.Date(2025, time.January, 2, 3, 4, 5, 0, time.UTC)
 	}}
-	require.NoError(t, relayAndSettleWithDispatch(c, info, dispatchXunfeiLifecycle(adaptor)))
+	require.NoError(t, relayAndSettleWithDispatch(c, middleware.CaptureRelayRequestState(c), info, dispatchXunfeiLifecycle(adaptor)))
 	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 	assert.Contains(t, recorder.Body.String(), `"content":"spark answer"`)
 	assert.NotContains(t, recorder.Body.String(), "app-id-1234")
@@ -191,7 +192,7 @@ func TestXunfeiStreamingLifecycleSettlesTerminalUsage(t *testing.T) {
 	adaptor := &xunfei.Adaptor{DialContext: dial, Now: func() time.Time {
 		return time.Date(2025, time.January, 2, 3, 4, 5, 0, time.UTC)
 	}}
-	require.NoError(t, relayAndSettleWithDispatch(c, info, dispatchXunfeiLifecycle(adaptor)))
+	require.NoError(t, relayAndSettleWithDispatch(c, middleware.CaptureRelayRequestState(c), info, dispatchXunfeiLifecycle(adaptor)))
 	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 	assert.Contains(t, recorder.Body.String(), `"content":"stream answer"`)
 	assert.Equal(t, 1, strings.Count(recorder.Body.String(), "data: [DONE]\n\n"))
@@ -217,7 +218,7 @@ func TestXunfeiProviderFailureIsSanitizedAndRefundsReservation(t *testing.T) {
 		xunfeiTerminalFrame(10013, 0, 0, "", "api-secret-5678 api-key-9012"),
 	})
 	adaptor := &xunfei.Adaptor{DialContext: dial}
-	require.NoError(t, relayAndSettleWithDispatch(c, info, dispatchXunfeiLifecycle(adaptor)))
+	require.NoError(t, relayAndSettleWithDispatch(c, middleware.CaptureRelayRequestState(c), info, dispatchXunfeiLifecycle(adaptor)))
 	assert.Equal(t, http.StatusBadGateway, recorder.Code)
 	assert.NotContains(t, recorder.Body.String(), "app-id-1234")
 	assert.NotContains(t, recorder.Body.String(), "api-secret-5678")

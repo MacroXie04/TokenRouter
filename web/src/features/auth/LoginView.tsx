@@ -7,7 +7,8 @@ import {
   serializeAssertionCredential,
 } from '../../shared/browser/webauthn';
 import { parsePublicStatus, type PublicStatusInfo } from '../../shared/config/public-status';
-import { parseTurnstileConfig, turnstileParams, TurnstileWidget } from '../security/TurnstileWidget';
+import { parseTurnstileConfig, turnstileParams } from "../security";
+import { TurnstileWidget } from "../security";
 import { authGet, authPost, isCanceledAuthRequest } from './auth-api';
 import {
   authenticatedUserFromBundle,

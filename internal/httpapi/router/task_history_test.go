@@ -52,7 +52,7 @@ func TestJimengTaskHistoryNeverReturnsLegacyProviderBodies(t *testing.T) {
 
 func setupTaskHistory(t *testing.T, role int) (http.Handler, func(method, path, body string) *httptest.ResponseRecorder, int) {
 	t.Helper()
-	handler, do, userID := setupChannelRead(t, role)
+	handler, do, userID := setupDashboardSession(t, role)
 	require.NoError(t, model.DB.AutoMigrate(&model.Midjourney{}, &model.Task{}))
 	return handler, do, userID
 }

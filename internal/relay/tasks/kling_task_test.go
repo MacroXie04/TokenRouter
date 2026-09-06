@@ -142,7 +142,7 @@ func TestKlingFourRoutesUseBodyDrivenActionAndLocalFetch(t *testing.T) {
 	taskIDs := make([]string, 0, len(tests))
 	for _, test := range tests {
 		c, recorder := klingLifecycleContext(t, fixture, http.MethodPost, test.submitPath, test.body, "")
-		RelayKlingTask(c)
+		RelayKlingTask(c, middleware.CaptureRelayRequestState(c))
 		require.Equal(t, http.StatusOK, recorder.Code, test.name+": "+recorder.Body.String())
 		taskID := decodeKlingSubmitTaskID(t, recorder)
 		assert.NotContains(t, recorder.Body.String(), "provider-")
@@ -166,7 +166,7 @@ func TestKlingFourRoutesUseBodyDrivenActionAndLocalFetch(t *testing.T) {
 	for index, test := range tests {
 		fetchPath := "/kling/v1/videos/" + string(test.expectedAction) + "/" + taskIDs[index]
 		c, recorder := klingLifecycleContext(t, fixture, http.MethodGet, fetchPath, "", taskIDs[index])
-		RelayKlingTaskFetch(c)
+		RelayKlingTaskFetch(c, middleware.CaptureRelayRequestState(c))
 		require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 		assert.Contains(t, recorder.Body.String(), taskIDs[index])
 		assert.NotContains(t, recorder.Body.String(), "provider-")
@@ -175,7 +175,7 @@ func TestKlingFourRoutesUseBodyDrivenActionAndLocalFetch(t *testing.T) {
 
 	wrongPath := "/kling/v1/videos/image2video/" + taskIDs[0]
 	c, recorder := klingLifecycleContext(t, fixture, http.MethodGet, wrongPath, "", taskIDs[0])
-	RelayKlingTaskFetch(c)
+	RelayKlingTaskFetch(c, middleware.CaptureRelayRequestState(c))
 	assert.Equal(t, http.StatusNotFound, recorder.Code)
 	assert.Equal(t, int32(len(tests)), providerCalls.Load())
 }
@@ -200,7 +200,7 @@ func TestKlingDirectChannelUsesJWTAndOfficialRoute(t *testing.T) {
 
 	c, recorder := klingLifecycleContext(t, fixture, http.MethodPost, "/kling/v1/videos/text2video",
 		`{"model":"kling-v1","prompt":"direct"}`, "")
-	RelayKlingTask(c)
+	RelayKlingTask(c, middleware.CaptureRelayRequestState(c))
 	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 	assert.NotContains(t, recorder.Body.String(), "provider-direct")
 }
@@ -227,7 +227,7 @@ func TestKlingBackgroundPollSettlesImmutableRatioExactlyOnce(t *testing.T) {
 
 	c, recorder := klingLifecycleContext(t, fixture, http.MethodPost, "/kling/v1/videos/text2video",
 		`{"model":"kling-v1","prompt":"ratio"}`, "")
-	RelayKlingTask(c)
+	RelayKlingTask(c, middleware.CaptureRelayRequestState(c))
 	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 	taskID := decodeKlingSubmitTaskID(t, recorder)
 
@@ -289,7 +289,7 @@ func TestKlingBackgroundPollSettlesImmutableRatioExactlyOnce(t *testing.T) {
 
 	fetchPath := "/kling/v1/videos/text2video/" + taskID
 	c, recorder = klingLifecycleContext(t, fixture, http.MethodGet, fetchPath, "", taskID)
-	RelayKlingTaskFetch(c)
+	RelayKlingTaskFetch(c, middleware.CaptureRelayRequestState(c))
 	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 	assert.Contains(t, recorder.Body.String(), "https://cdn.example/result.mp4")
 	assert.Equal(t, int32(2), providerCalls.Load())
@@ -307,7 +307,7 @@ func TestKlingTerminalFailureRefundsAndAmbiguousDispatchStaysHeld(t *testing.T) 
 
 		c, recorder := klingLifecycleContext(t, fixture, http.MethodPost, "/kling/v1/videos/text2video",
 			`{"model":"kling-v1","prompt":"fail"}`, "")
-		RelayKlingTask(c)
+		RelayKlingTask(c, middleware.CaptureRelayRequestState(c))
 		require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 		taskID := decodeKlingSubmitTaskID(t, recorder)
 		var task model.Task
@@ -339,7 +339,7 @@ func TestKlingTerminalFailureRefundsAndAmbiguousDispatchStaysHeld(t *testing.T) 
 
 		c, recorder := klingLifecycleContext(t, fixture, http.MethodPost, "/kling/v1/videos/text2video",
 			`{"model":"kling-v1","prompt":"ambiguous"}`, "")
-		RelayKlingTask(c)
+		RelayKlingTask(c, middleware.CaptureRelayRequestState(c))
 		require.Equal(t, http.StatusAccepted, recorder.Code, recorder.Body.String())
 		var task model.Task
 		var operation model.TaskOperation
@@ -408,7 +408,7 @@ func TestKlingAmbiguousDispatchManualSettleIsAtomicAndIdempotent(t *testing.T) {
 
 	c, recorder := klingLifecycleContext(t, fixture, http.MethodPost, "/kling/v1/videos/text2video",
 		`{"model":"kling-v1","prompt":"ambiguous settle"}`, "")
-	RelayKlingTask(c)
+	RelayKlingTask(c, middleware.CaptureRelayRequestState(c))
 	require.Equal(t, http.StatusAccepted, recorder.Code, recorder.Body.String())
 	var task model.Task
 	var reservation model.RelayQuotaReservationRecord

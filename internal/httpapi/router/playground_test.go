@@ -54,7 +54,7 @@ func TestPlaygroundChatCompletionsContract(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	handler, do, userID := setupChannelRead(t, roles.RoleCommonUser)
+	handler, do, userID := setupDashboardSession(t, roles.RoleCommonUser)
 	require.NoError(t, model.DB.AutoMigrate(&model.UserSubscription{}, &model.RelayQuotaReservationRecord{}))
 	accessToken := "playground-dashboard-access-token"
 	require.NoError(t, model.DB.Model(&model.User{}).Where("id = ?", userID).Updates(map[string]any{

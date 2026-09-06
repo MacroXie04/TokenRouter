@@ -1,14 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { api } from '../../shared/api/client';
-import {
-  loadBasicRankings,
-  loadPerformanceSummary,
-  loadPublicContent,
-  parseBasicRankingsResponse,
-  parsePerformanceSummaryResponse,
-  parsePublicContentResponse,
-  PublicHomeContractError,
-} from './home-api';
+import { loadBasicRankings, loadPerformanceSummary, parseBasicRankingsResponse, parsePerformanceSummaryResponse } from './home-api';
+import { loadPublicContent, parsePublicContentResponse, PublicHomeContractError } from '../public-documents/public-content-api';
 
 vi.mock('../../shared/api/client', () => ({ api: { get: vi.fn() } }));
 

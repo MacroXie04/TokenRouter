@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { parseSelfUser } from '../../features/auth/admin-permissions';
-import { TURNSTILE_DISABLED, parseTurnstileConfig, type TurnstileConfig } from '../../features/security/TurnstileWidget';
+import { TURNSTILE_DISABLED, parseTurnstileConfig, type TurnstileConfig } from '../../features/security/turnstile';
 import { parseSetupStatus, type SetupStatus } from '../../features/setup/setup';
 import { SESSION_EXPIRED_EVENT, getData, isTransientSessionRefreshFailure, type User } from '../../shared/api/client';
 import { parseHeaderNavigationModules, type HeaderNavigationModules } from '../../shared/config/nav-modules';

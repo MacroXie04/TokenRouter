@@ -1,0 +1,29 @@
+.home-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  align-items: center;
+}
+
+.home-custom-app {
+  max-width: 1180px;
+}
+
+.home-custom {
+  min-height: 20rem;
+}
+
+.home-custom-content > :first-child {
+  margin-top: 0;
+}
+
+.home-custom-frame {
+  min-height: min(75vh, 860px);
+}
+
+@media (max-width: 560px) {
+
+  .home-actions {
+    align-items: flex-start;
+  }
+}

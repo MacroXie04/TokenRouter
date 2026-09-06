@@ -7,9 +7,6 @@ import (
 	billingsvc "github.com/tokenrouter/tokenrouter/internal/billing"
 	channelssvc "github.com/tokenrouter/tokenrouter/internal/channels"
 	channelcatalog "github.com/tokenrouter/tokenrouter/internal/channels/catalog"
-	"github.com/tokenrouter/tokenrouter/internal/httpapi/middleware"
-	"github.com/tokenrouter/tokenrouter/internal/httpapi/requestctx"
-	operationssvc "github.com/tokenrouter/tokenrouter/internal/operations"
 	wallclock "github.com/tokenrouter/tokenrouter/internal/platform/clock"
 	"github.com/tokenrouter/tokenrouter/internal/platform/httpx"
 	"github.com/tokenrouter/tokenrouter/internal/platform/logging"
@@ -24,14 +21,9 @@ import (
 
 var newKlingTaskClient = func() *kling.Client { return &kling.Client{} }
 
-func init() {
-	operationssvc.RegisterAsyncTaskReconciler(reconcileAsyncKlingTasks)
-	operationssvc.RegisterAsyncTaskPromoter(PromoteKlingTaskRecoveryJournalsContext)
-}
-
 // RelayKlingTask submits either Kling text-to-video or image-to-video. The
 // final merged body, not the route spelling, determines the provider action.
-func RelayKlingTask(c *gin.Context) {
+func RelayKlingTask(c *gin.Context, state relaycommon.RequestState) {
 	raw, err := httpx.ReadAllLimited(c.Request.Body, kling.MaxRequestBodyBytes)
 	if err != nil {
 		status := http.StatusBadRequest
@@ -43,13 +35,13 @@ func RelayKlingTask(c *gin.Context) {
 	}
 	c.Request.Body = io.NopCloser(bytes.NewReader(raw))
 
-	userID := requestctx.GetUserId(c)
-	token := middleware.GetRelayToken(c)
+	userID := state.UserID
+	token := state.Token
 	if userID <= 0 || token == nil {
 		writeKlingTaskError(c, http.StatusInternalServerError, "auth_context_missing", "relay token context is missing", nil)
 		return
 	}
-	groups := middleware.GetTokenGroups(c)
+	groups := state.Groups
 	if len(groups) == 0 {
 		writeKlingTaskError(c, http.StatusForbidden, "group_not_allowed", "token group is unavailable", nil)
 		return
@@ -59,7 +51,7 @@ func RelayKlingTask(c *gin.Context) {
 		writeKlingTaskError(c, http.StatusBadRequest, "invalid_request", err.Error(), nil)
 		return
 	}
-	if !middleware.RelayModelAllowed(c, originModel) {
+	if !state.Allows(originModel) {
 		writeKlingTaskError(c, http.StatusForbidden, "model_not_allowed", "token is not allowed to access model "+originModel, nil)
 		return
 	}
@@ -94,7 +86,7 @@ func RelayKlingTask(c *gin.Context) {
 	}
 
 	pricing, enabled, err := billingsvc.ResolveReferenceAsyncTaskBillingPlanForUser(
-		userID, originModel, requestctx.GetUserGroup(c), usingGroup,
+		userID, originModel, state.UserGroup, usingGroup,
 	)
 	if err != nil || !enabled {
 		if err != nil {
@@ -258,7 +250,7 @@ func RelayKlingTask(c *gin.Context) {
 
 // RelayKlingTaskFetch reads only the user-owned local task. Background polling
 // is the sole path that contacts or decrypts the provider snapshot.
-func RelayKlingTaskFetch(c *gin.Context) {
+func RelayKlingTaskFetch(c *gin.Context, state relaycommon.RequestState) {
 	taskID := strings.TrimSpace(c.Param("task_id"))
 	if err := validateKlingTaskPublicID(taskID); err != nil {
 		writeKlingTaskError(c, http.StatusBadRequest, "invalid_request", "task_id is invalid", nil)
@@ -266,7 +258,7 @@ func RelayKlingTaskFetch(c *gin.Context) {
 	}
 	var tasks []model.Task
 	result := model.DB.Where("task_id = ? AND user_id = ? AND platform = ?", taskID,
-		requestctx.GetUserId(c), klingTaskPlatform).Limit(2).Find(&tasks)
+		state.UserID, klingTaskPlatform).Limit(2).Find(&tasks)
 	if result.Error != nil {
 		writeKlingTaskError(c, http.StatusInternalServerError, "task_query_failed", "failed to query Kling task", nil)
 		return
@@ -294,7 +286,7 @@ func RelayKlingTaskFetch(c *gin.Context) {
 		writeKlingTaskError(c, http.StatusNotFound, "task_not_found", "Kling task was not found", nil)
 		return
 	}
-	if !authorizeKlingTaskRead(c, task, properties) {
+	if !authorizeKlingTaskRead(c, state, task, properties) {
 		return
 	}
 	dto, err := klingTaskDTOFromModel(task)
@@ -331,15 +323,15 @@ func selectKlingChannel(groups []string, modelName string) (*model.Channel, stri
 	return nil, "", channelssvc.ErrChannelNotFound
 }
 
-func authorizeKlingTaskRead(c *gin.Context, task *model.Task, properties klingTaskProperties) bool {
-	if middleware.GetRelayToken(c) == nil {
+func authorizeKlingTaskRead(c *gin.Context, state relaycommon.RequestState, task *model.Task, properties klingTaskProperties) bool {
+	if state.Token == nil {
 		return true
 	}
-	if !containsVideoGroup(middleware.GetTokenGroups(c), task.Group) {
+	if !containsVideoGroup(state.Groups, task.Group) {
 		writeKlingTaskError(c, http.StatusForbidden, "group_not_allowed", "token is not allowed to access this task group", nil)
 		return false
 	}
-	if !middleware.RelayModelAllowed(c, properties.OriginModelName) {
+	if !state.Allows(properties.OriginModelName) {
 		writeKlingTaskError(c, http.StatusForbidden, "model_not_allowed", "token is not allowed to access this model", nil)
 		return false
 	}

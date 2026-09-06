@@ -3,7 +3,7 @@
 import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { testDeploymentConnection } from '../models/models-api';
+import { testDeploymentConnection } from '../models';
 import {
   clearAffinityCache,
   confirmPaymentCompliance,
@@ -27,7 +27,7 @@ vi.mock('./system-settings-api', async (importOriginal) => {
     resetModelPricing: vi.fn(),
   };
 });
-vi.mock('../models/models-api', () => ({ testDeploymentConnection: vi.fn() }));
+vi.mock('../models', () => ({ testDeploymentConnection: vi.fn() }));
 vi.mock('react-i18next', async (importOriginal) => {
   const actual = await importOriginal<typeof import('react-i18next')>();
   return { ...actual, useTranslation: () => ({ t: (key: string) => key }) };
@@ -96,6 +96,40 @@ describe('dedicated system settings tools', () => {
     expect(mockedClearAffinity.mock.calls[0][0]).toEqual({ ruleName: 'premium' });
     expect(mockedLoadAffinity).toHaveBeenCalledTimes(2);
     expect(screen.getByRole('button', { name: 'Refresh' })).toHaveProperty('disabled', false);
+  });
+
+  it('redacts rejected compliance and pricing mutations in the dedicated panels', async () => {
+    const user = userEvent.setup();
+    mockedCompliance.mockRejectedValue(new Error('sk-private-compliance'));
+    mockedReset.mockRejectedValue(new Error('sk-private-pricing'));
+    const view = render(<PaymentCompliancePanel options={[]} onChanged={vi.fn()} />);
+    await user.click(screen.getByRole('checkbox'));
+    await user.click(screen.getByRole('button', { name: 'Confirm payment compliance' }));
+    expect(await screen.findByRole('alert')).toHaveProperty('textContent', 'Request failed.');
+    expect(screen.queryByText(/sk-private/)).toBeNull();
+
+    view.rerender(<PricingResetPanel onChanged={vi.fn()} />);
+    await user.click(screen.getByRole('button', { name: 'Reset model pricing' }));
+    await user.click(screen.getByRole('button', { name: 'Reset' }));
+    expect(await screen.findByRole('alert')).toHaveProperty('textContent', 'Request failed.');
+    expect(screen.queryByText(/sk-private/)).toBeNull();
+  });
+
+  it('fails an invalid affinity read closed and redacts rejected cache mutations', async () => {
+    mockedLoadAffinity.mockRejectedValueOnce(new Error('sk-private-statistics'));
+    render(<AffinityCachePanel />);
+    expect(await screen.findByRole('alert')).toHaveProperty('textContent', 'Unable to load affinity cache statistics.Retry');
+    expect(screen.queryByRole('button', { name: 'Clear all affinity cache' })).toBeNull();
+    expect(screen.queryByText(/sk-private/)).toBeNull();
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: 'Retry' }));
+    await screen.findByRole('button', { name: 'Clear all affinity cache' });
+    mockedClearAffinity.mockRejectedValueOnce(new Error('sk-private-mutation'));
+    await user.click(screen.getByRole('button', { name: 'Clear all affinity cache' }));
+    await user.click(screen.getByRole('button', { name: 'Clear cache' }));
+    expect(await screen.findByRole('alert')).toHaveProperty('textContent', 'Request failed.');
+    expect(screen.queryByText(/sk-private/)).toBeNull();
   });
 
   it('tests only the stored deployment credential through the existing exact API', async () => {

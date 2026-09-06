@@ -15,7 +15,7 @@ import (
 )
 
 func TestDoubaoManualReviewResolutionRouteUsesExactProviderTuple(t *testing.T) {
-	_, do, rootID := setupChannelRead(t, roles.RoleRootUser)
+	_, do, rootID := setupDashboardSession(t, roles.RoleRootUser)
 	require.NoError(t, model.DB.AutoMigrate(
 		&model.RelayQuotaReservationRecord{}, &model.RelayQuotaReservationReviewEvent{},
 		&model.Task{}, &model.TaskOperation{}, &model.JimengTaskOperation{}, &model.AuditLogOutbox{},

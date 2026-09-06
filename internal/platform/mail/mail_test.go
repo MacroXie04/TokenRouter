@@ -11,16 +11,10 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
-	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	setting "github.com/tokenrouter/tokenrouter/internal/settings"
-	model "github.com/tokenrouter/tokenrouter/internal/store"
-	"gorm.io/gorm"
 	"math/big"
 	"net"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -323,87 +317,9 @@ func (server *smtpTestServer) wait(t *testing.T) error {
 	}
 }
 
-func clearSMTPEnvironment(t *testing.T) {
-	t.Helper()
-	seen := make(map[string]struct{})
-	for _, aliases := range smtpEnvironmentAliases {
-		for _, key := range aliases {
-			if _, duplicate := seen[key]; duplicate {
-				continue
-			}
-			seen[key] = struct{}{}
-			value, present := os.LookupEnv(key)
-			require.NoError(t, os.Unsetenv(key))
-			t.Cleanup(func() {
-				if present {
-					_ = os.Setenv(key, value)
-				} else {
-					_ = os.Unsetenv(key)
-				}
-			})
-		}
-	}
-}
-
-func setupSMTPSettingTest(t *testing.T) {
-	t.Helper()
-	clearSMTPEnvironment(t)
-	database, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "smtp.db")), &gorm.Config{})
-	require.NoError(t, err)
-	require.NoError(t, database.AutoMigrate(&model.Option{}))
-	previous := model.DB
-	model.DB = database
-	require.NoError(t, setting.Init())
-	t.Cleanup(func() {
-		_ = setting.UpdateOptions(setting.OperationsOptionDefaults())
-		model.DB = previous
-	})
-}
-
-func TestEffectiveSMTPSettingUsesWholeEnvironmentDomain(t *testing.T) {
-	setupSMTPSettingTest(t)
-	require.NoError(t, setting.UpdateOptions(map[string]string{
-		setting.SMTPServerOption:     "option.example.com",
-		setting.SMTPPortOption:       "465",
-		setting.SMTPAccountOption:    "option-user",
-		setting.SMTPFromOption:       "option@example.com",
-		setting.SMTPTokenOption:      "option-secret",
-		setting.SMTPSSLEnabledOption: "true",
-	}))
-
-	configured, enabled, err := EffectiveSMTPSetting()
-	require.NoError(t, err)
-	assert.True(t, enabled)
-	assert.Equal(t, "option.example.com", configured.Server)
-	assert.Equal(t, "option-secret", configured.Token)
-
-	t.Setenv("SMTP_HOST", "env.example.com")
-	t.Setenv("SMTP_PORT", "465")
-	t.Setenv("SMTP_USER", "env-user")
-	t.Setenv("SMTP_PASSWORD", "env-secret")
-	t.Setenv("SMTP_FROM", "env@example.com")
-	configured, enabled, err = EffectiveSMTPSetting()
-	require.NoError(t, err)
-	assert.True(t, enabled)
-	assert.Equal(t, "env.example.com", configured.Server)
-	assert.Equal(t, "env-secret", configured.Token)
-	assert.False(t, configured.SSLEnabled, "absent environment fields use environment defaults, never option values")
-
-	t.Setenv("SMTP_PASSWORD", "")
-	_, enabled, err = EffectiveSMTPSetting()
-	assert.False(t, enabled)
-	assert.ErrorIs(t, err, setting.ErrSMTPIncompleteCredentials)
-	assert.NotContains(t, err.Error(), "option-secret")
-
-	t.Setenv("SMTP_SERVER", "conflict.example.com")
-	_, enabled, err = EffectiveSMTPSetting()
-	assert.False(t, enabled)
-	assert.ErrorContains(t, err, "conflicting SMTP environment aliases")
-}
-
 func TestSendSMTPRequiresAndUsesSTARTTLSWithLoginAuthentication(t *testing.T) {
 	server := newSMTPTestServer(t, false, true)
-	config := setting.SMTPSetting{
+	config := Config{
 		Server: "127.0.0.1", Port: server.port(t), Account: "mailer@example.com",
 		From: "no-reply@example.com", Token: "test-secret", StartTLSEnabled: true,
 		InsecureSkipVerify: true, ForceAuthLogin: true,
@@ -425,7 +341,7 @@ func TestSendSMTPRequiresAndUsesSTARTTLSWithLoginAuthentication(t *testing.T) {
 
 func TestSendSMTPUsesImplicitTLSAndPlainAuth(t *testing.T) {
 	server := newSMTPTestServer(t, true, false)
-	config := setting.SMTPSetting{
+	config := Config{
 		Server: "127.0.0.1", Port: server.port(t), Account: "mailer@example.com",
 		From: "no-reply@example.com", Token: "test-secret", SSLEnabled: true,
 		InsecureSkipVerify: true,
@@ -440,7 +356,7 @@ func TestSendSMTPUsesImplicitTLSAndPlainAuth(t *testing.T) {
 
 func TestSendSMTPAllowsExplicitPlaintextOnlyOnLoopback(t *testing.T) {
 	server := newSMTPTestServer(t, false, false)
-	config := setting.SMTPSetting{
+	config := Config{
 		Server: "127.0.0.1", Port: server.port(t), From: "no-reply@example.com",
 	}
 	require.NoError(t, sendSMTP(config, "person@example.com", "Local notice", "body", time.Second, 2*time.Second))
@@ -451,35 +367,27 @@ func TestSendSMTPAllowsExplicitPlaintextOnlyOnLoopback(t *testing.T) {
 	assert.ErrorContains(t, config.ValidateRunnable(), "non-loopback server requires SSL/TLS or STARTTLS")
 }
 
-func TestSMTPRuntimeMailerUsesHotReloadedOptionSnapshot(t *testing.T) {
-	setupSMTPSettingTest(t)
+func TestSMTPRuntimeMailerUsesFreshDeliverySnapshot(t *testing.T) {
 	previousMailer := Mail
-	InitMailer()
 	t.Cleanup(func() { Mail = previousMailer })
-
 	first := newSMTPTestServer(t, true, false)
-	require.NoError(t, setting.UpdateOptions(map[string]string{
-		setting.SMTPServerOption:             "127.0.0.1",
-		setting.SMTPPortOption:               fmt.Sprintf("%d", first.port(t)),
-		setting.SMTPFromOption:               "no-reply@example.com",
-		setting.SMTPSSLEnabledOption:         "true",
-		setting.SMTPStartTLSEnabledOption:    "false",
-		setting.SMTPInsecureSkipVerifyOption: "true",
-	}))
+	current := Config{Server: "127.0.0.1", Port: first.port(t), From: "no-reply@example.com", SSLEnabled: true, InsecureSkipVerify: true}
+	calls := 0
+	InitMailer(func() (Config, bool, error) { calls++; return current, true, nil })
 	require.NoError(t, Mail.Send("first@example.com", "First", "one"))
 	require.NoError(t, first.wait(t))
 	assert.Contains(t, first.transcript.snapshot().message, "First")
-
 	second := newSMTPTestServer(t, true, false)
-	require.NoError(t, setting.UpdateOption(setting.SMTPPortOption, fmt.Sprintf("%d", second.port(t))))
+	current.Port = second.port(t)
 	require.NoError(t, Mail.Send("second@example.com", "Second", "two"))
 	require.NoError(t, second.wait(t))
 	assert.Contains(t, second.transcript.snapshot().message, "Second")
+	assert.Equal(t, 2, calls)
 }
 
 func TestSendSMTPNeverDowngradesRequestedTLS(t *testing.T) {
 	server := newSMTPTestServer(t, false, false)
-	config := setting.SMTPSetting{
+	config := Config{
 		Server: "127.0.0.1", Port: server.port(t), From: "no-reply@example.com",
 		StartTLSEnabled: true, InsecureSkipVerify: true,
 	}
@@ -496,7 +404,7 @@ func TestSendSMTPNeverDowngradesRequestedTLS(t *testing.T) {
 }
 
 func TestSendSMTPBoundsInputsAndGreetingWait(t *testing.T) {
-	config := setting.SMTPSetting{Server: "127.0.0.1", Port: 2525, From: "no-reply@example.com"}
+	config := Config{Server: "127.0.0.1", Port: 2525, From: "no-reply@example.com"}
 	_, err := buildSMTPMessage(config.From, "one@example.com\r\nBcc: hidden@example.com", "safe", "body")
 	assert.Error(t, err)
 	_, err = buildSMTPMessage(config.From, "one@example.com", "unsafe\r\nBcc: hidden@example.com", "body")
@@ -525,4 +433,16 @@ func TestSendSMTPBoundsInputsAndGreetingWait(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("silent SMTP test server did not accept a connection")
 	}
+}
+
+func TestSMTPRuntimeMailerPreservesResolverFailures(t *testing.T) {
+	previous := Mail
+	t.Cleanup(func() { Mail = previous })
+	InitMailer(nil)
+	require.ErrorContains(t, Mail.Send("person@example.com", "Notice", "body"), "resolver is not installed")
+	expected := errors.New("configuration unavailable")
+	InitMailer(func() (Config, bool, error) { return Config{}, false, expected })
+	require.ErrorIs(t, Mail.Send("person@example.com", "Notice", "body"), expected)
+	InitMailer(func() (Config, bool, error) { return Config{}, false, nil })
+	require.NoError(t, Mail.Send("person@example.com", "Notice", "body"))
 }

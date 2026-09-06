@@ -177,7 +177,7 @@ func TestVertexVeoDurableSubmitRecoveryAndInlineContent(t *testing.T) {
 
 	c, recorder := vertexVeoLifecycleContext(t, fixture, http.MethodPost, "/v1/videos",
 		`{"model":"veo-3.1-generate-preview","prompt":"a durable Vertex video","duration":8,"size":"1280x720"}`, "")
-	RelayVideoTask(c)
+	RelayVideoTask(c, middleware.CaptureRelayRequestState(c))
 	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 	taskID := decodeVertexVeoPublicID(t, recorder)
 	assert.NotContains(t, recorder.Body.String(), vertexVeoOperationID)
@@ -216,7 +216,7 @@ func TestVertexVeoDurableSubmitRecoveryAndInlineContent(t *testing.T) {
 	assert.Equal(t, vertexVeoOperationID, decryptedOperation)
 
 	c, recorder = vertexVeoLifecycleContext(t, fixture, http.MethodGet, "/v1/videos/"+taskID, "", taskID)
-	RelayVideoTaskFetch(c)
+	RelayVideoTaskFetch(c, middleware.CaptureRelayRequestState(c))
 	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 	assert.Contains(t, recorder.Body.String(), `"status":"queued"`)
 	assert.NotContains(t, recorder.Body.String(), vertexVeoOperationID)
@@ -253,7 +253,7 @@ func TestVertexVeoDurableSubmitRecoveryAndInlineContent(t *testing.T) {
 		Update("private_data", "intentionally-unavailable-after-success").Error)
 	c, recorder = vertexVeoLifecycleContext(t, fixture, http.MethodGet,
 		"/v1/videos/"+taskID+"/content", "", taskID)
-	VideoProxy(c)
+	VideoProxy(c, middleware.CaptureRelayRequestState(c))
 	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 	assert.Equal(t, "video/mp4", recorder.Header().Get("Content-Type"))
 	assert.Equal(t, "private, max-age=86400", recorder.Header().Get("Cache-Control"))
@@ -261,7 +261,7 @@ func TestVertexVeoDurableSubmitRecoveryAndInlineContent(t *testing.T) {
 
 	c, recorder = vertexVeoLifecycleContext(t, fixture, http.MethodGet, "/v1/videos/"+taskID, "", taskID)
 	requestctx.SetUserId(c, fixture.user.Id+1)
-	RelayVideoTaskFetch(c)
+	RelayVideoTaskFetch(c, middleware.CaptureRelayRequestState(c))
 	assert.Equal(t, http.StatusNotFound, recorder.Code)
 }
 
@@ -282,7 +282,7 @@ func TestVertexVeoMalformedCredentialRefundsWithoutProviderNetwork(t *testing.T)
 
 	c, recorder := vertexVeoLifecycleContext(t, fixture, http.MethodPost, "/v1/videos",
 		`{"model":"veo-3.1-generate-preview","prompt":"reject malformed credentials"}`, "")
-	RelayVideoTask(c)
+	RelayVideoTask(c, middleware.CaptureRelayRequestState(c))
 	assert.Equal(t, http.StatusBadGateway, recorder.Code, recorder.Body.String())
 	assert.NotContains(t, recorder.Body.String(), "malformed-secret")
 	assert.NotContains(t, recorder.Body.String(), "private@example.test")
@@ -323,7 +323,7 @@ func TestVertexVeoDefinitiveProviderRejectionRefundsExactly(t *testing.T) {
 
 	c, recorder := vertexVeoLifecycleContext(t, fixture, http.MethodPost, "/v1/videos",
 		`{"model":"veo-3.1-generate-preview","prompt":"definitive rejection"}`, "")
-	RelayVideoTask(c)
+	RelayVideoTask(c, middleware.CaptureRelayRequestState(c))
 	require.Equal(t, http.StatusBadRequest, recorder.Code, recorder.Body.String())
 	assert.NotContains(t, recorder.Body.String(), "sensitive-provider-detail")
 	assert.Equal(t, int32(1), submitCalls.Load())
@@ -362,7 +362,7 @@ func TestVertexVeoAmbiguousDispatchHoldsForManualReviewWithoutReplay(t *testing.
 	})
 	c, recorder := vertexVeoLifecycleContext(t, fixture, http.MethodPost, "/v1/videos",
 		`{"model":"veo-3.1-generate-preview","prompt":"ambiguous dispatch"}`, "")
-	RelayVideoTask(c)
+	RelayVideoTask(c, middleware.CaptureRelayRequestState(c))
 	require.Equal(t, http.StatusAccepted, recorder.Code, recorder.Body.String())
 	assert.NotContains(t, recorder.Body.String(), "connection reset")
 
@@ -396,7 +396,7 @@ func TestVertexVeoTerminalProviderFailureReversesExactSettlement(t *testing.T) {
 	})
 	c, recorder := vertexVeoLifecycleContext(t, fixture, http.MethodPost, "/v1/videos",
 		`{"model":"veo-3.1-generate-preview","prompt":"terminal reversal"}`, "")
-	RelayVideoTask(c)
+	RelayVideoTask(c, middleware.CaptureRelayRequestState(c))
 	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 	taskID := decodeVertexVeoPublicID(t, recorder)
 	forceVertexVeoRecoveryDue(t, taskID)
@@ -425,7 +425,7 @@ func TestVertexVeoTerminalProviderFailureReversesExactSettlement(t *testing.T) {
 		"provider accounting remains an append-only gross-usage metric after reversal")
 
 	c, recorder = vertexVeoLifecycleContext(t, fixture, http.MethodGet, "/v1/videos/"+taskID, "", taskID)
-	RelayVideoTaskFetch(c)
+	RelayVideoTaskFetch(c, middleware.CaptureRelayRequestState(c))
 	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 	assert.Contains(t, recorder.Body.String(), `"status":"failed"`)
 	assert.NotContains(t, recorder.Body.String(), "sensitive provider detail")

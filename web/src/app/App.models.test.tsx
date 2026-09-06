@@ -38,10 +38,6 @@ vi.mock('../features/models', () => ({
   ),
 }));
 
-vi.mock('../features/admin/AdminConsole', () => ({
-  AdminConsole: () => <main aria-label="legacy admin console">Legacy models</main>,
-}));
-
 const mockedGetData = vi.mocked(getData);
 
 beforeEach(() => {
@@ -78,7 +74,6 @@ describe('/models integration', () => {
 
     expect(await screen.findByRole('main', { name: 'dedicated models' }))
       .toHaveProperty('textContent', 'metadata / role 10Deployments');
-    expect(screen.queryByRole('main', { name: 'legacy admin console' })).toBeNull();
 
     fireEvent.click(screen.getByRole('button', { name: 'Deployments' }));
     expect(await screen.findByRole('main', { name: 'dedicated models' }))

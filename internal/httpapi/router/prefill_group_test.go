@@ -11,7 +11,7 @@ import (
 )
 
 func TestConfiguredGroupsContractAndAuthorization(t *testing.T) {
-	handler, do, _ := setupChannelRead(t, roles.RoleAdminUser)
+	handler, do, _ := setupDashboardSession(t, roles.RoleAdminUser)
 	previous := billingsvc.ExportedGroupRatios()
 	billingsvc.SetGroupRatios(map[string]float64{"vip": 2, "default": 1, "staff": 0.5})
 	t.Cleanup(func() { billingsvc.SetGroupRatios(previous) })
@@ -27,12 +27,12 @@ func TestConfiguredGroupsContractAndAuthorization(t *testing.T) {
 	handler.ServeHTTP(unauthenticated, httptest.NewRequest(http.MethodGet, "/api/group/", nil))
 	assert.Equal(t, http.StatusUnauthorized, unauthenticated.Code)
 
-	_, commonDo, _ := setupChannelRead(t, roles.RoleCommonUser)
+	_, commonDo, _ := setupDashboardSession(t, roles.RoleCommonUser)
 	assert.Equal(t, http.StatusForbidden, commonDo(http.MethodGet, "/api/group/", "").Code)
 }
 
 func TestPrefillGroupCRUDContract(t *testing.T) {
-	_, do, _ := setupChannelRead(t, roles.RoleAdminUser)
+	_, do, _ := setupDashboardSession(t, roles.RoleAdminUser)
 
 	rec := do(http.MethodPost, "/api/prefill_group/", `{
 		"name":" core models ","type":"model","items":["gpt-4o","claude-sonnet"],"description":" primary "
@@ -89,7 +89,7 @@ func TestPrefillGroupCRUDContract(t *testing.T) {
 }
 
 func TestPrefillGroupValidationAndRoleGuard(t *testing.T) {
-	handler, do, _ := setupChannelRead(t, roles.RoleAdminUser)
+	handler, do, _ := setupDashboardSession(t, roles.RoleAdminUser)
 
 	tests := []struct {
 		name    string
@@ -119,7 +119,7 @@ func TestPrefillGroupValidationAndRoleGuard(t *testing.T) {
 	unauthenticated := httptest.NewRecorder()
 	handler.ServeHTTP(unauthenticated, httptest.NewRequest(http.MethodGet, "/api/prefill_group/", nil))
 	assert.Equal(t, http.StatusUnauthorized, unauthenticated.Code)
-	_, commonDo, _ := setupChannelRead(t, roles.RoleCommonUser)
+	_, commonDo, _ := setupDashboardSession(t, roles.RoleCommonUser)
 	assert.Equal(t, http.StatusForbidden, commonDo(http.MethodGet, "/api/prefill_group/", "").Code)
 }
 

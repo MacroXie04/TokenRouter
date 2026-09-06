@@ -31,12 +31,12 @@ import (
 const backupCodeCountForRouteTest = 8
 
 // setupAuthMiscRoutes resets the process-wide live settings after installing
-// the isolated database used by setupChannelRead. None of these tests run in
+// the isolated database used by setupDashboardSession. None of these tests run in
 // parallel because the application intentionally publishes settings and
 // pricing through process-wide immutable snapshots.
 func setupAuthMiscRoutes(t *testing.T, role int) (http.Handler, func(method, path, body string) *httptest.ResponseRecorder, int) {
 	t.Helper()
-	handler, do, userID := setupChannelRead(t, role)
+	handler, do, userID := setupDashboardSession(t, role)
 	require.NoError(t, setting.Init())
 	billingsvc.SetGroupRatios(map[string]float64{userssvc.GroupDefault: 1})
 	billingsvc.SetGroupGroupRatios(map[string]map[string]float64{})

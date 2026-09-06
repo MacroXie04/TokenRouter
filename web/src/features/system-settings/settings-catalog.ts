@@ -3,7 +3,7 @@ import {
   parseConsoleFAQ,
   parseConsoleOptionJSON,
   parseConsoleUptimeKumaGroups,
-} from '../dashboard/console-content';
+} from "../dashboard";
 import { validateBillingSettingFormat } from './billing-setting-validation';
 import { validateModelRequestRateLimitGroups } from './model-request-rate-limit';
 import {

@@ -9,6 +9,7 @@ import (
 	"github.com/gin-gonic/gin"
 	billingsvc "github.com/tokenrouter/tokenrouter/internal/billing"
 	"github.com/tokenrouter/tokenrouter/internal/httpapi/requestctx"
+	creempayments "github.com/tokenrouter/tokenrouter/internal/payments/creem"
 	"github.com/tokenrouter/tokenrouter/internal/platform/cryptoutil"
 	"github.com/tokenrouter/tokenrouter/internal/platform/httpx"
 	"github.com/tokenrouter/tokenrouter/internal/platform/jsonutil"
@@ -106,9 +107,9 @@ func RequestCreemPay(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "创建订单失败"})
 		return
 	}
-	checkout, err := createCreemCheckout(c.Request.Context(), config, checkoutRequest)
+	checkout, err := creempayments.CreateCheckout(c.Request.Context(), config, checkoutRequest)
 	if err != nil {
-		if creemRequestDefinitelyRejected(err) {
+		if creempayments.RequestDefinitelyRejected(err) {
 			if statusErr := billingsvc.UpdatePendingTopUpStatus(order.TradeNo, billingsvc.PaymentProviderCreem, billingsvc.TopUpStatusFailed); statusErr != nil {
 				logging.SysError("Creem wallet rejection status update failed trade_no=" + order.TradeNo + ": " + statusErr.Error())
 			}
@@ -188,9 +189,9 @@ func SubscriptionRequestCreemPay(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "创建订单失败"})
 		return
 	}
-	checkout, err := createCreemCheckout(c.Request.Context(), config, checkoutRequest)
+	checkout, err := creempayments.CreateCheckout(c.Request.Context(), config, checkoutRequest)
 	if err != nil {
-		if creemRequestDefinitelyRejected(err) {
+		if creempayments.RequestDefinitelyRejected(err) {
 			if statusErr := billingsvc.UpdatePendingSubscriptionOrderStatus(order.TradeNo, billingsvc.PaymentProviderCreem, billingsvc.TopUpStatusFailed); statusErr != nil {
 				logging.SysError("Creem subscription rejection status update failed trade_no=" + order.TradeNo + ": " + statusErr.Error())
 			}

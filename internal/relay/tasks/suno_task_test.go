@@ -103,9 +103,9 @@ func newSunoTaskFixture(t *testing.T, upstream *httptest.Server) sunoTaskFixture
 	router := gin.New()
 	group := router.Group("/suno")
 	group.Use(middleware.TokenAuth())
-	group.POST("/submit/:action", RelaySunoTask)
-	group.POST("/fetch", RelaySunoTaskFetch)
-	group.GET("/fetch/:id", RelaySunoTaskFetch)
+	group.POST("/submit/:action", authenticatedTaskHandler(RelaySunoTask))
+	group.POST("/fetch", authenticatedTaskHandler(RelaySunoTaskFetch))
+	group.GET("/fetch/:id", authenticatedTaskHandler(RelaySunoTaskFetch))
 	return sunoTaskFixture{router: router, db: db, user: user, token: token, channel: channel}
 }
 

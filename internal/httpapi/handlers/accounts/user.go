@@ -81,7 +81,7 @@ func Register(c *gin.Context) {
 		c.JSON(http.StatusForbidden, dto.Fail("密码注册已关闭"))
 		return
 	}
-	var req dto.RegisterRequest
+	var req RegisterRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, dto.Fail("参数错误: "+err.Error()))
 		return
@@ -171,7 +171,7 @@ func Login(c *gin.Context) {
 		c.JSON(http.StatusForbidden, dto.Fail("密码登录已关闭"))
 		return
 	}
-	var req dto.LoginRequest
+	var req LoginRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, dto.Fail("参数错误: "+err.Error()))
 		return
@@ -210,7 +210,7 @@ func Login(c *gin.Context) {
 
 // Login2FA completes a two-step login with a TOTP or backup code.
 func Login2FA(c *gin.Context) {
-	var req dto.Login2FARequest
+	var req Login2FARequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, dto.Fail("参数错误"))
 		return
@@ -430,7 +430,7 @@ func DeleteSelf(c *gin.Context) {
 
 // UpdateSelf updates profile fields.
 func UpdateSelf(c *gin.Context) {
-	var req dto.UpdateUserRequest
+	var req UpdateUserRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, dto.Fail("参数错误: "+err.Error()))
 		return

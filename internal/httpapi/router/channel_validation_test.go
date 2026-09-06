@@ -14,7 +14,7 @@ import (
 )
 
 func TestChannelRoutesRejectUnsafeOrOversizedPersistentValues(t *testing.T) {
-	_, do, _ := setupChannelRead(t, roles.RoleRootUser)
+	_, do, _ := setupDashboardSession(t, roles.RoleRootUser)
 
 	response := do(http.MethodPost, "/api/channel",
 		`{"name":"unsafe\u202ename","type":1,"key":"sk-test","models":"gpt-4o","group":"default"}`)

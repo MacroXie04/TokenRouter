@@ -5,8 +5,6 @@ import (
 	"errors"
 	"fmt"
 	billingsvc "github.com/tokenrouter/tokenrouter/internal/billing"
-	"github.com/tokenrouter/tokenrouter/internal/httpapi/requestctx"
-	operationssvc "github.com/tokenrouter/tokenrouter/internal/operations"
 	"github.com/tokenrouter/tokenrouter/internal/platform/cryptoutil"
 	"github.com/tokenrouter/tokenrouter/internal/platform/env"
 	"github.com/tokenrouter/tokenrouter/internal/platform/jsonutil"
@@ -507,9 +505,9 @@ func newJimengConsumeAudit(
 		RequestFingerprint string `json:"request_fingerprint"`
 	}
 	if len(upstreamRaw) > 0 && jsonutil.Unmarshal(upstreamRaw, &accepted) == nil {
-		upstreamRequestID = requestctx.NormalizeProviderCorrelationID(accepted.RequestFingerprint)
+		upstreamRequestID = cryptoutil.NormalizeProviderCorrelationID(accepted.RequestFingerprint)
 		if upstreamRequestID == "" {
-			upstreamRequestID = requestctx.NormalizeProviderCorrelationID(accepted.RequestID)
+			upstreamRequestID = cryptoutil.NormalizeProviderCorrelationID(accepted.RequestID)
 		}
 	}
 	return &model.Log{
@@ -873,11 +871,6 @@ func jimengOperationDatabaseNowAtLeast(floor int64) (int64, error) {
 		return floor, nil
 	}
 	return now, nil
-}
-
-func init() {
-	operationssvc.RegisterJimengTaskPromoter(PromoteJimengTaskRecoveryContext)
-	operationssvc.RegisterJimengTaskReconciler(reconcileJimengTaskOperationsDatabaseContext)
 }
 
 // ReconcileJimengTaskOperations is the autonomous, cluster-safe recovery and

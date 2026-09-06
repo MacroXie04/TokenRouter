@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
-import { AdminConsole, type AdminTab } from '../features/admin/AdminConsole';
 import { AuthLayout } from '../features/auth/AuthLayout';
 import { LoginView } from '../features/auth/LoginView';
 import { OtpView } from '../features/auth/OtpView';
 import { PasswordResetView } from '../features/auth/PasswordResetView';
-import { parseSelfUser } from '../features/auth/admin-permissions';
+import { channelAdminCapabilities, parseSelfUser } from '../features/auth/admin-permissions';
+import { ChannelsView } from '../features/channels/ChannelsView';
 import { ChatView } from '../features/chat/ChatView';
 import { DashboardView, type DashboardSection } from '../features/dashboard';
 import { ErrorView, authenticatedErrorCode } from '../features/errors/ErrorView';
@@ -18,12 +18,15 @@ import { ProfileView } from '../features/profile/ProfileView';
 import type { ProfileAccount } from '../features/profile/profile-api';
 import { PublicDocumentView } from '../features/public-documents/PublicDocumentView';
 import { RankingsView } from '../features/rankings/RankingsView';
+import { RedemptionAdminView } from '../features/redemptions/RedemptionAdminView';
 import { SetupView } from '../features/setup/SetupView';
 import { SubscriptionAdminView } from '../features/subscriptions';
+import { InstanceSummary } from '../features/system-info/InstanceSummary';
 import { SystemInfoView } from '../features/system-info/SystemInfoView';
 import { SystemSettingsView } from '../features/system-settings';
 import { UsageLogsView } from '../features/usage-logs/UsageLogsView';
 import type { UsageLogSection } from '../features/usage-logs/usage-logs-api';
+import { UserAdminView } from '../features/users/UserAdminView';
 import { WalletView } from '../features/wallet/WalletView';
 import { getData, type User } from '../shared/api/client';
 import type { PublicStatusInfo } from '../shared/config/public-status';
@@ -51,26 +54,6 @@ function systemBrand(status: PublicStatusInfo, loading = false): SystemBrandConf
     logo: status.logo,
     loading,
   };
-}
-
-function adminTabForRoute(route: AppRoute): AdminTab {
-  switch (route.name) {
-    case 'channels': return 'channels';
-    case 'models': return 'models';
-    case 'users': return 'users';
-    case 'redemption-codes': return 'redemptions';
-    case 'subscriptions': return 'plans';
-    case 'usage-logs': return 'logs';
-    default: return 'overview';
-  }
-}
-
-function adminRoute(route: AppRoute): boolean {
-  return route.name === 'channels'
-    || route.name === 'models'
-    || route.name === 'users'
-    || route.name === 'redemption-codes'
-    || route.name === 'subscriptions';
 }
 
 function Application() {
@@ -258,13 +241,16 @@ function Application() {
     );
   } else if (route.name === 'dashboard') {
     authenticatedContent = (
-      <DashboardView
-        key={route.parameter}
-        section={(route.parameter ?? 'overview') as DashboardSection}
-        role={user.role}
-        search={location.search}
-        onNavigate={navigate}
-      />
+      <>
+        <DashboardView
+          key={route.parameter}
+          section={(route.parameter ?? 'overview') as DashboardSection}
+          role={user.role}
+          search={location.search}
+          onNavigate={navigate}
+        />
+        {user.role >= 10 && (route.parameter ?? 'overview') === 'overview' && <InstanceSummary />}
+      </>
     );
   } else if (route.name === 'usage-logs') {
     authenticatedContent = (
@@ -299,15 +285,12 @@ function Application() {
     );
   } else if (route.name === 'authenticated-error') {
     authenticatedContent = <ErrorView code={authenticatedErrorCode(route.parameter)} />;
-  } else if (adminRoute(route)) {
-    authenticatedContent = (
-      <AdminConsole
-        user={user}
-        initialTab={adminTabForRoute(route)}
-        onNavigate={(target) => navigate(target)}
-        onLogout={signedOut}
-      />
-    );
+  } else if (route.name === 'channels') {
+    authenticatedContent = <ChannelsView {...channelAdminCapabilities(user)} isRoot={user.role >= 100} />;
+  } else if (route.name === 'users') {
+    authenticatedContent = <UserAdminView operatorId={user.id} operatorRole={user.role} />;
+  } else if (route.name === 'redemption-codes') {
+    authenticatedContent = <RedemptionAdminView operatorRole={user.role} />;
   } else {
     authenticatedContent = <ConsoleView user={user} keysOnly={route.name === 'keys'} onLogout={signedOut} />;
   }

@@ -191,7 +191,7 @@ func TestGeminiVeoVideoSubmitFetchEncryptedReservationAndMappedPricing(t *testin
 		`"seconds":"6","size":"3840x2160","image":"data:image/png;base64,` + geminiVeoTestTinyPNG + `",` +
 		`"metadata":{"sampleCount":7}}`
 	c, recorder := geminiVeoLifecycleContext(t, fixture, http.MethodPost, "/v1/videos", body, "")
-	RelayVideoTask(c)
+	RelayVideoTask(c, middleware.CaptureRelayRequestState(c))
 	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 	taskID := decodeGeminiVeoPublicID(t, recorder)
 	assert.NotContains(t, recorder.Body.String(), providerID)
@@ -229,7 +229,7 @@ func TestGeminiVeoVideoSubmitFetchEncryptedReservationAndMappedPricing(t *testin
 	assert.Equal(t, providerID, decryptedID)
 
 	c, recorder = geminiVeoLifecycleContext(t, fixture, http.MethodGet, "/v1/videos/"+taskID, "", taskID)
-	RelayVideoTaskFetch(c)
+	RelayVideoTaskFetch(c, middleware.CaptureRelayRequestState(c))
 	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 	assert.Contains(t, recorder.Body.String(), taskID)
 	assert.NotContains(t, recorder.Body.String(), providerID)
@@ -238,7 +238,7 @@ func TestGeminiVeoVideoSubmitFetchEncryptedReservationAndMappedPricing(t *testin
 
 	c, recorder = geminiVeoLifecycleContext(t, fixture, http.MethodGet, "/v1/videos/"+taskID, "", taskID)
 	requestctx.SetUserId(c, fixture.user.Id+1)
-	RelayVideoTaskFetch(c)
+	RelayVideoTaskFetch(c, middleware.CaptureRelayRequestState(c))
 	assert.Equal(t, http.StatusNotFound, recorder.Code)
 	assert.Equal(t, int32(1), submitCalls.Load())
 }
@@ -272,7 +272,7 @@ func TestGeminiVeoRecoveryUsesFrozenRouteAndContentIsOwnerScoped(t *testing.T) {
 	})
 	c, recorder := geminiVeoLifecycleContext(t, fixture, http.MethodPost, "/v1/videos",
 		`{"model":"`+geminiVeoTestOriginModel+`","prompt":"durable route","duration":4}`, "")
-	RelayVideoTask(c)
+	RelayVideoTask(c, middleware.CaptureRelayRequestState(c))
 	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 	taskID := decodeGeminiVeoPublicID(t, recorder)
 
@@ -301,7 +301,7 @@ func TestGeminiVeoRecoveryUsesFrozenRouteAndContentIsOwnerScoped(t *testing.T) {
 
 	c, recorder = geminiVeoLifecycleContext(t, fixture, http.MethodGet,
 		"/v1/videos/"+taskID+"/content", "", taskID)
-	VideoProxy(c)
+	VideoProxy(c, middleware.CaptureRelayRequestState(c))
 	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 	assert.Equal(t, "veo-video", recorder.Body.String())
 	assert.Equal(t, "video/mp4", recorder.Header().Get("Content-Type"))
@@ -310,7 +310,7 @@ func TestGeminiVeoRecoveryUsesFrozenRouteAndContentIsOwnerScoped(t *testing.T) {
 	c, recorder = geminiVeoLifecycleContext(t, fixture, http.MethodGet,
 		"/v1/videos/"+taskID+"/content", "", taskID)
 	requestctx.SetUserId(c, fixture.user.Id+1)
-	VideoProxy(c)
+	VideoProxy(c, middleware.CaptureRelayRequestState(c))
 	assert.Equal(t, http.StatusNotFound, recorder.Code)
 	assert.Equal(t, int32(1), contentCalls.Load())
 }
@@ -327,7 +327,7 @@ func TestGeminiVeoDefinitiveRejectionRefundsAndAmbiguityNeverReplays(t *testing.
 		})
 		c, recorder := geminiVeoLifecycleContext(t, fixture, http.MethodPost, "/v1/videos",
 			`{"model":"`+geminiVeoTestOriginModel+`","prompt":"reject"}`, "")
-		RelayVideoTask(c)
+		RelayVideoTask(c, middleware.CaptureRelayRequestState(c))
 		require.Equal(t, http.StatusBadRequest, recorder.Code, recorder.Body.String())
 		assert.NotContains(t, recorder.Body.String(), geminiVeoTestCredential)
 		assertGeminiVeoRefunded(t, fixture)
@@ -348,7 +348,7 @@ func TestGeminiVeoDefinitiveRejectionRefundsAndAmbiguityNeverReplays(t *testing.
 		})
 		c, recorder := geminiVeoLifecycleContext(t, fixture, http.MethodPost, "/v1/videos",
 			`{"model":"`+geminiVeoTestOriginModel+`","prompt":"ambiguous"}`, "")
-		RelayVideoTask(c)
+		RelayVideoTask(c, middleware.CaptureRelayRequestState(c))
 		require.Equal(t, http.StatusAccepted, recorder.Code, recorder.Body.String())
 		var task model.Task
 		var operation model.TaskOperation
@@ -420,7 +420,7 @@ func TestGeminiVeoTerminalFailureReversesSettledChargeExactlyOnce(t *testing.T) 
 	})
 	c, recorder := geminiVeoLifecycleContext(t, fixture, http.MethodPost, "/v1/videos",
 		`{"model":"`+geminiVeoTestOriginModel+`","prompt":"fail later"}`, "")
-	RelayVideoTask(c)
+	RelayVideoTask(c, middleware.CaptureRelayRequestState(c))
 	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 	taskID := decodeGeminiVeoPublicID(t, recorder)
 	forceGeminiVeoRecoveryDue(t, taskID)
@@ -551,7 +551,7 @@ func TestGeminiVeoRecoveryLeasePreventsConcurrentPolls(t *testing.T) {
 	})
 	c, recorder := geminiVeoLifecycleContext(t, fixture, http.MethodPost, "/v1/videos",
 		`{"model":"`+geminiVeoTestOriginModel+`","prompt":"concurrent"}`, "")
-	RelayVideoTask(c)
+	RelayVideoTask(c, middleware.CaptureRelayRequestState(c))
 	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 	taskID := decodeGeminiVeoPublicID(t, recorder)
 	forceGeminiVeoRecoveryDue(t, taskID)
@@ -685,7 +685,7 @@ func TestGeminiVeoRemixIsRejectedBeforeChannelOrProviderDispatch(t *testing.T) {
 	c, recorder := geminiVeoLifecycleContext(t, fixture, http.MethodPost,
 		"/v1/videos/task_0123456789abcdef0123456789abcdef/remix",
 		`{"model":"`+geminiVeoTestOriginModel+`","prompt":"unsupported remix"}`, "")
-	RelayVideoTask(c)
+	RelayVideoTask(c, middleware.CaptureRelayRequestState(c))
 	assert.Equal(t, http.StatusBadRequest, recorder.Code)
 	assert.Contains(t, recorder.Body.String(), "not supported")
 	assert.Zero(t, submitCalls.Load())

@@ -26,7 +26,7 @@ type permissionSession struct {
 // a common user.
 func setupPermissionTest(t *testing.T) (root, admin, plain permissionSession) {
 	t.Helper()
-	handler, _, rootID := setupChannelRead(t, roles.RoleRootUser)
+	handler, _, rootID := setupDashboardSession(t, roles.RoleRootUser)
 	require.NoError(t, auth.InitPermissionAuthz())
 
 	makeSession := func(username string, role int, ip string) permissionSession {
@@ -50,7 +50,7 @@ func setupPermissionTest(t *testing.T) (root, admin, plain permissionSession) {
 	}
 	// Rebuild the root session through the same helper so all three share
 	// the cookie shape (CompleteLogin above created a fresh user for rootID
-	// in setupChannelRead; use a dedicated root user instead).
+	// in setupDashboardSession; use a dedicated root user instead).
 	_ = rootID
 	return makeSession("permroot", roles.RoleRootUser, "127.0.0.1"),
 		makeSession("permadmin", roles.RoleAdminUser, "127.0.0.2"),

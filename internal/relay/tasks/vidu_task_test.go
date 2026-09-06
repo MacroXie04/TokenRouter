@@ -162,7 +162,7 @@ func TestViduGenericRoutesSubmitAndFetchStayLocal(t *testing.T) {
 	publicIDs := make([]string, 0, len(tests))
 	for _, test := range tests {
 		c, recorder := viduLifecycleContext(t, fixture, http.MethodPost, test.path, test.body, "")
-		RelayVideoTask(c)
+		RelayVideoTask(c, middleware.CaptureRelayRequestState(c))
 		require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 		publicID := decodeViduPublicID(t, recorder)
 		publicIDs = append(publicIDs, publicID)
@@ -189,7 +189,7 @@ func TestViduGenericRoutesSubmitAndFetchStayLocal(t *testing.T) {
 
 	for _, route := range []string{"/v1/video/generations/", "/v1/videos/"} {
 		c, recorder := viduLifecycleContext(t, fixture, http.MethodGet, route+publicIDs[0], "", publicIDs[0])
-		RelayVideoTaskFetch(c)
+		RelayVideoTaskFetch(c, middleware.CaptureRelayRequestState(c))
 		require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 		assert.Contains(t, recorder.Body.String(), publicIDs[0])
 		assert.NotContains(t, recorder.Body.String(), "provider-")
@@ -199,7 +199,7 @@ func TestViduGenericRoutesSubmitAndFetchStayLocal(t *testing.T) {
 
 	c, recorder := viduLifecycleContext(t, fixture, http.MethodGet, "/v1/videos/"+publicIDs[0], "", publicIDs[0])
 	requestctx.SetUserId(c, fixture.user.Id+1000)
-	RelayVideoTaskFetch(c)
+	RelayVideoTaskFetch(c, middleware.CaptureRelayRequestState(c))
 	assert.Equal(t, http.StatusNotFound, recorder.Code)
 }
 
@@ -224,7 +224,7 @@ func TestViduAcceptedRatioIgnoresCreditsAndPollsExactlyOnce(t *testing.T) {
 	installViduProvider(t, provider)
 	c, recorder := viduLifecycleContext(t, fixture, http.MethodPost, "/v1/videos",
 		`{"model":"viduq1","prompt":"ratio"}`, "")
-	RelayVideoTask(c)
+	RelayVideoTask(c, middleware.CaptureRelayRequestState(c))
 	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 	taskID := decodeViduPublicID(t, recorder)
 	var operation model.TaskOperation
@@ -283,14 +283,14 @@ func TestViduCompletedContentIsOwnerScopedAndUsesSafeLocalProxy(t *testing.T) {
 	installViduProvider(t, provider)
 	c, recorder := viduLifecycleContext(t, fixture, http.MethodPost, "/v1/videos",
 		`{"model":"viduq1","prompt":"content"}`, "")
-	RelayVideoTask(c)
+	RelayVideoTask(c, middleware.CaptureRelayRequestState(c))
 	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 	taskID := decodeViduPublicID(t, recorder)
 	forceViduRecoveryDue(t, taskID)
 	require.NoError(t, reconcileAsyncViduTasks(context.Background()))
 
 	c, recorder = viduLifecycleContext(t, fixture, http.MethodGet, "/v1/videos/"+taskID+"/content", "", taskID)
-	VideoProxy(c)
+	VideoProxy(c, middleware.CaptureRelayRequestState(c))
 	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 	assert.Equal(t, "video/mp4", recorder.Header().Get("Content-Type"))
 	assert.Equal(t, "nosniff", recorder.Header().Get("X-Content-Type-Options"))
@@ -299,7 +299,7 @@ func TestViduCompletedContentIsOwnerScopedAndUsesSafeLocalProxy(t *testing.T) {
 
 	c, recorder = viduLifecycleContext(t, fixture, http.MethodGet, "/v1/videos/"+taskID+"/content", "", taskID)
 	requestctx.SetUserId(c, fixture.user.Id+1)
-	VideoProxy(c)
+	VideoProxy(c, middleware.CaptureRelayRequestState(c))
 	assert.Equal(t, http.StatusNotFound, recorder.Code)
 	assert.Equal(t, int32(1), contentCalls.Load())
 }
@@ -319,7 +319,7 @@ func TestViduDefinitiveRejectionRefundsAndInsufficientQuotaNeverDispatches(t *te
 		})
 		c, recorder := viduLifecycleContext(t, fixture, http.MethodPost, "/v1/videos",
 			`{"model":"viduq1","prompt":"reject"}`, "")
-		RelayVideoTask(c)
+		RelayVideoTask(c, middleware.CaptureRelayRequestState(c))
 		require.Equal(t, http.StatusBadRequest, recorder.Code, recorder.Body.String())
 		assert.Equal(t, int32(1), submitCalls.Load())
 		var task model.Task
@@ -352,7 +352,7 @@ func TestViduDefinitiveRejectionRefundsAndInsufficientQuotaNeverDispatches(t *te
 		})
 		c, recorder := viduLifecycleContext(t, fixture, http.MethodPost, "/v1/videos",
 			`{"model":"viduq1","prompt":"failed body"}`, "")
-		RelayVideoTask(c)
+		RelayVideoTask(c, middleware.CaptureRelayRequestState(c))
 		require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 		var task model.Task
 		var operation model.TaskOperation
@@ -382,7 +382,7 @@ func TestViduDefinitiveRejectionRefundsAndInsufficientQuotaNeverDispatches(t *te
 		})
 		c, recorder := viduLifecycleContext(t, fixture, http.MethodPost, "/v1/videos",
 			`{"model":"viduq1","prompt":"no quota"}`, "")
-		RelayVideoTask(c)
+		RelayVideoTask(c, middleware.CaptureRelayRequestState(c))
 		require.Equal(t, http.StatusBadRequest, recorder.Code, recorder.Body.String())
 		assert.Zero(t, submitCalls.Load())
 		for table, destination := range map[string]any{
@@ -412,7 +412,7 @@ func TestViduTerminalFailureReversesSettledCharge(t *testing.T) {
 	installViduProvider(t, provider)
 	c, recorder := viduLifecycleContext(t, fixture, http.MethodPost, "/v1/videos",
 		`{"model":"viduq1","prompt":"fail later"}`, "")
-	RelayVideoTask(c)
+	RelayVideoTask(c, middleware.CaptureRelayRequestState(c))
 	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 	taskID := decodeViduPublicID(t, recorder)
 	forceViduRecoveryDue(t, taskID)
@@ -455,7 +455,7 @@ func TestViduAmbiguousDispatchIsHeldForExplicitReview(t *testing.T) {
 	installViduProvider(t, provider)
 	c, recorder := viduLifecycleContext(t, fixture, http.MethodPost, "/v1/videos",
 		`{"model":"viduq1","prompt":"ambiguous"}`, "")
-	RelayVideoTask(c)
+	RelayVideoTask(c, middleware.CaptureRelayRequestState(c))
 	require.Equal(t, http.StatusAccepted, recorder.Code, recorder.Body.String())
 	var task model.Task
 	var operation model.TaskOperation
@@ -500,7 +500,7 @@ func TestViduAmbiguousDispatchCanBeExplicitlySettledOnce(t *testing.T) {
 	})
 	c, recorder := viduLifecycleContext(t, fixture, http.MethodPost, "/v1/videos",
 		`{"model":"viduq1","prompt":"operator settle"}`, "")
-	RelayVideoTask(c)
+	RelayVideoTask(c, middleware.CaptureRelayRequestState(c))
 	require.Equal(t, http.StatusAccepted, recorder.Code, recorder.Body.String())
 	var reservation model.RelayQuotaReservationRecord
 	require.NoError(t, model.DB.First(&reservation).Error)
@@ -618,7 +618,7 @@ func TestViduRecoveryLeasePreventsConcurrentPolls(t *testing.T) {
 	installViduProvider(t, provider)
 	c, recorder := viduLifecycleContext(t, fixture, http.MethodPost, "/v1/videos",
 		`{"model":"viduq1","prompt":"concurrent"}`, "")
-	RelayVideoTask(c)
+	RelayVideoTask(c, middleware.CaptureRelayRequestState(c))
 	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 	taskID := decodeViduPublicID(t, recorder)
 	forceViduRecoveryDue(t, taskID)
@@ -644,7 +644,7 @@ func TestRetryViduTaskManualReviewIsAuditedIdempotentAndDoesNotRebill(t *testing
 	installViduProvider(t, provider)
 	c, recorder := viduLifecycleContext(t, fixture, http.MethodPost, "/v1/videos",
 		`{"model":"viduq1","prompt":"manual poll"}`, "")
-	RelayVideoTask(c)
+	RelayVideoTask(c, middleware.CaptureRelayRequestState(c))
 	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 	taskID := decodeViduPublicID(t, recorder)
 

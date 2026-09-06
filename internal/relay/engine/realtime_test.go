@@ -11,6 +11,7 @@ import (
 	channelcatalog "github.com/tokenrouter/tokenrouter/internal/channels/catalog"
 	"github.com/tokenrouter/tokenrouter/internal/httpapi/middleware"
 	"github.com/tokenrouter/tokenrouter/internal/httpapi/requestctx"
+	"github.com/tokenrouter/tokenrouter/internal/platform/cryptoutil"
 	model "github.com/tokenrouter/tokenrouter/internal/store"
 	userssvc "github.com/tokenrouter/tokenrouter/internal/users"
 	"net/http"
@@ -239,7 +240,7 @@ func startRealtimeGateway(t *testing.T, deps realtimeDependencies) (*httptest.Se
 		requestctx.SetRequestId(c, "request-1")
 		middleware.SetupRelayTokenContext(c, token)
 		c.Set(requestctx.ContextKeyGroup, userssvc.GroupDefault)
-		relayWebSocket(c, deps)
+		relayWebSocket(c, middleware.CaptureRelayRequestState(c), deps)
 		close(done)
 	})
 	return httptest.NewServer(r), token, done
@@ -284,7 +285,7 @@ func TestRealtimeRejectsQuotaBeforeEitherHandshake(t *testing.T) {
 		requestctx.SetUserId(c, token.UserId)
 		middleware.SetupRelayTokenContext(c, token)
 		middleware.SetRelayGroupPolicy(c, billingsvc.RelayGroupPolicy{Groups: []string{userssvc.GroupDefault}})
-		relayWebSocket(c, deps)
+		relayWebSocket(c, middleware.CaptureRelayRequestState(c), deps)
 	})
 	recorder := httptest.NewRecorder()
 	r.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/v1/realtime?model=gpt-test", nil))
@@ -322,7 +323,7 @@ func TestRealtimeSelectsAuthorizedAutoGroupAndUsesItForBilling(t *testing.T) {
 		requestctx.SetUserGroup(c, "member")
 		middleware.SetupRelayTokenContext(c, token)
 		middleware.SetRelayGroupPolicy(c, billingsvc.RelayGroupPolicy{Groups: []string{"staff", "vip"}, Auto: true})
-		relayWebSocket(c, deps)
+		relayWebSocket(c, middleware.CaptureRelayRequestState(c), deps)
 	})
 	recorder := httptest.NewRecorder()
 	router.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/v1/realtime?model=gpt-test", nil))
@@ -372,7 +373,7 @@ func TestRealtimeUpstreamHandshakeFailureRefundsReservation(t *testing.T) {
 		requestctx.SetUserId(c, token.UserId)
 		middleware.SetupRelayTokenContext(c, token)
 		middleware.SetRelayGroupPolicy(c, billingsvc.RelayGroupPolicy{Groups: []string{userssvc.GroupDefault}})
-		relayWebSocket(c, deps)
+		relayWebSocket(c, middleware.CaptureRelayRequestState(c), deps)
 	})
 	recorder := httptest.NewRecorder()
 	r.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/v1/realtime?model=gpt-test", nil))
@@ -402,7 +403,7 @@ func TestRealtimeDispatchMarkerFailurePreventsUpstreamDialAndRefunds(t *testing.
 		requestctx.SetUserId(c, token.UserId)
 		middleware.SetupRelayTokenContext(c, token)
 		middleware.SetRelayGroupPolicy(c, billingsvc.RelayGroupPolicy{Groups: []string{userssvc.GroupDefault}})
-		relayWebSocket(c, deps)
+		relayWebSocket(c, middleware.CaptureRelayRequestState(c), deps)
 	})
 	recorder := httptest.NewRecorder()
 	r.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/v1/realtime?model=gpt-test", nil))
@@ -469,12 +470,12 @@ func TestRealtimeAccountsEachUniqueResponseAndRefundsDisconnectReservation(t *te
 	assert.Empty(t, settled)
 	assert.Equal(t, 1, refunded, "unused next-response reservation must be refunded on disconnect")
 	require.Len(t, logs, 2)
-	assert.Equal(t, requestctx.NormalizeProviderCorrelationID("resp-1"), logs[0].upstreamRequestId)
+	assert.Equal(t, cryptoutil.NormalizeProviderCorrelationID("resp-1"), logs[0].upstreamRequestId)
 	assert.Equal(t, 2, logs[0].promptTokens)
 	assert.Equal(t, 1, logs[0].completionTokens)
 	assert.Equal(t, 4, logs[0].quota)
 	assert.Equal(t, true, logs[0].other["realtime_total_normalized"])
-	assert.Equal(t, requestctx.NormalizeProviderCorrelationID("sk-test-super-secret-provider-response-id"), logs[1].upstreamRequestId)
+	assert.Equal(t, cryptoutil.NormalizeProviderCorrelationID("sk-test-super-secret-provider-response-id"), logs[1].upstreamRequestId)
 	assert.NotContains(t, logs[1].upstreamRequestId, "super-secret")
 	assert.Equal(t, logs[1].upstreamRequestId, logs[1].other["realtime_response_id"])
 }

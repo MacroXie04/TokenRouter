@@ -166,7 +166,7 @@ func TestDoubaoGenericRoutesPreserveSelectedPlatformAndFetchLocally(t *testing.T
 			installDoubaoClient(t, client)
 			c, recorder := doubaoLifecycleContext(t, fixture, http.MethodPost, test.submitPath,
 				`{"model":"`+doubaoLifecycleBaseModel+`","prompt":"route contract"}`, "")
-			RelayVideoTask(c)
+			RelayVideoTask(c, middleware.CaptureRelayRequestState(c))
 			require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 			taskID := decodeDoubaoPublicTaskID(t, recorder)
 			assert.NotContains(t, recorder.Body.String(), "provider-route")
@@ -190,7 +190,7 @@ func TestDoubaoGenericRoutesPreserveSelectedPlatformAndFetchLocally(t *testing.T
 			assert.NotContains(t, operation.EncryptedProviderTaskID, "provider-route")
 
 			c, recorder = doubaoLifecycleContext(t, fixture, http.MethodGet, test.fetchPath+taskID, "", taskID)
-			RelayVideoTaskFetch(c)
+			RelayVideoTaskFetch(c, middleware.CaptureRelayRequestState(c))
 			require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 			assert.Contains(t, recorder.Body.String(), taskID)
 			assert.NotContains(t, recorder.Body.String(), "provider-route")
@@ -210,7 +210,7 @@ func TestDoubaoDefinitiveRejectionRefundsButAmbiguousDispatchStaysHeld(t *testin
 		})}})
 		c, recorder := doubaoLifecycleContext(t, fixture, http.MethodPost, "/v1/videos",
 			`{"model":"`+doubaoLifecycleBaseModel+`","prompt":"reject"}`, "")
-		RelayVideoTask(c)
+		RelayVideoTask(c, middleware.CaptureRelayRequestState(c))
 		require.Equal(t, http.StatusBadRequest, recorder.Code, recorder.Body.String())
 		assert.Equal(t, int32(1), calls.Load())
 
@@ -241,7 +241,7 @@ func TestDoubaoDefinitiveRejectionRefundsButAmbiguousDispatchStaysHeld(t *testin
 		})}})
 		c, recorder := doubaoLifecycleContext(t, fixture, http.MethodPost, "/v1/video/generations",
 			`{"model":"`+doubaoLifecycleBaseModel+`","prompt":"ambiguous"}`, "")
-		RelayVideoTask(c)
+		RelayVideoTask(c, middleware.CaptureRelayRequestState(c))
 		require.Equal(t, http.StatusAccepted, recorder.Code, recorder.Body.String())
 		var task model.Task
 		var operation model.TaskOperation
@@ -295,7 +295,7 @@ func TestDoubaoAcceptedTaskTerminalFailureRefundsHeldQuotaExactlyOnce(t *testing
 	})}})
 	c, recorder := doubaoLifecycleContext(t, fixture, http.MethodPost, "/v1/videos",
 		`{"model":"`+doubaoLifecycleBaseModel+`","prompt":"fail later"}`, "")
-	RelayVideoTask(c)
+	RelayVideoTask(c, middleware.CaptureRelayRequestState(c))
 	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 	taskID := decodeDoubaoPublicTaskID(t, recorder)
 	forceDoubaoRecoveryDue(t, taskID)
@@ -359,7 +359,7 @@ func TestDoubaoPollingUsesImmutableFixedAndRatioPricing(t *testing.T) {
 			})}}
 			installDoubaoClient(t, client)
 			c, recorder := doubaoLifecycleContext(t, fixture, http.MethodPost, "/v1/videos", test.requestBody, "")
-			RelayVideoTask(c)
+			RelayVideoTask(c, middleware.CaptureRelayRequestState(c))
 			require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 			taskID := decodeDoubaoPublicTaskID(t, recorder)
 
@@ -453,7 +453,7 @@ func TestDoubaoCompletedContentAndFetchAreOwnerAndPlatformScoped(t *testing.T) {
 	installDoubaoClient(t, client)
 	c, recorder := doubaoLifecycleContext(t, fixture, http.MethodPost, "/v1/videos",
 		`{"model":"`+doubaoLifecycleBaseModel+`","prompt":"content"}`, "")
-	RelayVideoTask(c)
+	RelayVideoTask(c, middleware.CaptureRelayRequestState(c))
 	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 	taskID := decodeDoubaoPublicTaskID(t, recorder)
 	forceDoubaoRecoveryDue(t, taskID)
@@ -477,7 +477,7 @@ func TestDoubaoCompletedContentAndFetchAreOwnerAndPlatformScoped(t *testing.T) {
 	t.Cleanup(func() { newDoubaoContentHTTPClient = previousContentClient })
 
 	c, recorder = doubaoLifecycleContext(t, fixture, http.MethodGet, "/v1/videos/"+taskID+"/content", "", taskID)
-	VideoProxy(c)
+	VideoProxy(c, middleware.CaptureRelayRequestState(c))
 	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 	assert.Equal(t, "doubao-video-bytes", recorder.Body.String())
 	assert.Equal(t, "video/mp4", recorder.Header().Get("Content-Type"))
@@ -486,7 +486,7 @@ func TestDoubaoCompletedContentAndFetchAreOwnerAndPlatformScoped(t *testing.T) {
 
 	c, recorder = doubaoLifecycleContext(t, fixture, http.MethodGet, "/v1/videos/"+taskID+"/content", "", taskID)
 	requestctx.SetUserId(c, fixture.user.Id+1)
-	VideoProxy(c)
+	VideoProxy(c, middleware.CaptureRelayRequestState(c))
 	assert.Equal(t, http.StatusNotFound, recorder.Code)
 	assert.Equal(t, int32(1), contentCalls.Load())
 
@@ -498,7 +498,7 @@ func TestDoubaoCompletedContentAndFetchAreOwnerAndPlatformScoped(t *testing.T) {
 		ChannelId: fixture.channel.Id, Status: model.TaskStatusSubmitted,
 	}).Error)
 	c, recorder = doubaoLifecycleContext(t, fixture, http.MethodGet, "/v1/videos/"+foreignID, "", foreignID)
-	RelayVideoTaskFetch(c)
+	RelayVideoTaskFetch(c, middleware.CaptureRelayRequestState(c))
 	assert.Equal(t, http.StatusNotFound, recorder.Code, "an unrelated task platform must not enter Doubao fetch")
 }
 
@@ -596,7 +596,7 @@ func TestDoubaoRecoveryLeasePreventsConcurrentPolls(t *testing.T) {
 	})}})
 	c, recorder := doubaoLifecycleContext(t, fixture, http.MethodPost, "/v1/videos",
 		`{"model":"`+doubaoLifecycleBaseModel+`","prompt":"concurrent"}`, "")
-	RelayVideoTask(c)
+	RelayVideoTask(c, middleware.CaptureRelayRequestState(c))
 	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 	taskID := decodeDoubaoPublicTaskID(t, recorder)
 	forceDoubaoRecoveryDue(t, taskID)

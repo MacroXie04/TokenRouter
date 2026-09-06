@@ -21,6 +21,8 @@ are intentional; consult `docs/parity/KNOWN_DEVIATIONS.md` before changing behav
   migrations; `internal/settings`: validated database-backed runtime snapshots.
 - `internal/platform`: focused infrastructure subpackages, not a catch-all.
   `internal/testutil` contains reusable test fixtures only.
+- `internal/payments/{stripe,creem,waffo}`: payment-provider clients; HTTP
+  handlers consume them and `internal/app` explicitly wires background recovery.
 - `protocolkit`: independent Go module; never import the root module from it.
 - `web/src/app`: bootstrap, routes, layout, session coordination;
   `features`: business pages, behavior, APIs and adjacent tests;
@@ -65,6 +67,12 @@ Inspect the working tree and coordinate around other edits. A Go subdirectory
 is a new package: inspect private symbols and dependency direction first. Do not
 force boundaries with unnecessary exports, split transactions, introduce generic
 catch-all packages, or merge similar-looking provider state machines.
+
+Production business/relay packages must not import `internal/httpapi` or
+`internal/app`; platform packages may only import other platform packages from
+this repository's `internal` tree.
+Keep HTTP request adaptation in HTTP packages and wire recovery clients/jobs in
+the application composition layer. The layout verifier enforces these imports.
 
 Preserve routes, payloads/statuses, authentication, provider IDs, configuration
 names, database names/values, transaction boundaries, idempotency, cancellation

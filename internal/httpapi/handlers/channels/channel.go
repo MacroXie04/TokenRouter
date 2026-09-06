@@ -11,7 +11,7 @@ import (
 	channelssvc "github.com/tokenrouter/tokenrouter/internal/channels"
 	channelcatalog "github.com/tokenrouter/tokenrouter/internal/channels/catalog"
 	"github.com/tokenrouter/tokenrouter/internal/httpapi/dto"
-	"github.com/tokenrouter/tokenrouter/internal/httpapi/handlers/pagination"
+	"github.com/tokenrouter/tokenrouter/internal/httpapi/pagination"
 	"github.com/tokenrouter/tokenrouter/internal/httpapi/requestctx"
 	operationssvc "github.com/tokenrouter/tokenrouter/internal/operations"
 	wallclock "github.com/tokenrouter/tokenrouter/internal/platform/clock"
@@ -31,10 +31,10 @@ const (
 )
 
 type channelCreateEnvelope struct {
-	Mode                      string              `json:"mode"`
-	MultiKeyMode              string              `json:"multi_key_mode"`
-	BatchAddSetKeyPrefix2Name bool                `json:"batch_add_set_key_prefix_2_name"`
-	Channel                   *dto.ChannelRequest `json:"channel"`
+	Mode                      string          `json:"mode"`
+	MultiKeyMode              string          `json:"multi_key_mode"`
+	BatchAddSetKeyPrefix2Name bool            `json:"batch_add_set_key_prefix_2_name"`
+	Channel                   *ChannelRequest `json:"channel"`
 }
 
 // GetChannels lists channels with pagination.
@@ -111,7 +111,7 @@ func AddChannel(c *gin.Context) {
 	mode := "single"
 	multiKeyMode := ""
 	batchFingerprintNames := false
-	var req dto.ChannelRequest
+	var req ChannelRequest
 	if _, wrapped := requestObject["channel"]; wrapped {
 		var envelope channelCreateEnvelope
 		if err := jsonutil.Unmarshal(body, &envelope); err != nil || envelope.Channel == nil {
@@ -180,7 +180,7 @@ func AddChannel(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"success": true, "message": ""})
 }
 
-func channelFromRequest(req dto.ChannelRequest) (*model.Channel, error) {
+func channelFromRequest(req ChannelRequest) (*model.Channel, error) {
 	channelInfo, err := channelJSONText(req.ChannelInfo)
 	if err != nil {
 		return nil, fmt.Errorf("channel_info 必须是 JSON 对象: %w", err)

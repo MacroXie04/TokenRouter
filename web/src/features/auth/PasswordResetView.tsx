@@ -1,11 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import {
-  TURNSTILE_DISABLED,
-  TurnstileWidget,
-  turnstileParams,
-  type TurnstileConfig,
-} from '../security/TurnstileWidget';
+import { TURNSTILE_DISABLED, turnstileParams, type TurnstileConfig } from "../security";
+import { TurnstileWidget,  } from "../security";
 import { AuthLayout } from './AuthLayout';
 import { authGet, authPost, isCanceledAuthRequest } from './auth-api';
 import { hasUnsafeAuthText, parsePasswordResetLocation } from './auth-flow';

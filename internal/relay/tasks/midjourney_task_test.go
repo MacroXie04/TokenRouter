@@ -135,13 +135,13 @@ func newMidjourneyTaskFixture(t *testing.T, provider *mockMidjourneyProvider) mi
 	router := gin.New()
 	mj := router.Group("/mj")
 	mj.Use(middleware.TokenAuth())
-	mj.POST("/submit/action", RelayMidjourney)
-	mj.POST("/submit/imagine", RelayMidjourney)
-	mj.POST("/submit/change", RelayMidjourney)
-	mj.POST("/submit/upload-discord-images", RelayMidjourney)
-	mj.GET("/task/:id/fetch", RelayMidjourney)
-	mj.GET("/task/:id/image-seed", RelayMidjourney)
-	mj.POST("/task/list-by-condition", RelayMidjourney)
+	mj.POST("/submit/action", authenticatedTaskHandler(RelayMidjourney))
+	mj.POST("/submit/imagine", authenticatedTaskHandler(RelayMidjourney))
+	mj.POST("/submit/change", authenticatedTaskHandler(RelayMidjourney))
+	mj.POST("/submit/upload-discord-images", authenticatedTaskHandler(RelayMidjourney))
+	mj.GET("/task/:id/fetch", authenticatedTaskHandler(RelayMidjourney))
+	mj.GET("/task/:id/image-seed", authenticatedTaskHandler(RelayMidjourney))
+	mj.POST("/task/list-by-condition", authenticatedTaskHandler(RelayMidjourney))
 	return midjourneyTaskFixture{router: router, db: db, user: user, token: token, channel: channel}
 }
 

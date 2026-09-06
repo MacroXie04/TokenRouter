@@ -13,7 +13,7 @@ import (
 )
 
 func TestAddAbilityFailsClosedOnLookupError(t *testing.T) {
-	_, do, _ := setupChannelRead(t, roles.RoleRootUser)
+	_, do, _ := setupDashboardSession(t, roles.RoleRootUser)
 	var fail atomic.Bool
 	fail.Store(true)
 	callbackName := "test:fail_ability_lookup"
@@ -34,7 +34,7 @@ func TestAddAbilityFailsClosedOnLookupError(t *testing.T) {
 
 func TestAbilityMutationsReportCacheRefreshFailure(t *testing.T) {
 	t.Run("add", func(t *testing.T) {
-		_, do, _ := setupChannelRead(t, roles.RoleRootUser)
+		_, do, _ := setupDashboardSession(t, roles.RoleRootUser)
 		var queryCount atomic.Int32
 		callbackName := "test:fail_add_ability_cache_refresh"
 		require.NoError(t, model.DB.Callback().Query().Before("gorm:query").Register(callbackName, func(tx *gorm.DB) {
@@ -53,7 +53,7 @@ func TestAbilityMutationsReportCacheRefreshFailure(t *testing.T) {
 	})
 
 	t.Run("delete", func(t *testing.T) {
-		_, do, _ := setupChannelRead(t, roles.RoleRootUser)
+		_, do, _ := setupDashboardSession(t, roles.RoleRootUser)
 		require.NoError(t, model.DB.Create(&model.Ability{
 			Group: "default", Model: "gpt-4o", ChannelId: 1, Enabled: true, Weight: 1,
 		}).Error)
@@ -77,7 +77,7 @@ func TestAbilityMutationsReportCacheRefreshFailure(t *testing.T) {
 }
 
 func TestGetAbilitiesPropagatesDatabaseFailure(t *testing.T) {
-	_, do, _ := setupChannelRead(t, roles.RoleRootUser)
+	_, do, _ := setupDashboardSession(t, roles.RoleRootUser)
 	require.NoError(t, model.DB.Migrator().DropTable(&model.Ability{}))
 	rec := do(http.MethodGet, "/api/ability", "")
 	require.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())

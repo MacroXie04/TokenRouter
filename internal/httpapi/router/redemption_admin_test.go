@@ -33,7 +33,7 @@ func TestRedemptionStatusCodesMatchReference(t *testing.T) {
 }
 
 func TestRedemptionCreateContract(t *testing.T) {
-	_, do, _ := setupChannelRead(t, roles.RoleRootUser)
+	_, do, _ := setupDashboardSession(t, roles.RoleRootUser)
 
 	// Compliance gate.
 	setPaymentCompliance(t, false)
@@ -79,7 +79,7 @@ func TestRedemptionCreateContract(t *testing.T) {
 }
 
 func TestRedemptionListAndSearch(t *testing.T) {
-	_, do, _ := setupChannelRead(t, roles.RoleRootUser)
+	_, do, _ := setupDashboardSession(t, roles.RoleRootUser)
 	now := wallclock.NowTimestamp()
 	createRedemptionRow(t, "alpha-code", billingsvc.RedemptionStatusEnabled, 10, 0)
 	used := createRedemptionRow(t, "beta-code", billingsvc.RedemptionStatusUsed, 10, 0)
@@ -140,7 +140,7 @@ func TestRedemptionListAndSearch(t *testing.T) {
 }
 
 func TestRedemptionGetUpdateDelete(t *testing.T) {
-	_, do, _ := setupChannelRead(t, roles.RoleRootUser)
+	_, do, _ := setupDashboardSession(t, roles.RoleRootUser)
 	now := wallclock.NowTimestamp()
 	r := createRedemptionRow(t, "upd-code", billingsvc.RedemptionStatusEnabled, 10, now+1000)
 

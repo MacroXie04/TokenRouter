@@ -105,7 +105,7 @@ func TestAWSRelayReservesBeforeIOAndSettlesClaudeSemanticUsage(t *testing.T) {
 
 	info, recorder, request := awsAccountingRequest(t, &fixture.token)
 	context := newRelayContextFromRequest(t, request, recorder, &fixture.token)
-	err := relayAndSettle(context, info)
+	err := relayAndSettle(context, middleware.CaptureRelayRequestState(context), info)
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 	assert.Contains(t, recorder.Body.String(), "bedrock answer")
@@ -157,6 +157,7 @@ func newRelayContextFromRequest(t *testing.T, request *http.Request, recorder *h
 	requestctx.SetUsername(context, "accounting-user")
 	requestctx.SetUserGroup(context, "default")
 	middleware.SetupRelayTokenContext(context, token)
+	middleware.SetRelayGroupPolicy(context, billingsvc.RelayGroupPolicy{Groups: []string{"default"}})
 	return context
 }
 
@@ -179,7 +180,7 @@ func TestAWSRelayProviderFailureRefundsAndRedactsCredential(t *testing.T) {
 
 	info, recorder, request := awsAccountingRequest(t, &fixture.token)
 	context := newRelayContextFromRequest(t, request, recorder, &fixture.token)
-	require.NoError(t, relayAndSettle(context, info))
+	require.NoError(t, relayAndSettle(context, middleware.CaptureRelayRequestState(context), info))
 	assert.Equal(t, 1, requests)
 	assert.Equal(t, http.StatusForbidden, recorder.Code)
 	assert.NotContains(t, recorder.Body.String(), "bedrock-api-key")

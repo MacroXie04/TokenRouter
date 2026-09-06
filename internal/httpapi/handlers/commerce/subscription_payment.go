@@ -5,6 +5,7 @@ import (
 	"github.com/gin-gonic/gin"
 	billingsvc "github.com/tokenrouter/tokenrouter/internal/billing"
 	"github.com/tokenrouter/tokenrouter/internal/httpapi/requestctx"
+	stripepayments "github.com/tokenrouter/tokenrouter/internal/payments/stripe"
 	"github.com/tokenrouter/tokenrouter/internal/platform/cryptoutil"
 	"github.com/tokenrouter/tokenrouter/internal/platform/env"
 	"github.com/tokenrouter/tokenrouter/internal/platform/logging"
@@ -49,7 +50,7 @@ func SubscriptionRequestStripePay(c *gin.Context) {
 		return
 	}
 	stripeSecret := env.GetEnv("STRIPE_SECRET_KEY", "")
-	if !validStripeSecret(stripeSecret) {
+	if !stripepayments.ValidSecret(stripeSecret) {
 		c.JSON(http.StatusOK, gin.H{"success": false, "message": "Stripe 未配置或密钥无效"})
 		return
 	}
@@ -85,12 +86,12 @@ func SubscriptionRequestStripePay(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "创建订单失败"})
 		return
 	}
-	stripePrice, err := retrieveStripePrice(stripeSecret, plan.StripePriceId)
+	stripePrice, err := stripepayments.RetrievePrice(stripeSecret, plan.StripePriceId)
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "校验 Stripe Price 失败"})
 		return
 	}
-	if err := validateStripeSubscriptionPrice(stripePrice, plan.StripePriceId, expectedAmount, expectedCurrency); err != nil {
+	if err := stripepayments.ValidateSubscriptionPrice(stripePrice, plan.StripePriceId, expectedAmount, expectedCurrency); err != nil {
 		c.JSON(http.StatusOK, gin.H{"message": "error", "data": err.Error()})
 		return
 	}
@@ -109,7 +110,7 @@ func SubscriptionRequestStripePay(c *gin.Context) {
 	}
 	payLink, err := genStripeSubscriptionLink(stripeSecret, order, user.StripeCustomer, user.Email, returnURL)
 	if err != nil {
-		if stripeRequestDefinitelyRejected(err) {
+		if stripepayments.RequestDefinitelyRejected(err) {
 			if statusErr := billingsvc.UpdatePendingSubscriptionOrderStatus(referenceId, billingsvc.PaymentProviderStripe, billingsvc.TopUpStatusFailed); statusErr != nil {
 				logging.SysError("Stripe subscription checkout rejection status update failed trade_no=" + referenceId + ": " + statusErr.Error())
 			}
@@ -138,7 +139,7 @@ func SubscriptionRequestStripePay(c *gin.Context) {
 // entitlements have a fixed end date and this service does not implement
 // Stripe renewal fulfillment, so recurring billing would be unsafe.
 func genStripeSubscriptionLink(apiKey string, order *model.SubscriptionOrder, customerId string, email string, returnURL string) (string, error) {
-	if !validStripeSecret(apiKey) || order == nil || strings.TrimSpace(order.ProviderPriceId) == "" {
+	if !stripepayments.ValidSecret(apiKey) || order == nil || strings.TrimSpace(order.ProviderPriceId) == "" {
 		return "", billingsvc.ErrSubscriptionOrderDataInvalid
 	}
 	referenceId := order.TradeNo
@@ -157,12 +158,12 @@ func genStripeSubscriptionLink(apiKey string, order *model.SubscriptionOrder, cu
 	if err := billingsvc.ConfigureStripeSubscriptionCheckoutRequest(referenceId, snapshot); err != nil {
 		return "", err
 	}
-	params := stripeCheckoutParamsFromSnapshot(snapshot)
-	result, err := createStripeCheckoutSession(apiKey, params)
+	params := stripepayments.CheckoutParamsFromSnapshot(snapshot)
+	result, err := stripepayments.CreateCheckoutSession(apiKey, params)
 	if err != nil {
 		return "", err
 	}
-	if err := validateCreatedStripeCheckoutSession(result, referenceId, billingsvc.StripeCheckoutModeSubscription,
+	if err := stripepayments.ValidateCreatedCheckoutSession(result, referenceId, billingsvc.StripeCheckoutModeSubscription,
 		billingsvc.StripeOrderTypeSubscription, order.ProviderAmountMinor, order.ProviderCurrency, order.ProviderPriceId); err != nil {
 		return "", err
 	}

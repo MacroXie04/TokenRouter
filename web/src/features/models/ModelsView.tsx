@@ -1,11 +1,8 @@
 import { useTranslation } from 'react-i18next';
 import { DeploymentSection } from './ModelDeploymentsSection';
 import { MetadataSection } from './ModelMetadataSection';
-import {
-  MODEL_SECTIONS,
-  assertModelsAdministrator,
-  type ModelsSection
-} from './models-api';
+import { MODEL_SECTIONS, type ModelsSection } from "./metadata-contracts";
+import { assertModelsAdministrator } from "./model-response";
 import './models.css';
 
 export interface ModelsViewProps {

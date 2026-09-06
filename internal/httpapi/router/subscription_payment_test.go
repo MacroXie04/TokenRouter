@@ -22,7 +22,7 @@ import (
 // subscription + payment tables and a Stripe test plan.
 func setupSubscriptionStripeTest(t *testing.T) (http.Handler, func(method, path, body string) *httptest.ResponseRecorder, int, *model.SubscriptionPlan) {
 	t.Helper()
-	handler, do, uid := setupChannelRead(t, roles.RoleRootUser)
+	handler, do, uid := setupDashboardSession(t, roles.RoleRootUser)
 	require.NoError(t, model.DB.AutoMigrate(&model.SubscriptionPlan{}, &model.UserSubscription{},
 		&model.SubscriptionOrder{}, &model.TopUp{}))
 	setPaymentCompliance(t, true)

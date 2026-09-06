@@ -44,7 +44,7 @@ func findRatioSyncChannel(t *testing.T, channels []map[string]any, id int) map[s
 }
 
 func TestRatioSyncChannelsContractAndRootAuthorization(t *testing.T) {
-	handler, do, _ := setupChannelRead(t, roles.RoleRootUser)
+	handler, do, _ := setupDashboardSession(t, roles.RoleRootUser)
 	highPriority := int64(10)
 	explicit := model.Channel{
 		Type: int(channelcatalog.ChannelTypeCustom), Key: "channel-secret-explicit", Name: "explicit",
@@ -85,12 +85,12 @@ func TestRatioSyncChannelsContractAndRootAuthorization(t *testing.T) {
 	handler.ServeHTTP(unauthenticated, httptest.NewRequest(http.MethodGet, "/api/ratio_sync/channels", nil))
 	assert.Equal(t, http.StatusUnauthorized, unauthenticated.Code)
 
-	_, adminDo, _ := setupChannelRead(t, roles.RoleAdminUser)
+	_, adminDo, _ := setupDashboardSession(t, roles.RoleAdminUser)
 	assert.Equal(t, http.StatusForbidden, adminDo(http.MethodGet, "/api/ratio_sync/channels", "").Code)
 }
 
 func TestRatioSyncFetchContractWithStoredChannelIDs(t *testing.T) {
-	_, do, _ := setupChannelRead(t, roles.RoleRootUser)
+	_, do, _ := setupDashboardSession(t, roles.RoleRootUser)
 	previousPrices := billingsvc.ExportedModelPrices()
 	billingsvc.SetModelPriceRegistry(map[string]billingsvc.ModelPrice{
 		"same-model": {Prompt: 2, Completion: 6},
@@ -134,7 +134,7 @@ func TestRatioSyncFetchContractWithStoredChannelIDs(t *testing.T) {
 }
 
 func TestRatioSyncOpenRouterCredentialIsBoundToStoredDestination(t *testing.T) {
-	_, do, _ := setupChannelRead(t, roles.RoleRootUser)
+	_, do, _ := setupDashboardSession(t, roles.RoleRootUser)
 	previousPrices := billingsvc.ExportedModelPrices()
 	billingsvc.SetModelPriceRegistry(map[string]billingsvc.ModelPrice{})
 	t.Cleanup(func() { billingsvc.SetModelPriceRegistry(previousPrices) })
@@ -184,7 +184,7 @@ func TestRatioSyncOpenRouterCredentialIsBoundToStoredDestination(t *testing.T) {
 }
 
 func TestRatioSyncOpenRouterCredentialIsNotForwardedAcrossRedirect(t *testing.T) {
-	_, do, _ := setupChannelRead(t, roles.RoleRootUser)
+	_, do, _ := setupDashboardSession(t, roles.RoleRootUser)
 	const credential = "redirect-secret-token"
 	var destinationCalls atomic.Int32
 	destination := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
@@ -215,7 +215,7 @@ func TestRatioSyncOpenRouterCredentialIsNotForwardedAcrossRedirect(t *testing.T)
 }
 
 func TestRatioSyncFetchValidationFailureAndRoles(t *testing.T) {
-	handler, do, _ := setupChannelRead(t, roles.RoleRootUser)
+	handler, do, _ := setupDashboardSession(t, roles.RoleRootUser)
 
 	recorder := do(http.MethodPost, "/api/ratio_sync/fetch", "{")
 	assert.Equal(t, http.StatusBadRequest, recorder.Code)
@@ -240,12 +240,12 @@ func TestRatioSyncFetchValidationFailureAndRoles(t *testing.T) {
 	handler.ServeHTTP(unauthenticated, request)
 	assert.Equal(t, http.StatusUnauthorized, unauthenticated.Code)
 
-	_, adminDo, _ := setupChannelRead(t, roles.RoleAdminUser)
+	_, adminDo, _ := setupDashboardSession(t, roles.RoleAdminUser)
 	assert.Equal(t, http.StatusForbidden, adminDo(http.MethodPost, "/api/ratio_sync/fetch", `{}`).Code)
 }
 
 func TestRatioSyncUpstreamFailureDoesNotReflectResponseBody(t *testing.T) {
-	_, do, _ := setupChannelRead(t, roles.RoleRootUser)
+	_, do, _ := setupDashboardSession(t, roles.RoleRootUser)
 	const secret = "upstream-error-secret"
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 		writer.WriteHeader(http.StatusInternalServerError)

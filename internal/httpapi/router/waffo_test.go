@@ -14,7 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 	billingsvc "github.com/tokenrouter/tokenrouter/internal/billing"
 	quotamath "github.com/tokenrouter/tokenrouter/internal/billing/quota"
-	"github.com/tokenrouter/tokenrouter/internal/httpapi/handlers/commerce"
+	waffopayments "github.com/tokenrouter/tokenrouter/internal/payments/waffo"
 	"github.com/tokenrouter/tokenrouter/internal/platform/httpx"
 	"github.com/tokenrouter/tokenrouter/internal/platform/jsonutil"
 	setting "github.com/tokenrouter/tokenrouter/internal/settings"
@@ -144,7 +144,7 @@ func signedWaffoCreateResponse(t *testing.T, keys waffoTestKeys, request billing
 	})
 	require.NoError(t, err)
 	header := make(http.Header)
-	header.Set(commerce.WaffoSignatureHeader, signWaffoFixture(t, body, keys.providerPrivate))
+	header.Set(waffopayments.SignatureHeader, signWaffoFixture(t, body, keys.providerPrivate))
 	return &http.Response{StatusCode: http.StatusOK, Header: header, Body: io.NopCloser(strings.NewReader(string(body)))}
 }
 
@@ -168,7 +168,7 @@ func waffoWebhookPayload(t *testing.T, order model.TopUp, status, amount, curren
 func sendWaffoWebhook(handler http.Handler, keys waffoTestKeys, body []byte) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(http.MethodPost, "/api/waffo/webhook", strings.NewReader(string(body)))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set(commerce.WaffoSignatureHeader, signWaffoFixtureForRequest(body, keys.providerPrivate))
+	req.Header.Set(waffopayments.SignatureHeader, signWaffoFixtureForRequest(body, keys.providerPrivate))
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, req)
 	return recorder
@@ -189,7 +189,7 @@ func TestWaffoHTTPWireSnapshotAndRetryableSettlementEndToEnd(t *testing.T) {
 	configureWaffoForController(t, keys)
 
 	var captured billingsvc.WaffoCheckoutRequest
-	restore := commerce.SetWaffoTransportForTesting(waffoRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+	restore := waffopayments.SetTransportForTesting(waffoRoundTripFunc(func(request *http.Request) (*http.Response, error) {
 		require.Equal(t, http.MethodPost, request.Method)
 		require.Equal(t, setting.WaffoProductionBaseURL+"/order/create", request.URL.String())
 		require.Equal(t, "application/json", request.Header.Get("Content-Type"))
@@ -197,7 +197,7 @@ func TestWaffoHTTPWireSnapshotAndRetryableSettlementEndToEnd(t *testing.T) {
 		require.Equal(t, "1.0.0", request.Header.Get("X-API-VERSION"))
 		body, err := httpx.ReadAllLimited(request.Body, 64<<10)
 		require.NoError(t, err)
-		verifyWaffoFixture(t, body, request.Header.Get(commerce.WaffoSignatureHeader), keys.merchantPublic)
+		verifyWaffoFixture(t, body, request.Header.Get(waffopayments.SignatureHeader), keys.merchantPublic)
 		require.NoError(t, jsonutil.Unmarshal(body, &captured))
 		return signedWaffoCreateResponse(t, keys, captured, "acq_wallet_exact", "https://checkout.waffo.test/pay/exact"), nil
 	}))
@@ -249,7 +249,7 @@ func TestWaffoHTTPWireSnapshotAndRetryableSettlementEndToEnd(t *testing.T) {
 	recorder = sendWaffoWebhook(handler, keys, badAmount)
 	require.Equal(t, http.StatusOK, recorder.Code)
 	assert.JSONEq(t, `{"message":"failed"}`, recorder.Body.String())
-	verifyWaffoFixture(t, recorder.Body.Bytes(), recorder.Header().Get(commerce.WaffoSignatureHeader), keys.merchantPublic)
+	verifyWaffoFixture(t, recorder.Body.Bytes(), recorder.Header().Get(waffopayments.SignatureHeader), keys.merchantPublic)
 
 	valid := waffoWebhookPayload(t, order, "PAY_SUCCESS", "12.50", "USD", "merchant_123", "acq_wallet_exact")
 	injected := errors.New("injected Waffo outbox failure")
@@ -269,7 +269,7 @@ func TestWaffoHTTPWireSnapshotAndRetryableSettlementEndToEnd(t *testing.T) {
 	recorder = sendWaffoWebhook(handler, keys, valid)
 	require.Equal(t, http.StatusOK, recorder.Code)
 	assert.JSONEq(t, `{"message":"success"}`, recorder.Body.String())
-	verifyWaffoFixture(t, recorder.Body.Bytes(), recorder.Header().Get(commerce.WaffoSignatureHeader), keys.merchantPublic)
+	verifyWaffoFixture(t, recorder.Body.Bytes(), recorder.Header().Get(waffopayments.SignatureHeader), keys.merchantPublic)
 	recorder = sendWaffoWebhook(handler, keys, valid)
 	assert.JSONEq(t, `{"message":"success"}`, recorder.Body.String())
 	require.NoError(t, model.DB.First(&user, userID).Error)
@@ -285,7 +285,7 @@ func TestWaffoCheckoutFailuresRemainDurableOrFailTerminally(t *testing.T) {
 	configureWaffoForController(t, keys)
 
 	mode := "transport"
-	restore := commerce.SetWaffoTransportForTesting(waffoRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+	restore := waffopayments.SetTransportForTesting(waffoRoundTripFunc(func(request *http.Request) (*http.Response, error) {
 		body, err := httpx.ReadAllLimited(request.Body, 64<<10)
 		require.NoError(t, err)
 		var checkout billingsvc.WaffoCheckoutRequest
@@ -301,7 +301,7 @@ func TestWaffoCheckoutFailuresRemainDurableOrFailTerminally(t *testing.T) {
 			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"code":"E0001","msg":"unknown"}`))}, nil
 		case "invalid-response-signature":
 			response := signedWaffoCreateResponse(t, keys, checkout, "acq_bad_signature", "https://checkout.waffo.test/bad-signature")
-			response.Header.Set(commerce.WaffoSignatureHeader, "invalid")
+			response.Header.Set(waffopayments.SignatureHeader, "invalid")
 			return response, nil
 		case "unsafe-url":
 			return signedWaffoCreateResponse(t, keys, checkout, "acq_unsafe", "javascript:alert(1)"), nil
@@ -367,12 +367,12 @@ func TestWaffoSignatureBoundaryIsInjectable(t *testing.T) {
 	keys := controllerWaffoKeys(t)
 	configureWaffoForController(t, keys)
 	codec := &injectedWaffoSignatureCodec{}
-	restore := commerce.SetWaffoSignatureCodecForTesting(codec)
+	restore := waffopayments.SetSignatureCodecForTesting(codec)
 	t.Cleanup(restore)
 
 	body := `{"eventType":"REFUND_NOTIFICATION"}`
 	request := httptest.NewRequest(http.MethodPost, "/api/waffo/webhook", strings.NewReader(body))
-	request.Header.Set(commerce.WaffoSignatureHeader, "injected-request-signature")
+	request.Header.Set(waffopayments.SignatureHeader, "injected-request-signature")
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, request)
 
@@ -381,7 +381,7 @@ func TestWaffoSignatureBoundaryIsInjectable(t *testing.T) {
 	assert.Equal(t, body, codec.verifiedPayload)
 	assert.Equal(t, "injected-request-signature", codec.verifiedSig)
 	assert.Equal(t, `{"message":"success"}`, codec.signedPayload)
-	assert.Equal(t, "injected-response-signature", recorder.Header().Get(commerce.WaffoSignatureHeader))
+	assert.Equal(t, "injected-response-signature", recorder.Header().Get(waffopayments.SignatureHeader))
 }
 
 func TestWaffoWebhookSignatureBoundsAndTerminalStatuses(t *testing.T) {
@@ -416,7 +416,7 @@ func TestWaffoWebhookSignatureBoundsAndTerminalStatuses(t *testing.T) {
 	assert.Equal(t, 1000, user.Quota)
 
 	invalidSignature := httptest.NewRequest(http.MethodPost, "/api/waffo/webhook", strings.NewReader(string(closed)))
-	invalidSignature.Header.Set(commerce.WaffoSignatureHeader, "invalid")
+	invalidSignature.Header.Set(waffopayments.SignatureHeader, "invalid")
 	recorder = httptest.NewRecorder()
 	handler.ServeHTTP(recorder, invalidSignature)
 	assert.Equal(t, http.StatusBadRequest, recorder.Code)
@@ -440,10 +440,10 @@ type injectedWaffoClient struct {
 	checkout billingsvc.WaffoCheckoutRequest
 }
 
-func (client *injectedWaffoClient) CreateOrder(_ context.Context, _ setting.WaffoConfig, checkout billingsvc.WaffoCheckoutRequest) (commerce.WaffoCreateOrderResult, error) {
+func (client *injectedWaffoClient) CreateOrder(_ context.Context, _ setting.WaffoConfig, checkout billingsvc.WaffoCheckoutRequest) (waffopayments.CreateOrderResult, error) {
 	client.called = true
 	client.checkout = checkout
-	return commerce.WaffoCreateOrderResult{
+	return waffopayments.CreateOrderResult{
 		PaymentURL: "https://checkout.waffo.test/injected", PaymentRequestID: checkout.PaymentRequestID,
 		MerchantOrderID: checkout.MerchantOrderID, AcquiringOrderID: "acq_injected",
 	}, nil
@@ -454,7 +454,7 @@ func TestWaffoClientBoundaryAndTopUpInfoAreInjectedAndAdvertised(t *testing.T) {
 	keys := controllerWaffoKeys(t)
 	configureWaffoForController(t, keys)
 	client := &injectedWaffoClient{}
-	restore := commerce.SetWaffoOrderClientForTesting(client)
+	restore := waffopayments.SetOrderClientForTesting(client)
 	t.Cleanup(restore)
 
 	recorder := do(http.MethodPost, "/api/user/waffo/pay", `{"amount":10,"pay_method_type":"APPLEPAY","pay_method_name":"APPLEPAY"}`)

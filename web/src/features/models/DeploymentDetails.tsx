@@ -1,9 +1,5 @@
 import { useTranslation } from 'react-i18next';
-import {
-  type DeploymentContainer,
-  type DeploymentDetail,
-  type DeploymentSummary
-} from './models-api';
+import { type DeploymentContainer, type DeploymentDetail, type DeploymentSummary } from "./deployment-contracts";
 import { Overlay, formatDate, formatNumber } from './models-ui';
 
 export function DeploymentDetails({ detail, onClose }: { detail: DeploymentDetail; onClose: () => void }) {

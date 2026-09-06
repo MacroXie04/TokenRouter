@@ -19,7 +19,7 @@ vi.mock('react-i18next', () => {
   );
   return { useTranslation: () => ({ t }) };
 });
-vi.mock('../home/PublicNotice', () => ({ PublicNotice: () => null }));
+vi.mock('../public-documents/PublicNotice', () => ({ PublicNotice: () => null }));
 vi.mock('./pricing-api', () => ({
   loadPricingCatalog: vi.fn(),
 }));

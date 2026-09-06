@@ -60,3 +60,12 @@ func runRegisteredAsyncTaskPromoter(ctx context.Context) error {
 	}
 	return errors.Join(callbackErrors...)
 }
+
+// ConfigureAsyncTaskRecovery installs an owned callback snapshot before the
+// scheduler starts. Reassembly replaces callbacks instead of duplicating jobs.
+func ConfigureAsyncTaskRecovery(promotes, runs []func(context.Context) error) {
+	asyncTaskReconciler.Lock()
+	defer asyncTaskReconciler.Unlock()
+	asyncTaskReconciler.promotes = append([]func(context.Context) error(nil), promotes...)
+	asyncTaskReconciler.runs = append([]func(context.Context) error(nil), runs...)
+}

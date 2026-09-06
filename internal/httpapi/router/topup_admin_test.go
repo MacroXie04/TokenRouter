@@ -15,7 +15,7 @@ import (
 )
 
 func TestAdminTopUpRoutesReplaceConflictingUserAlias(t *testing.T) {
-	handler, do, userID := setupChannelRead(t, roles.RoleCommonUser)
+	handler, do, userID := setupDashboardSession(t, roles.RoleCommonUser)
 	_, err := billingsvc.CreateTopUpWithTradeNo(userID, 10, 1, "alipay", billingsvc.PaymentProviderEpay, "self-order")
 	require.NoError(t, err)
 
@@ -38,7 +38,7 @@ func TestAdminTopUpRoutesReplaceConflictingUserAlias(t *testing.T) {
 }
 
 func TestSelfTopUpListPaginationSearchAndOwnershipContract(t *testing.T) {
-	_, do, userID := setupChannelRead(t, roles.RoleCommonUser)
+	_, do, userID := setupDashboardSession(t, roles.RoleCommonUser)
 	for _, tradeNo := range []string{"self-alpha", "self-beta", "self-gamma"} {
 		_, err := billingsvc.CreateTopUpWithTradeNo(userID, 10, 1, "alipay", billingsvc.PaymentProviderEpay, tradeNo)
 		require.NoError(t, err)
@@ -74,7 +74,7 @@ func TestSelfTopUpListPaginationSearchAndOwnershipContract(t *testing.T) {
 }
 
 func TestAdminTopUpListSearchAndPaginationContract(t *testing.T) {
-	_, do, adminID := setupChannelRead(t, roles.RoleAdminUser)
+	_, do, adminID := setupDashboardSession(t, roles.RoleAdminUser)
 	for index, tradeNo := range []string{"alpha", "prefix-alpha-suffix", "beta_1"} {
 		_, err := billingsvc.CreateTopUpWithTradeNo(adminID, int64(index+1), 1, "alipay", billingsvc.PaymentProviderEpay, tradeNo)
 		require.NoError(t, err)
@@ -114,7 +114,7 @@ func TestAdminTopUpListSearchAndPaginationContract(t *testing.T) {
 }
 
 func TestAdminCompleteTopUpContract(t *testing.T) {
-	_, do, _ := setupChannelRead(t, roles.RoleAdminUser)
+	_, do, _ := setupDashboardSession(t, roles.RoleAdminUser)
 	setPaymentCompliance(t, false)
 	owner := model.User{Username: "manual-topup-owner", Password: "pw", Status: model.UserStatusEnabled, Role: roles.RoleCommonUser}
 	require.NoError(t, model.DB.Create(&owner).Error)

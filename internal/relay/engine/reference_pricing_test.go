@@ -7,6 +7,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	billingsvc "github.com/tokenrouter/tokenrouter/internal/billing"
+	"github.com/tokenrouter/tokenrouter/internal/httpapi/middleware"
 	setting "github.com/tokenrouter/tokenrouter/internal/settings"
 	model "github.com/tokenrouter/tokenrouter/internal/store"
 	"github.com/tokenrouter/tokenrouter/protocolkit"
@@ -44,7 +45,7 @@ func TestOrdinaryRelayReferenceFixedPriceUsesSnapshotAndWritesExactAccounting(t 
 	)
 
 	c, recorder, info := newRelayAccountingContext(t, &fixture.token, 64)
-	err := relayAndSettleWithDispatch(c, info, func(c *gin.Context, _ *RelayInfo) (*protocolkit.Usage, error) {
+	err := relayAndSettleWithDispatch(c, middleware.CaptureRelayRequestState(c), info, func(c *gin.Context, _ *RelayInfo) (*protocolkit.Usage, error) {
 		var held model.RelayQuotaReservationRecord
 		require.NoError(t, model.DB.Order("id desc").First(&held).Error)
 		assert.Equal(t, model.RelayQuotaReservationStatusDispatched, held.Status)
@@ -112,7 +113,7 @@ func TestOrdinaryRelayReferenceUnsetRatioHonorsOwnerPreference(t *testing.T) {
 
 	c, recorder, info := newRelayAccountingContext(t, &fixture.token, 1)
 	dispatches := atomic.Int32{}
-	err := relayAndSettleWithDispatch(c, info, func(c *gin.Context, _ *RelayInfo) (*protocolkit.Usage, error) {
+	err := relayAndSettleWithDispatch(c, middleware.CaptureRelayRequestState(c), info, func(c *gin.Context, _ *RelayInfo) (*protocolkit.Usage, error) {
 		dispatches.Add(1)
 		c.JSON(http.StatusOK, gin.H{"ok": true})
 		return &protocolkit.Usage{PromptTokens: 1, TotalTokens: 1}, nil
@@ -199,7 +200,7 @@ func TestOrdinaryRelayReferenceRatioFinalCorrectionRefundShortfallAndStreamingFa
 				info.Request.Extra["stream"] = true
 			}
 
-			err := relayAndSettleWithDispatch(c, info, func(c *gin.Context, selected *RelayInfo) (*protocolkit.Usage, error) {
+			err := relayAndSettleWithDispatch(c, middleware.CaptureRelayRequestState(c), info, func(c *gin.Context, selected *RelayInfo) (*protocolkit.Usage, error) {
 				var held model.RelayQuotaReservationRecord
 				require.NoError(t, model.DB.Order("id desc").First(&held).Error)
 				expectedHold := (500 + test.maxTokens) * 2
@@ -256,7 +257,7 @@ func TestOrdinaryRelayReferenceFixedPriceFailureRefundsBothHolds(t *testing.T) {
 	configureOrdinaryReferencePricing(t, `{"accounting-model":0.004}`, `{}`, `{}`)
 	c, recorder, info := newRelayAccountingContext(t, &fixture.token, 64)
 
-	err := relayAndSettleWithDispatch(c, info, func(*gin.Context, *RelayInfo) (*protocolkit.Usage, error) {
+	err := relayAndSettleWithDispatch(c, middleware.CaptureRelayRequestState(c), info, func(*gin.Context, *RelayInfo) (*protocolkit.Usage, error) {
 		var held model.RelayQuotaReservationRecord
 		require.NoError(t, model.DB.Order("id desc").First(&held).Error)
 		assert.Equal(t, 2_000, held.ReservedQuota)
@@ -288,7 +289,7 @@ func TestOrdinaryRelayReferenceZeroFixedPriceSettlesDurablyWithoutACharge(t *tes
 	configureOrdinaryReferencePricing(t, `{"accounting-model":0}`, `{"accounting-model":99}`, `{}`)
 	c, recorder, info := newRelayAccountingContext(t, &fixture.token, 64)
 
-	err := relayAndSettleWithDispatch(c, info, func(c *gin.Context, _ *RelayInfo) (*protocolkit.Usage, error) {
+	err := relayAndSettleWithDispatch(c, middleware.CaptureRelayRequestState(c), info, func(c *gin.Context, _ *RelayInfo) (*protocolkit.Usage, error) {
 		var held model.RelayQuotaReservationRecord
 		require.NoError(t, model.DB.Order("id desc").First(&held).Error)
 		assert.Zero(t, held.RequestedQuota)
@@ -328,7 +329,7 @@ func TestOrdinaryRelayReferenceMissingPricingFailsBeforeDispatch(t *testing.T) {
 	c, recorder, info := newRelayAccountingContext(t, &fixture.token, 64)
 	var dispatched atomic.Bool
 
-	err := relayAndSettleWithDispatch(c, info, func(*gin.Context, *RelayInfo) (*protocolkit.Usage, error) {
+	err := relayAndSettleWithDispatch(c, middleware.CaptureRelayRequestState(c), info, func(*gin.Context, *RelayInfo) (*protocolkit.Usage, error) {
 		dispatched.Store(true)
 		return nil, nil
 	})
@@ -370,9 +371,11 @@ func TestOrdinaryRelayReferenceFixedPriceConcurrentReservationsCannotOverspend(t
 	}
 
 	firstDone := make(chan error, 1)
-	go func() { firstDone <- relayAndSettleWithDispatch(firstContext, firstInfo, dispatch) }()
+	go func() {
+		firstDone <- relayAndSettleWithDispatch(firstContext, middleware.CaptureRelayRequestState(firstContext), firstInfo, dispatch)
+	}()
 	<-started
-	secondErr := relayAndSettleWithDispatch(secondContext, secondInfo, dispatch)
+	secondErr := relayAndSettleWithDispatch(secondContext, middleware.CaptureRelayRequestState(secondContext), secondInfo, dispatch)
 	require.NoError(t, secondErr)
 	assert.Equal(t, http.StatusBadRequest, secondRecorder.Code)
 	assert.Contains(t, secondRecorder.Body.String(), "insufficient_quota")

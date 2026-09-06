@@ -7,7 +7,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	billingsvc "github.com/tokenrouter/tokenrouter/internal/billing"
-	"github.com/tokenrouter/tokenrouter/internal/httpapi/requestctx"
 	"github.com/tokenrouter/tokenrouter/internal/platform/cryptoutil"
 	"github.com/tokenrouter/tokenrouter/internal/platform/jsonutil"
 	"github.com/tokenrouter/tokenrouter/internal/relay/providers/jimeng"
@@ -67,7 +66,7 @@ func TestJimengProviderPayloadPersistenceIsCanonicalAndPrivate(t *testing.T) {
 	assert.NotContains(t, string(stored), "access|secret")
 	assert.NotContains(t, string(stored), "provider-task-id")
 	assert.NotContains(t, string(stored), "cdn.example.test")
-	assert.Contains(t, string(stored), requestctx.NormalizeProviderCorrelationID("provider-request-id"))
+	assert.Contains(t, string(stored), cryptoutil.NormalizeProviderCorrelationID("provider-request-id"))
 	assert.Contains(t, string(stored), `"status":"done"`)
 
 	privateData := jimengTaskPrivateData{

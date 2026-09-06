@@ -39,7 +39,7 @@ func setPaymentCompliance(t *testing.T, confirmed bool) {
 }
 
 func TestPaymentComplianceConfirmationContract(t *testing.T) {
-	handler, do, rootID := setupChannelRead(t, roles.RoleRootUser)
+	handler, do, rootID := setupDashboardSession(t, roles.RoleRootUser)
 	setPaymentCompliance(t, false)
 
 	// Malformed and non-affirmative requests are HTTP-200 business failures.
@@ -92,7 +92,7 @@ func TestPaymentComplianceConfirmationContract(t *testing.T) {
 }
 
 func TestRootOptionSecurityContract(t *testing.T) {
-	_, do, _ := setupChannelRead(t, roles.RoleRootUser)
+	_, do, _ := setupDashboardSession(t, roles.RoleRootUser)
 	setPaymentCompliance(t, false)
 	require.NoError(t, setting.UpdateOption("VisibleOption", "visible"))
 	require.NoError(t, setting.UpdateOption("StripeSecretKey", "sk_test_never_return"))
@@ -136,7 +136,7 @@ func TestRootOptionSecurityContract(t *testing.T) {
 }
 
 func TestRootOptionUpdateRejectsUnsafeOrStructuredValues(t *testing.T) {
-	_, do, _ := setupChannelRead(t, roles.RoleRootUser)
+	_, do, _ := setupDashboardSession(t, roles.RoleRootUser)
 
 	requests := []string{
 		`{"key":"","value":"x"}`,
@@ -180,7 +180,7 @@ func TestRootOptionUpdateRejectsUnsafeOrStructuredValues(t *testing.T) {
 }
 
 func TestRootOptionReadFailsClosedOnUnsafeStoredData(t *testing.T) {
-	_, do, _ := setupChannelRead(t, roles.RoleRootUser)
+	_, do, _ := setupDashboardSession(t, roles.RoleRootUser)
 	const key = "UnsafeStoredOption"
 	require.NoError(t, setting.UpdateOption(key, "unsafe\x00value"))
 	t.Cleanup(func() {
@@ -196,7 +196,7 @@ func TestRootOptionReadFailsClosedOnUnsafeStoredData(t *testing.T) {
 
 func TestOptionAndComplianceRoleGuards(t *testing.T) {
 	// Anonymous requests are rejected.
-	handler, _, _ := setupChannelRead(t, roles.RoleRootUser)
+	handler, _, _ := setupDashboardSession(t, roles.RoleRootUser)
 	req := httptest.NewRequest(http.MethodPost, "/api/option/payment_compliance", strings.NewReader(`{"confirmed":true}`))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
@@ -205,7 +205,7 @@ func TestOptionAndComplianceRoleGuards(t *testing.T) {
 
 	// Common users and admins cannot read/write options or confirm compliance.
 	for _, role := range []int{roles.RoleCommonUser, roles.RoleAdminUser} {
-		_, do, _ := setupChannelRead(t, role)
+		_, do, _ := setupDashboardSession(t, role)
 		assert.Equal(t, http.StatusForbidden, do(http.MethodGet, "/api/option/", "").Code)
 		assert.Equal(t, http.StatusForbidden, do(http.MethodPut, "/api/option/", `{"key":"VisibleOption","value":"x"}`).Code)
 		assert.Equal(t, http.StatusForbidden, do(http.MethodPost, "/api/option/payment_compliance", `{"confirmed":true}`).Code)

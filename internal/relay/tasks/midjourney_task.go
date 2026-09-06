@@ -11,12 +11,10 @@ import (
 	billingsvc "github.com/tokenrouter/tokenrouter/internal/billing"
 	channelssvc "github.com/tokenrouter/tokenrouter/internal/channels"
 	channelcatalog "github.com/tokenrouter/tokenrouter/internal/channels/catalog"
-	"github.com/tokenrouter/tokenrouter/internal/httpapi/middleware"
-	"github.com/tokenrouter/tokenrouter/internal/httpapi/requestctx"
-	operationssvc "github.com/tokenrouter/tokenrouter/internal/operations"
 	wallclock "github.com/tokenrouter/tokenrouter/internal/platform/clock"
 	"github.com/tokenrouter/tokenrouter/internal/platform/httpx"
 	"github.com/tokenrouter/tokenrouter/internal/platform/logging"
+	relaycommon "github.com/tokenrouter/tokenrouter/internal/relay/contract"
 	"github.com/tokenrouter/tokenrouter/internal/relay/providers/midjourney"
 	setting "github.com/tokenrouter/tokenrouter/internal/settings"
 	model "github.com/tokenrouter/tokenrouter/internal/store"
@@ -37,22 +35,17 @@ type midjourneyProvider interface {
 
 var newMidjourneyProvider = func() midjourneyProvider { return &midjourney.Client{} }
 
-func init() {
-	operationssvc.RegisterAsyncTaskPromoter(PromoteMidjourneyTaskRecoveryJournalsContext)
-	operationssvc.RegisterAsyncTaskReconciler(reconcileAsyncMidjourneyTasks)
-}
-
 // RelayMidjourney implements the complete reference Midjourney and
 // MidjourneyPlus route family. Local fetch routes never contact a provider.
-func RelayMidjourney(c *gin.Context) {
+func RelayMidjourney(c *gin.Context, state relaycommon.RequestState) {
 	mode := channelcatalog.PathToRelayMode(c.Request.URL.Path)
 	switch mode {
 	case channelcatalog.RelayModeMidjourneyTaskFetch:
-		fetchMidjourneyTask(c)
+		fetchMidjourneyTask(c, state)
 	case channelcatalog.RelayModeMidjourneyTaskFetchByCondition:
-		fetchMidjourneyTasks(c)
+		fetchMidjourneyTasks(c, state)
 	case channelcatalog.RelayModeMidjourneyTaskImageSeed:
-		fetchMidjourneyImageSeed(c)
+		fetchMidjourneyImageSeed(c, state)
 	case channelcatalog.RelayModeMidjourneyNotify:
 		// The reference router deliberately comments out this route. Keeping the
 		// mode fail-closed prevents an accidental unauthenticated callback surface.
@@ -60,11 +53,11 @@ func RelayMidjourney(c *gin.Context) {
 	case channelcatalog.RelayModeUnknown:
 		writeMidjourneyError(c, http.StatusNotFound, 4, "unknown Midjourney route")
 	default:
-		submitMidjourneyTask(c, mode)
+		submitMidjourneyTask(c, state, mode)
 	}
 }
 
-func submitMidjourneyTask(c *gin.Context, mode channelcatalog.RelayMode) {
+func submitMidjourneyTask(c *gin.Context, state relaycommon.RequestState, mode channelcatalog.RelayMode) {
 	operation := midjourneyOperationForMode(mode)
 	if operation == "" {
 		writeMidjourneyError(c, http.StatusBadRequest, 4, "unknown Midjourney operation")
@@ -88,9 +81,9 @@ func submitMidjourneyTask(c *gin.Context, mode channelcatalog.RelayMode) {
 		writeMidjourneyError(c, status, 4, err.Error())
 		return
 	}
-	userID := requestctx.GetUserId(c)
-	token := middleware.GetRelayToken(c)
-	groups := middleware.GetTokenGroups(c)
+	userID := state.UserID
+	token := state.Token
+	groups := state.Groups
 	if userID <= 0 || token == nil {
 		writeMidjourneyError(c, http.StatusInternalServerError, 4, "relay token context is missing")
 		return
@@ -99,12 +92,12 @@ func submitMidjourneyTask(c *gin.Context, mode channelcatalog.RelayMode) {
 		writeMidjourneyError(c, http.StatusForbidden, 4, "token group is unavailable")
 		return
 	}
-	if !middleware.RelayModelAllowed(c, prepared.Model) {
+	if !state.Allows(prepared.Model) {
 		writeMidjourneyError(c, http.StatusForbidden, 4, "token is not allowed to access this model")
 		return
 	}
 
-	channel, usingGroup, baseURL, channelKey, err := resolveMidjourneySubmitChannel(c, prepared, groups)
+	channel, usingGroup, baseURL, channelKey, err := resolveMidjourneySubmitChannel(c, state, prepared, groups)
 	if err != nil {
 		status := http.StatusServiceUnavailable
 		if errors.Is(err, errMidjourneyTaskAccess) {
@@ -116,7 +109,7 @@ func submitMidjourneyTask(c *gin.Context, mode channelcatalog.RelayMode) {
 		return
 	}
 	pricing, enabled, err := billingsvc.ResolveReferenceAsyncTaskBillingPlanForUser(
-		userID, prepared.Model, requestctx.GetUserGroup(c), usingGroup,
+		userID, prepared.Model, state.UserGroup, usingGroup,
 	)
 	if err != nil || !enabled {
 		writeMidjourneyError(c, http.StatusBadRequest, 4, "Midjourney model requires explicit reference pricing")
@@ -342,7 +335,7 @@ var (
 	errMidjourneyTaskState  = errors.New("Midjourney task is not in a valid state")
 )
 
-func resolveMidjourneySubmitChannel(c *gin.Context, prepared *midjourney.PreparedRequest, groups []string) (
+func resolveMidjourneySubmitChannel(c *gin.Context, state relaycommon.RequestState, prepared *midjourney.PreparedRequest, groups []string) (
 	*model.Channel, string, string, string, error,
 ) {
 	if prepared.OriginalTaskID == "" {
@@ -361,7 +354,7 @@ func resolveMidjourneySubmitChannel(c *gin.Context, prepared *midjourney.Prepare
 		return channel, group, baseURL, key, nil
 	}
 	parent, parentMirror, _, privateData, providerID, channelKey, err := loadOwnedMidjourneyTaskCredentials(
-		c, prepared.OriginalTaskID, groups,
+		c, state, prepared.OriginalTaskID, groups,
 	)
 	if err != nil {
 		return nil, "", "", "", err
@@ -384,7 +377,7 @@ func resolveMidjourneySubmitChannel(c *gin.Context, prepared *midjourney.Prepare
 	return &channel, parent.Group, privateData.ChannelBaseURL, channelKey, nil
 }
 
-func loadOwnedMidjourneyTaskCredentials(c *gin.Context, taskID string, groups []string) (
+func loadOwnedMidjourneyTaskCredentials(c *gin.Context, state relaycommon.RequestState, taskID string, groups []string) (
 	*model.Task, *model.Midjourney, midjourneyTaskProperties, midjourneyTaskPrivateData, string, string, error,
 ) {
 	if validateMidjourneyTaskPublicID(taskID) != nil {
@@ -392,7 +385,7 @@ func loadOwnedMidjourneyTaskCredentials(c *gin.Context, taskID string, groups []
 	}
 	var task model.Task
 	if err := model.DB.Where("task_id = ? AND user_id = ? AND platform = ?", taskID,
-		requestctx.GetUserId(c), midjourneyTaskPlatform).First(&task).Error; err != nil {
+		state.UserID, midjourneyTaskPlatform).First(&task).Error; err != nil {
 		return nil, nil, midjourneyTaskProperties{}, midjourneyTaskPrivateData{}, "", "", err
 	}
 	var mirror model.Midjourney
@@ -430,16 +423,16 @@ func loadOwnedMidjourneyTaskCredentials(c *gin.Context, taskID string, groups []
 	return &task, &mirror, properties, privateData, providerID, channelKey, nil
 }
 
-func fetchMidjourneyTask(c *gin.Context) {
+func fetchMidjourneyTask(c *gin.Context, state relaycommon.RequestState) {
 	taskID := strings.TrimSpace(c.Param("id"))
-	groups := middleware.GetTokenGroups(c)
+	groups := state.Groups
 	if validateMidjourneyTaskPublicID(taskID) != nil {
 		writeMidjourneyError(c, http.StatusBadRequest, 4, "task_no_found")
 		return
 	}
 	var generic model.Task
 	if err := model.DB.Where("task_id = ? AND user_id = ? AND platform = ?", taskID,
-		requestctx.GetUserId(c), midjourneyTaskPlatform).First(&generic).Error; err != nil {
+		state.UserID, midjourneyTaskPlatform).First(&generic).Error; err != nil {
 		writeMidjourneyError(c, http.StatusBadRequest, 4, "task_no_found")
 		return
 	}
@@ -448,7 +441,7 @@ func fetchMidjourneyTask(c *gin.Context) {
 		return
 	}
 	properties, err := decodeMidjourneyTaskProperties(generic.Properties)
-	if err != nil || !middleware.RelayModelAllowed(c, properties.OriginModelName) {
+	if err != nil || !state.Allows(properties.OriginModelName) {
 		writeMidjourneyError(c, http.StatusForbidden, 4, "token is not allowed to access this task model")
 		return
 	}
@@ -471,7 +464,7 @@ type midjourneyFetchRequest struct {
 	IDs []string `json:"ids"`
 }
 
-func fetchMidjourneyTasks(c *gin.Context) {
+func fetchMidjourneyTasks(c *gin.Context, state relaycommon.RequestState) {
 	raw, err := httpx.ReadAllLimited(c.Request.Body, midjourneyFetchRequestMaxBytes)
 	if err != nil {
 		status := http.StatusBadRequest
@@ -505,7 +498,7 @@ func fetchMidjourneyTasks(c *gin.Context) {
 	}
 	var generic []model.Task
 	if err := model.DB.Where("task_id IN ? AND user_id = ? AND platform = ?", request.IDs,
-		requestctx.GetUserId(c), midjourneyTaskPlatform).Find(&generic).Error; err != nil {
+		state.UserID, midjourneyTaskPlatform).Find(&generic).Error; err != nil {
 		writeMidjourneyError(c, http.StatusInternalServerError, 4, "failed to query Midjourney tasks")
 		return
 	}
@@ -514,14 +507,14 @@ func fetchMidjourneyTasks(c *gin.Context) {
 		byID[generic[index].TaskID] = &generic[index]
 	}
 	output := make([]midjourneyTaskDTO, 0, len(generic))
-	groups := middleware.GetTokenGroups(c)
+	groups := state.Groups
 	for _, id := range request.IDs {
 		task := byID[id]
 		if task == nil {
 			continue
 		}
 		properties, err := decodeMidjourneyTaskProperties(task.Properties)
-		if err != nil || !containsMidjourneyGroup(groups, task.Group) || !middleware.RelayModelAllowed(c, properties.OriginModelName) {
+		if err != nil || !containsMidjourneyGroup(groups, task.Group) || !state.Allows(properties.OriginModelName) {
 			writeMidjourneyError(c, http.StatusForbidden, 4, "token is not allowed to access a requested task")
 			return
 		}
@@ -542,10 +535,10 @@ func fetchMidjourneyTasks(c *gin.Context) {
 	c.JSON(http.StatusOK, output)
 }
 
-func fetchMidjourneyImageSeed(c *gin.Context) {
-	groups := middleware.GetTokenGroups(c)
+func fetchMidjourneyImageSeed(c *gin.Context, state relaycommon.RequestState) {
+	groups := state.Groups
 	task, _, properties, privateData, providerID, channelKey, err := loadOwnedMidjourneyTaskCredentials(
-		c, strings.TrimSpace(c.Param("id")), groups,
+		c, state, strings.TrimSpace(c.Param("id")), groups,
 	)
 	if err != nil {
 		status := http.StatusBadRequest
@@ -555,7 +548,7 @@ func fetchMidjourneyImageSeed(c *gin.Context) {
 		writeMidjourneyError(c, status, 4, "task_no_found")
 		return
 	}
-	if !middleware.RelayModelAllowed(c, properties.OriginModelName) {
+	if !state.Allows(properties.OriginModelName) {
 		writeMidjourneyError(c, http.StatusForbidden, 4, "token is not allowed to access this task model")
 		return
 	}

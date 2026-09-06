@@ -60,7 +60,7 @@ func dataSpanWindow() (int64, int64, int64) {
 }
 
 func TestDataQuotaDatesContract(t *testing.T) {
-	_, do, uid := setupChannelRead(t, roles.RoleRootUser)
+	_, do, uid := setupDashboardSession(t, roles.RoleRootUser)
 	start, end, hour := dataSpanWindow()
 
 	insertQuotaDataRow(t, uid, "chreader", "gpt-4o", "default", 1, 5, 100, 2, 120, hour, "node-1")
@@ -127,7 +127,7 @@ func TestDataQuotaDatesContract(t *testing.T) {
 }
 
 func TestDataFlowContract(t *testing.T) {
-	handler, doRoot, uid := setupChannelRead(t, roles.RoleRootUser)
+	handler, doRoot, uid := setupDashboardSession(t, roles.RoleRootUser)
 	start, end, hour := dataSpanWindow()
 
 	// A second session with the admin role for the role-scoped variants.
@@ -207,7 +207,7 @@ func TestDataFlowContract(t *testing.T) {
 }
 
 func TestDataEndpointsValidateUniformRanges(t *testing.T) {
-	_, do, _ := setupChannelRead(t, roles.RoleRootUser)
+	_, do, _ := setupDashboardSession(t, roles.RoleRootUser)
 	start, _, _ := dataSpanWindow()
 	endpoints := []string{
 		"/api/data/",
@@ -252,7 +252,7 @@ func TestDataEndpointsValidateUniformRanges(t *testing.T) {
 }
 
 func TestDataEndpointQueryFailureIsGenericAndRequestScoped(t *testing.T) {
-	_, do, _ := setupChannelRead(t, roles.RoleRootUser)
+	_, do, _ := setupDashboardSession(t, roles.RoleRootUser)
 	start, end, _ := dataSpanWindow()
 	deadlineObserved := false
 	callbackName := "test:fail_dashboard_data_query"
@@ -277,7 +277,7 @@ func TestDataEndpointQueryFailureIsGenericAndRequestScoped(t *testing.T) {
 }
 
 func TestDataEndpointResponseSizeFailsClosed(t *testing.T) {
-	_, do, uid := setupChannelRead(t, roles.RoleRootUser)
+	_, do, uid := setupDashboardSession(t, roles.RoleRootUser)
 	start, end, hour := dataSpanWindow()
 	marker := "dashboard-sensitive-marker"
 	token := model.Token{
@@ -299,7 +299,7 @@ func TestDataEndpointResponseSizeFailsClosed(t *testing.T) {
 }
 
 func TestDataAdminUsernameFilterIsBoundedAndUnambiguous(t *testing.T) {
-	_, do, _ := setupChannelRead(t, roles.RoleRootUser)
+	_, do, _ := setupDashboardSession(t, roles.RoleRootUser)
 	start, end, _ := dataSpanWindow()
 	endpoints := []string{"/api/data/", "/api/data/flow"}
 	validUsername := strings.Repeat("界", 64)

@@ -14,7 +14,7 @@ import (
 )
 
 func TestPerfMetricsContract(t *testing.T) {
-	handler, _, _ := setupChannelRead(t, roles.RoleRootUser)
+	handler, _, _ := setupDashboardSession(t, roles.RoleRootUser)
 	billingsvc.SetGroupRatios(map[string]float64{"default": 1, "vip": 2})
 	t.Cleanup(func() { billingsvc.SetGroupRatios(map[string]float64{}) })
 	currentBucket := serviceBucketNow()

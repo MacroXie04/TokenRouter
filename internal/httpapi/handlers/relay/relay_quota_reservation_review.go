@@ -4,7 +4,7 @@ import (
 	"errors"
 	"github.com/gin-gonic/gin"
 	billingsvc "github.com/tokenrouter/tokenrouter/internal/billing"
-	"github.com/tokenrouter/tokenrouter/internal/httpapi/handlers/pagination"
+	"github.com/tokenrouter/tokenrouter/internal/httpapi/pagination"
 	"github.com/tokenrouter/tokenrouter/internal/httpapi/requestctx"
 	"github.com/tokenrouter/tokenrouter/internal/relay/tasks"
 	"net/http"

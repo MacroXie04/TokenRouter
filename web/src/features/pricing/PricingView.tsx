@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { PublicNotice } from '../home/PublicNotice';
+import { PublicNotice } from "../public-documents";
 import {
   loadPerformanceSummary,
   PerformanceMetricsPanel,

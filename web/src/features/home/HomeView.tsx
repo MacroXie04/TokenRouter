@@ -1,21 +1,20 @@
+import { loadPublicContent, MAX_PUBLIC_CONTENT_CHARACTERS } from "../public-documents";
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { HeaderNavigationModules } from '../../shared/config/nav-modules';
 import type { PublicAnnouncementInfo } from '../../shared/config/public-status';
 import { SystemBrand, useSystemBrand } from '../../shared/ui/SystemBrand';
-import type { PricingCatalog } from '../pricing/catalog';
-import { loadPricingCatalog } from '../pricing/pricing-api';
-import { documentFormat, externalDocumentURL } from '../public-documents/content';
-import type { RankingRow } from '../rankings/rankings';
+import type { PricingCatalog } from "../pricing";
+import { loadPricingCatalog } from "../pricing";
+import { documentFormat, externalDocumentURL } from "../public-documents";
+import type { RankingRow } from "../rankings";
 import {
   loadBasicRankings,
   loadPerformanceSummary,
-  loadPublicContent,
-  MAX_PUBLIC_CONTENT_CHARACTERS,
   type PerformanceSummary,
 } from './home-api';
 import './home.css';
-import { PublicNotice, SafePublicMarkdown } from './PublicNotice';
+import { PublicNotice, SafePublicMarkdown } from "../public-documents";
 
 type RequestState = 'loading' | 'ready' | 'error';
 

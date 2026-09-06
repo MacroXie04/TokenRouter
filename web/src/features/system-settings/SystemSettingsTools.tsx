@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { testDeploymentConnection } from '../models/models-api';
+import { testDeploymentConnection } from "../models";
 import {
   clearAffinityCache,
   confirmPaymentCompliance,

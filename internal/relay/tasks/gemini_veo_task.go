@@ -6,9 +6,6 @@ import (
 	"github.com/gin-gonic/gin"
 	billingsvc "github.com/tokenrouter/tokenrouter/internal/billing"
 	channelcatalog "github.com/tokenrouter/tokenrouter/internal/channels/catalog"
-	"github.com/tokenrouter/tokenrouter/internal/httpapi/middleware"
-	"github.com/tokenrouter/tokenrouter/internal/httpapi/requestctx"
-	operationssvc "github.com/tokenrouter/tokenrouter/internal/operations"
 	wallclock "github.com/tokenrouter/tokenrouter/internal/platform/clock"
 	"github.com/tokenrouter/tokenrouter/internal/platform/httpx"
 	"github.com/tokenrouter/tokenrouter/internal/platform/logging"
@@ -30,18 +27,16 @@ var newGeminiVeoProvider = func() geminiVeoProvider { return &geminiVeo.Client{}
 
 func init() {
 	RegisterVeoTaskProvider(geminiVeoProviderDescriptor())
-	operationssvc.RegisterAsyncTaskPromoter(PromoteGeminiVeoTaskRecoveryJournalsContext)
-	operationssvc.RegisterAsyncTaskReconciler(reconcileAsyncGeminiVeoTasks)
 }
 
 // RelayGeminiVeoTask submits through the exact Gemini API channel selected by
 // the shared Veo dispatcher. It deliberately never performs a second channel
 // selection because Vertex advertises the same model names.
-func RelayGeminiVeoTask(c *gin.Context, selection VeoTaskChannelSelection) {
-	relayVeoTaskWithProvider(c, selection)
+func RelayGeminiVeoTask(c *gin.Context, state relaycommon.RequestState, selection VeoTaskChannelSelection) {
+	relayVeoTaskWithProvider(c, state, selection)
 }
 
-func relayVeoTaskWithProvider(c *gin.Context, selection VeoTaskChannelSelection) {
+func relayVeoTaskWithProvider(c *gin.Context, state relaycommon.RequestState, selection VeoTaskChannelSelection) {
 	raw := selection.RawRequest
 	contentType := normalizedVeoContentType(selection.ContentType)
 	if len(raw) == 0 || len(raw) > geminiVeo.MaxRequestBodyBytes || selection.Channel == nil || selection.Channel.Id <= 0 {
@@ -53,9 +48,9 @@ func relayVeoTaskWithProvider(c *gin.Context, selection VeoTaskChannelSelection)
 		writeGeminiVeoTaskError(c, http.StatusBadRequest, "invalid_request", "Veo channel selection is invalid", nil)
 		return
 	}
-	userID := requestctx.GetUserId(c)
-	token := middleware.GetRelayToken(c)
-	groups := middleware.GetTokenGroups(c)
+	userID := state.UserID
+	token := state.Token
+	groups := state.Groups
 	if userID <= 0 || token == nil {
 		writeGeminiVeoTaskError(c, http.StatusInternalServerError, "auth_context_missing", "relay token context is missing", nil)
 		return
@@ -69,7 +64,7 @@ func relayVeoTaskWithProvider(c *gin.Context, selection VeoTaskChannelSelection)
 		writeGeminiVeoTaskError(c, http.StatusBadRequest, "invalid_request", "Gemini Veo request model is invalid", nil)
 		return
 	}
-	if !middleware.RelayModelAllowed(c, originModel) {
+	if !state.Allows(originModel) {
 		writeGeminiVeoTaskError(c, http.StatusForbidden, "model_not_allowed", "token is not allowed to access model "+originModel, nil)
 		return
 	}
@@ -103,7 +98,7 @@ func relayVeoTaskWithProvider(c *gin.Context, selection VeoTaskChannelSelection)
 		return
 	}
 	basePricing, enabled, err := billingsvc.ResolveReferenceAsyncTaskBillingPlanForUser(
-		userID, originModel, requestctx.GetUserGroup(c), usingGroup,
+		userID, originModel, state.UserGroup, usingGroup,
 	)
 	if err != nil || !enabled {
 		if err != nil {
@@ -278,7 +273,7 @@ func relayVeoTaskWithProvider(c *gin.Context, selection VeoTaskChannelSelection)
 
 // RelayGeminiVeoTaskFetch returns only a user-owned local record and never contacts
 // GeminiVeo or decrypts the provider credential snapshot.
-func RelayGeminiVeoTaskFetch(c *gin.Context) {
+func RelayGeminiVeoTaskFetch(c *gin.Context, state relaycommon.RequestState) {
 	taskID := strings.TrimSpace(c.Param("task_id"))
 	if taskID == "" {
 		taskID = strings.TrimSpace(c.Query("task_id"))
@@ -289,7 +284,7 @@ func RelayGeminiVeoTaskFetch(c *gin.Context) {
 	}
 	var tasks []model.Task
 	if err := model.DB.Where("task_id = ? AND user_id = ? AND platform IN ?", taskID,
-		requestctx.GetUserId(c), model.VeoTaskOperationPlatforms()).Limit(2).Find(&tasks).Error; err != nil {
+		state.UserID, model.VeoTaskOperationPlatforms()).Limit(2).Find(&tasks).Error; err != nil {
 		writeGeminiVeoTaskError(c, http.StatusInternalServerError, "task_query_failed", "failed to query GeminiVeo task", nil)
 		return
 	}
@@ -307,7 +302,7 @@ func RelayGeminiVeoTaskFetch(c *gin.Context) {
 		writeGeminiVeoTaskError(c, http.StatusInternalServerError, "task_data_invalid", "GeminiVeo task metadata is invalid", nil)
 		return
 	}
-	if !authorizeGeminiVeoTaskRead(c, task, properties) {
+	if !authorizeGeminiVeoTaskRead(c, state, task, properties) {
 		return
 	}
 	if strings.HasPrefix(c.Request.URL.Path, "/v1/video/generations/") || c.Request.URL.Path == "/v1/video/fetch" {
@@ -327,13 +322,13 @@ func RelayGeminiVeoTaskFetch(c *gin.Context) {
 	c.JSON(http.StatusOK, response)
 }
 
-func relayGeminiVeoTaskContent(c *gin.Context, task *model.Task) {
+func relayGeminiVeoTaskContent(c *gin.Context, state relaycommon.RequestState, task *model.Task) {
 	properties, err := decodeGeminiVeoTaskProperties(task.Properties)
 	if err != nil || string(properties.Action) != task.Action {
 		writeGeminiVeoTaskError(c, http.StatusInternalServerError, "server_error", "GeminiVeo task metadata is invalid", nil)
 		return
 	}
-	if !authorizeGeminiVeoTaskRead(c, task, properties) {
+	if !authorizeGeminiVeoTaskRead(c, state, task, properties) {
 		return
 	}
 	if task.Status != model.TaskStatusSuccess {
@@ -416,15 +411,15 @@ func streamGeminiVeoContentResponse(c *gin.Context, task *model.Task, response *
 	}
 }
 
-func authorizeGeminiVeoTaskRead(c *gin.Context, task *model.Task, properties geminiVeoTaskProperties) bool {
-	if middleware.GetRelayToken(c) == nil {
+func authorizeGeminiVeoTaskRead(c *gin.Context, state relaycommon.RequestState, task *model.Task, properties geminiVeoTaskProperties) bool {
+	if state.Token == nil {
 		return true
 	}
-	if !containsVideoGroup(middleware.GetTokenGroups(c), task.Group) {
+	if !containsVideoGroup(state.Groups, task.Group) {
 		writeGeminiVeoTaskError(c, http.StatusForbidden, "group_not_allowed", "token is not allowed to access this task group", nil)
 		return false
 	}
-	if !middleware.RelayModelAllowed(c, properties.OriginModelName) {
+	if !state.Allows(properties.OriginModelName) {
 		writeGeminiVeoTaskError(c, http.StatusForbidden, "model_not_allowed", "token is not allowed to access this model", nil)
 		return false
 	}

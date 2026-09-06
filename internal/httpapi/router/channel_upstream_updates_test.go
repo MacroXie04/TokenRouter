@@ -25,7 +25,7 @@ func seedUpstreamUpdateChannel(t *testing.T, name, baseURL, models, settings str
 }
 
 func TestChannelUpstreamUpdateRouteLifecycle(t *testing.T) {
-	_, do, _ := setupChannelRead(t, roles.RoleRootUser)
+	_, do, _ := setupDashboardSession(t, roles.RoleRootUser)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, "/v1/models", r.URL.Path)
 		assert.Equal(t, "Bearer secret-upstream-route", r.Header.Get("Authorization"))
@@ -119,7 +119,7 @@ func TestChannelUpstreamUpdateRoutesValidateAndHonorPermissions(t *testing.T) {
 }
 
 func TestChannelUpstreamApplyAllAndDetectAllTaskContract(t *testing.T) {
-	_, do, _ := setupChannelRead(t, roles.RoleRootUser)
+	_, do, _ := setupDashboardSession(t, roles.RoleRootUser)
 	pending := `{"upstream_model_update_check_enabled":true,"upstream_model_update_last_detected_models":["new"],"upstream_model_update_last_removed_models":["old"]}`
 	channel := seedUpstreamUpdateChannel(t, "apply-all", "https://example.invalid", "old", pending)
 	require.NoError(t, model.DB.Create(&model.Ability{
@@ -162,7 +162,7 @@ func TestChannelUpstreamApplyAllAndDetectAllTaskContract(t *testing.T) {
 }
 
 func TestChannelSettingsCreateUpdateAndResponseContract(t *testing.T) {
-	_, do, _ := setupChannelRead(t, roles.RoleRootUser)
+	_, do, _ := setupDashboardSession(t, roles.RoleRootUser)
 	initial := `{"future_setting":"kept","upstream_model_update_check_enabled":true}`
 	create := do(http.MethodPost, "/api/channel", fmt.Sprintf(
 		`{"name":"settings-contract","type":1,"key":"secret","models":"old","group":"default","settings":%q}`,

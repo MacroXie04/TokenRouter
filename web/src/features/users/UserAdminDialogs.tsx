@@ -9,7 +9,7 @@ import {
   resetUserSubscriptionsByPlan,
   type ManagedSubscriptionPlan,
   type ManagedUserSubscription,
-} from '../subscriptions/subscription-api';
+} from "../subscriptions";
 import './user-admin-dialogs.css';
 import {
   USER_ROLE_ADMIN,

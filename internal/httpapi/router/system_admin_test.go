@@ -24,13 +24,13 @@ func TestSystemTaskLogCleanupRequiresRoot(t *testing.T) {
 	unauthenticated.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/api/system-task/log-cleanup?target_timestamp=1", nil))
 	assert.Equal(t, http.StatusUnauthorized, recorder.Code)
 
-	_, adminRequest, _ := setupChannelRead(t, roles.RoleAdminUser)
+	_, adminRequest, _ := setupDashboardSession(t, roles.RoleAdminUser)
 	recorder = adminRequest(http.MethodPost, "/api/system-task/log-cleanup?target_timestamp=1", "")
 	assert.Equal(t, http.StatusForbidden, recorder.Code)
 }
 
 func TestSystemTaskLogCleanupContract(t *testing.T) {
-	_, do, _ := setupChannelRead(t, roles.RoleRootUser)
+	_, do, _ := setupDashboardSession(t, roles.RoleRootUser)
 	now := wallclock.NowTimestamp()
 	target := now - 3600
 
@@ -173,7 +173,7 @@ func TestSystemTaskLogCleanupContract(t *testing.T) {
 }
 
 func TestSystemInfoInstancesContract(t *testing.T) {
-	_, do, _ := setupChannelRead(t, roles.RoleRootUser)
+	_, do, _ := setupDashboardSession(t, roles.RoleRootUser)
 	now := wallclock.NowTimestamp()
 	fresh := model.SystemInstance{NodeName: "node-fresh", Info: `{"version":"1.0"}`,
 		StartedAt: now - 1000, LastSeenAt: now - 10}

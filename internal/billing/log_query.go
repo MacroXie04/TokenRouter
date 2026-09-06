@@ -3,7 +3,7 @@ package billing
 import (
 	"errors"
 	"fmt"
-	"github.com/tokenrouter/tokenrouter/internal/httpapi/requestctx"
+	"github.com/tokenrouter/tokenrouter/internal/platform/cryptoutil"
 	"github.com/tokenrouter/tokenrouter/internal/platform/jsonutil"
 	model "github.com/tokenrouter/tokenrouter/internal/store"
 	"gorm.io/gorm"
@@ -124,7 +124,7 @@ func applyUpstreamRequestIDFilter(tx *gorm.DB, value string) *gorm.DB {
 	if value == "" {
 		return tx
 	}
-	normalized := requestctx.NormalizeProviderCorrelationID(value)
+	normalized := cryptoutil.NormalizeProviderCorrelationID(value)
 	if normalized == value {
 		return tx.Where("logs.upstream_request_id = ?", value)
 	}

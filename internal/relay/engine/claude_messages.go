@@ -8,7 +8,6 @@ import (
 	"github.com/gin-gonic/gin"
 	channelssvc "github.com/tokenrouter/tokenrouter/internal/channels"
 	channelcatalog "github.com/tokenrouter/tokenrouter/internal/channels/catalog"
-	"github.com/tokenrouter/tokenrouter/internal/httpapi/requestctx"
 	"github.com/tokenrouter/tokenrouter/internal/platform/cryptoutil"
 	"github.com/tokenrouter/tokenrouter/internal/platform/httpx"
 	"github.com/tokenrouter/tokenrouter/internal/platform/logging"
@@ -29,7 +28,7 @@ const maxClaudeMessagesRequestBodyBytes int64 = 16 << 20
 // The request is moderated, billed, and settled like any relay; dispatch is
 // Claude-native passthrough for Anthropic channels or Claude↔OpenAI conversion
 // for OpenAI-compatible channels.
-func RelayClaudeMessages(c *gin.Context) {
+func RelayClaudeMessages(c *gin.Context, state relaycommon.RequestState) {
 	cancel := applyRelayRequestDeadline(c)
 	defer cancel()
 	body, err := httpx.ReadAllLimited(c.Request.Body, maxClaudeMessagesRequestBodyBytes)
@@ -68,11 +67,11 @@ func RelayClaudeMessages(c *gin.Context) {
 		ClaudeMaxTokensProvided: maxTokensProvided,
 		RawBody:                 body,
 		ModelName:               claudeReq.Model,
-		UserGroup:               requestctx.GetUserGroup(c),
-		Group:                   getRelayGroup(c),
+		UserGroup:               state.UserGroup,
+		Group:                   state.FirstGroup(),
 		IsStream:                claudeReq.Stream,
 	}
-	if err := relayAndSettleWithDispatch(c, info, dispatchClaudeUpstream); err != nil {
+	if err := relayAndSettleWithDispatch(c, state, info, dispatchClaudeUpstream); err != nil {
 		logging.SysError("Claude relay lifecycle failed: " + err.Error())
 		return
 	}

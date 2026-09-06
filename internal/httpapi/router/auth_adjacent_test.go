@@ -1,20 +1,17 @@
 package router_test
 
 import (
-	"encoding/json"
 	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/tokenrouter/tokenrouter/internal/auth"
 	"github.com/tokenrouter/tokenrouter/internal/auth/roles"
-	billingsvc "github.com/tokenrouter/tokenrouter/internal/billing"
 	"github.com/tokenrouter/tokenrouter/internal/httpapi/router"
 	wallclock "github.com/tokenrouter/tokenrouter/internal/platform/clock"
 	"github.com/tokenrouter/tokenrouter/internal/platform/textutil"
 	setting "github.com/tokenrouter/tokenrouter/internal/settings"
 	model "github.com/tokenrouter/tokenrouter/internal/store"
-	userssvc "github.com/tokenrouter/tokenrouter/internal/users"
 	"gorm.io/gorm"
 	"net/http"
 	"net/http/httptest"
@@ -25,54 +22,6 @@ import (
 	"testing"
 	"time"
 )
-
-func setupAuthAdjacent(t *testing.T, role int) (http.Handler, func(method, path, body string, headers ...map[string]string) *httptest.ResponseRecorder, int, string) {
-	t.Helper()
-	gin.SetMode(gin.TestMode)
-	t.Setenv("CRITICAL_RATE_LIMIT", "1000")
-	dsn := "file:" + filepath.Join(t.TempDir(), "authadj.db") + "?_pragma=busy_timeout(5000)"
-	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
-	require.NoError(t, err)
-	require.NoError(t, db.AutoMigrate(&model.User{}, &model.Token{}, &model.UserSession{},
-		&model.Channel{}, &model.TwoFA{}, &model.TwoFABackupCode{}, &model.PasskeyCredential{},
-		&model.AuthFlow{}, &model.ExternalIdentityClaim{}, &model.Log{}, &model.Option{}, &model.CasbinRule{}))
-	model.DB = db
-	model.LOG_DB = db
-	require.NoError(t, auth.InitCasbin())
-	require.NoError(t, setting.Init())
-	require.NoError(t, setting.UpdateOption(setting.QuotaPerUnitOption, "500000"))
-	billingsvc.SetGroupRatios(map[string]float64{"default": 1, "vip": 1})
-
-	user := model.User{Username: "adjuser", Password: "pw", Role: role, Status: model.UserStatusEnabled,
-		Quota: 1000, Group: userssvc.GroupDefault, AuthVersion: 1}
-	require.NoError(t, model.DB.Create(&user).Error)
-	sid, access, refresh, err := auth.CompleteLogin(&user, "127.0.0.1", "ua", "test")
-	require.NoError(t, err)
-
-	r := router.SetUpRouter()
-	do := func(method, path, body string, headers ...map[string]string) *httptest.ResponseRecorder {
-		req := httptest.NewRequest(method, path, strings.NewReader(body))
-		req.Header.Set("Content-Type", "application/json")
-		req.AddCookie(&http.Cookie{Name: "access_token", Value: access})
-		req.AddCookie(&http.Cookie{Name: "refresh_token", Value: sid + "." + refresh})
-		for _, headerSet := range headers {
-			for key, value := range headerSet {
-				req.Header.Set(key, value)
-			}
-		}
-		rec := httptest.NewRecorder()
-		r.ServeHTTP(rec, req)
-		return rec
-	}
-	return r, do, user.Id, sid
-}
-
-func decodeBody(t *testing.T, rec *httptest.ResponseRecorder) map[string]any {
-	t.Helper()
-	var m map[string]any
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &m), "body: %s", rec.Body.String())
-	return m
-}
 
 // --- POST /api/oauth/state ---
 

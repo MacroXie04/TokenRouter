@@ -56,3 +56,27 @@ func TestAsyncTaskRecoveryRegistriesComposeAndDoNotStarve(t *testing.T) {
 		t.Fatalf("promoter order = %v", promotes)
 	}
 }
+
+func TestConfigureAsyncTaskRecoveryOwnsSnapshotAndReplacesRegistrations(t *testing.T) {
+	asyncTaskReconciler.RLock()
+	oldRuns := append([]func(context.Context) error(nil), asyncTaskReconciler.runs...)
+	oldPromotes := append([]func(context.Context) error(nil), asyncTaskReconciler.promotes...)
+	asyncTaskReconciler.RUnlock()
+	t.Cleanup(func() { ConfigureAsyncTaskRecovery(oldPromotes, oldRuns) })
+	var calls []string
+	promoted := []func(context.Context) error{func(context.Context) error { calls = append(calls, "promote"); return nil }}
+	reconciled := []func(context.Context) error{func(context.Context) error { calls = append(calls, "reconcile"); return nil }}
+	ConfigureAsyncTaskRecovery(promoted, reconciled)
+	ConfigureAsyncTaskRecovery(promoted, reconciled)
+	promoted[0] = func(context.Context) error { t.Fatal("caller mutated installed promotion"); return nil }
+	reconciled[0] = func(context.Context) error { t.Fatal("caller mutated installed reconciliation"); return nil }
+	if err := runRegisteredAsyncTaskPromoter(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := runRegisteredAsyncTaskReconciler(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(calls, []string{"promote", "reconcile"}) {
+		t.Fatalf("callbacks duplicated or reordered: %v", calls)
+	}
+}

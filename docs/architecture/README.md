@@ -5,8 +5,9 @@ module owns process assembly, HTTP behavior, business rules, provider execution,
 and persistence. The nested `protocolkit/` module owns protocol DTOs and pure
 conversion logic without depending back on the root module.
 
-This document describes the maintained source layout. The active migration record
-is [Repository reorganization](../development/reorganization.md); `../parity/` is
+This document describes the maintained source layout. The migration records are
+[Repository reorganization](../development/reorganization.md) and
+[Boundary cleanup](../development/structure-boundaries.md); `../parity/` is
 historical compatibility evidence and is not a description of the current tree.
 
 ## Runtime assembly
@@ -28,6 +29,11 @@ configuration, embedded-dashboard mounting, and graceful shutdown. The router
 owns route registration; domain handler packages translate HTTP requests and
 responses but do not become a second business-service layer.
 
+`app/recovery.go` explicitly connects the Stripe payment resolver and the named
+task recovery jobs to the scheduler after runtime initialization. Reassembly
+replaces asynchronous callbacks. Node-local journal promotion still runs before
+cluster-leased reconciliation; provider imports do not register scheduler jobs.
+
 `web/embed.go` embeds `web/dist` as `web.Dist`. Build the frontend before building
 the root Go binary when the embedded distribution has changed.
 
@@ -37,12 +43,13 @@ the root Go binary when the embedded distribution has changed.
 | --- | --- | --- |
 | `internal/httpapi/router` | Route groups and handler registration | May compose handlers and middleware; business packages do not import it |
 | `internal/httpapi/handlers/*` | HTTP decoding, validation, status codes, and response shapes by domain | Calls business packages and shared HTTP utilities; no catch-all handlers package |
-| `internal/httpapi/{middleware,requestctx,dto}` | Cross-route policy, request-scoped state, and transport DTOs | HTTP-facing only |
+| `internal/httpapi/{middleware,requestctx,dto,pagination}` | Cross-route policy, request-scoped state, shared envelopes and pagination | HTTP-facing only; domain request DTOs stay beside their handlers |
 | `internal/auth` | Authentication, authorization, sessions, credentials, passkeys, OAuth, and 2FA | May use the lower business layers shown below |
 | `internal/billing` | Pricing, quota, subscriptions, payments, audit delivery, and durable accounting | May use channels, users, settings, and store |
 | `internal/channels` | Channel lifecycle, health, selection, affinity, and upstream configuration | May use users, settings, store, relay contracts, and explicit provider adapters |
 | `internal/users` | User lifecycle, notification settings, and user-facing account state | May use settings and store |
 | `internal/settings` | Typed runtime configuration and persisted option loading | Uses store plus focused leaf validators/calculators |
+| `internal/payments/{stripe,creem,waffo}` | Payment-provider HTTP clients, request construction and response validation | Uses billing contracts and transport infrastructure; never imports HTTP handlers |
 | `internal/operations` | Cross-domain administration, schedules, leases, and runtime operations | Orchestrates auth, billing, channels, users, settings, and store |
 | `internal/catalog` | Model and deployment catalog behavior | Uses domain services and focused provider clients |
 | `internal/store` | Database initialization, entities, migrations, hooks, and transaction primitives | Persistence boundary; does not import HTTP composition |
@@ -62,6 +69,14 @@ Focused leaves such as `auth/roles`, `billing/quota`, `billing/expression`, and
 ownership. `operations` is the explicit home for workflows that genuinely cross
 several domains; those workflows should not be hidden in the router or in generic
 helpers.
+
+Business packages and relay packages must not import `internal/httpapi` or
+`internal/app`. In particular, provider correlation fingerprints belong to
+`platform/cryptoutil`, not request-context utilities. `platform/mail` owns SMTP
+transport configuration and delivery invariants; `settings/smtp.go` decodes
+persisted options and `settings/smtp_runtime.go` resolves deployment overrides.
+The application injects that resolver when initializing the mailer. Each send
+still reads one complete current snapshot, preserving configuration hot reload.
 
 ### Persistence cohesion
 
@@ -93,6 +108,13 @@ settlement paths share a dense private dependency graph. Keeping those internals
 private is preferable to manufacturing exports or package cycles solely to create
 smaller directories.
 
+The ordinary OpenAI HTTP adapter decodes and validates requests before calling
+`engine.Execute`. `contract.RequestState` carries the captured identity, token,
+model permissions and authorized groups into engine/task lifecycles. These
+packages never import HTTP middleware or request-context helpers. Existing
+provider streaming, affinity and native-protocol adapters still use Gin's
+transport interfaces; this is not a claim that all relay code is framework-free.
+
 ## Frontend and protocol module
 
 The frontend is organized as `web/src/app` for bootstrap, routing, session
@@ -100,8 +122,21 @@ coordination, and layouts; `web/src/features` for domain behavior and adjacent
 tests; and `web/src/shared` for reusable UI, browser, configuration, and transport
 code. The former `web/src/views` and `web/src/lib` trees are not part of the
 maintained layout.
-Global styling stays in `web/src/styles.css`; feature styles remain beside their
-components rather than creating a one-file architectural directory.
+`web/src/styles.css` is the stylesheet entry point. Shared element/form styles
+live in `shared/ui/base.css`, shell styles in `app/layout/shell.css`, and business
+styles beside their features. App composition directly selects feature pages;
+there is no cross-domain AdminConsole. Large profile/channel/wallet views keep
+coordination and shared mutation ownership separate from their focused panels.
+Model metadata and deployment requests have distinct API and contract modules.
+
+Production features consume another feature only through its `index.ts` public
+entry point. Shared modules cannot import features/app, and features cannot
+import app composition. The frontend lint command enforces these boundaries.
+
+Assembled HTTP tests remain in `httpapi/router` as external-package contract
+tests. Database lifetime, dashboard sessions, request helpers and channel-specific
+fixtures have separate named files. These fixtures use process-global application
+state and remain serial; splitting them does not make them safe for `t.Parallel`.
 
 `protocolkit/` has its own `go.mod` and its own test inventory. The root module
 requires it and uses a local `replace` during repository builds. Root packages may
@@ -120,8 +155,14 @@ node scripts/verify-repository-layout.mjs --self-test
 
 The guard rejects legacy source paths, broken command/web/protocolkit
 relationships, protocolkit-to-root imports, and production imports of
-`internal/testutil`. It also compares every top-level `func Test*` declaration in
-a `*_test.go` file with `scripts/manifests/go-tests.json`. Root-module selectors
+`internal/testutil`. It enforces production dependency boundaries: infrastructure
+stays below application domains, store/settings use their explicitly permitted
+leaves, business/relay code cannot import HTTP adapters, providers cannot import
+relay lifecycle orchestration, and HTTP components cannot import the router.
+Integration tests may import the complete application graph and are excluded
+from production dependency restrictions. It also compares every top-level
+`func Test*` declaration in a `*_test.go` file with
+`scripts/manifests/go-tests.json`. Root-module selectors
 and standalone protocolkit selectors are recorded separately. Functions named
 `Test*` in production files are intentionally not tests and are not inventoried.
 `TestMain` is also excluded: it is a package lifecycle hook, not a runnable test.

@@ -2,31 +2,8 @@ import type { FormEvent } from 'react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { EMPTY_MODEL, EMPTY_VENDOR, ModelEditor, VendorEditor, modelInput, vendorInput } from './ModelEditors';
-import {
-  MODEL_PAGE_SIZE,
-  createModel,
-  createVendor,
-  deleteModel,
-  deleteVendor,
-  getModel,
-  getVendor,
-  loadMissingModels,
-  loadModels,
-  loadVendors,
-  previewUpstream,
-  setModelStatus,
-  syncUpstream,
-  updateModel,
-  updateVendor,
-  type MetadataPage,
-  type ModelMutationInput,
-  type ModelQuery,
-  type SyncLocale,
-  type SyncPreview,
-  type VendorMetadata,
-  type VendorMutationInput,
-  type VendorPage
-} from './models-api';
+import { createModel, createVendor, deleteModel, deleteVendor, getModel, getVendor, loadMissingModels, loadModels, loadVendors, previewUpstream, setModelStatus, syncUpstream, updateModel, updateVendor } from "./metadata-api";
+import { MODEL_PAGE_SIZE, type MetadataPage, type ModelMutationInput, type ModelQuery, type SyncLocale, type SyncPreview, type VendorMetadata, type VendorMutationInput, type VendorPage } from "./metadata-contracts";
 import { ErrorPanel, LoadingPanel, NoticeBanner, Overlay, formatDate, formatNumber, type EditorMode, type Notice } from './models-ui';
 
 export const EMPTY_MODEL_QUERY: ModelQuery = {

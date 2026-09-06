@@ -22,7 +22,7 @@ func updateBillingOption(t *testing.T, do func(string, string, string) *httptest
 }
 
 func TestBillingSettingsAreValidatedAndAffectLivePricing(t *testing.T) {
-	_, do, _ := setupChannelRead(t, roles.RoleRootUser)
+	_, do, _ := setupDashboardSession(t, roles.RoleRootUser)
 	t.Cleanup(func() { billingsvc.SetTopUpGroupRatios(map[string]float64{"default": 1, "vip": 1, "svip": 1}) })
 
 	assert.Equal(t, true, updateBillingOption(t, do, setting.PriceOption, "1")["success"])
@@ -65,7 +65,7 @@ func TestBillingSettingsAreValidatedAndAffectLivePricing(t *testing.T) {
 }
 
 func TestBillingSettingsDefaultsAndSecretsAreReadSafe(t *testing.T) {
-	_, do, _ := setupChannelRead(t, roles.RoleRootUser)
+	_, do, _ := setupDashboardSession(t, roles.RoleRootUser)
 	assert.Equal(t, true, updateBillingOption(t, do, setting.EpayKeyOption, "private-epay-signing-key")["success"])
 
 	recorder := do(http.MethodGet, "/api/option/", "")
@@ -92,7 +92,7 @@ func TestBillingSettingsDefaultsAndSecretsAreReadSafe(t *testing.T) {
 }
 
 func TestGrokViolationSettingsDefaultsAndStrictAdminValidation(t *testing.T) {
-	_, do, _ := setupChannelRead(t, roles.RoleRootUser)
+	_, do, _ := setupDashboardSession(t, roles.RoleRootUser)
 
 	recorder := do(http.MethodGet, "/api/option/", "")
 	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())

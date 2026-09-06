@@ -7,6 +7,7 @@ import (
 	billingsvc "github.com/tokenrouter/tokenrouter/internal/billing"
 	quotamath "github.com/tokenrouter/tokenrouter/internal/billing/quota"
 	"github.com/tokenrouter/tokenrouter/internal/httpapi/requestctx"
+	waffopayments "github.com/tokenrouter/tokenrouter/internal/payments/waffo"
 	"github.com/tokenrouter/tokenrouter/internal/platform/buildinfo"
 	"github.com/tokenrouter/tokenrouter/internal/platform/cryptoutil"
 	"github.com/tokenrouter/tokenrouter/internal/platform/httpx"
@@ -146,9 +147,9 @@ func RequestWaffoPay(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "创建订单失败"})
 		return
 	}
-	providerResult, err := currentWaffoClient().CreateOrder(c.Request.Context(), config, checkout)
+	providerResult, err := waffopayments.CurrentOrderClient().CreateOrder(c.Request.Context(), config, checkout)
 	if err != nil {
-		if waffoCreateDefinitelyRejected(err) {
+		if waffopayments.CreateDefinitelyRejected(err) {
 			if statusErr := billingsvc.UpdatePendingTopUpStatus(order.TradeNo, billingsvc.PaymentProviderWaffo, billingsvc.TopUpStatusFailed); statusErr != nil {
 				logging.SysError("Waffo rejection status update failed trade_no=" + order.TradeNo)
 			}
@@ -215,8 +216,8 @@ func WaffoWebhook(c *gin.Context) {
 		}
 		return
 	}
-	codec := currentWaffoSignatureCodec()
-	if !codec.Verify(body, c.GetHeader(WaffoSignatureHeader), config.PublicKey) {
+	codec := waffopayments.CurrentSignatureCodec()
+	if !codec.Verify(body, c.GetHeader(waffopayments.SignatureHeader), config.PublicKey) {
 		c.AbortWithStatus(http.StatusBadRequest)
 		return
 	}
@@ -279,7 +280,7 @@ func waffoSettlementFromEvent(result *waffoPaymentNotification, config setting.W
 	return settlement, result.OrderStatus, true
 }
 
-func writeWaffoWebhookResponse(c *gin.Context, codec WaffoSignatureCodec, config setting.WaffoConfig, success bool) {
+func writeWaffoWebhookResponse(c *gin.Context, codec waffopayments.SignatureCodec, config setting.WaffoConfig, success bool) {
 	body := []byte(`{"message":"failed"}`)
 	if success {
 		body = []byte(`{"message":"success"}`)
@@ -289,7 +290,7 @@ func writeWaffoWebhookResponse(c *gin.Context, codec WaffoSignatureCodec, config
 		c.AbortWithStatus(http.StatusInternalServerError)
 		return
 	}
-	c.Header(WaffoSignatureHeader, signature)
+	c.Header(waffopayments.SignatureHeader, signature)
 	c.Data(http.StatusOK, "application/json", body)
 }
 

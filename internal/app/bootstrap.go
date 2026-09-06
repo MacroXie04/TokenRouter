@@ -54,11 +54,12 @@ func Run() {
 		os.Exit(1)
 	}
 	httpx.InitSSRF()
-	mailtransport.InitMailer()
+	mailtransport.InitMailer(setting.EffectiveSMTPSetting)
 	if err := runRuntimeInitializers(defaultRuntimeInitializers()); err != nil {
 		logging.SysError("critical startup initialization failed: " + err.Error())
 		os.Exit(1)
 	}
+	configureBackgroundRecovery()
 	if err := operationssvc.StartBackgroundJobs(); err != nil {
 		logging.SysError("background job configuration error: " + err.Error())
 		os.Exit(1)
