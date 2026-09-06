@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/glebarez/sqlite"
+	"github.com/shopspring/decimal"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
@@ -59,6 +60,35 @@ func TestComputePerCallQuotaAndTokenReservation(t *testing.T) {
 	assert.Zero(t, token.RemainQuota)
 	assert.Equal(t, 100, token.UsedQuota)
 	assert.True(t, errors.Is(ReserveTokenQuota(token.Id, 1), ErrInsufficientTokenQuota))
+}
+
+func TestComputeSoraVideoQuotaExact(t *testing.T) {
+	previousPrices := ExportedModelPrices()
+	previousRatios := ExportedGroupRatios()
+	t.Cleanup(func() {
+		SetModelPriceRegistry(previousPrices)
+		SetGroupRatios(previousRatios)
+	})
+
+	prices := DefaultModelPriceRegistry()
+	SetModelPriceRegistry(prices)
+	SetGroupRatios(map[string]float64{"default": 1})
+
+	require.Equal(t, 0.3, prices["sora-2"].Prompt)
+	quota, err := ComputePerCallQuotaMultiplierForUser(
+		"sora-2", "", "default", decimal.NewFromInt(4),
+	)
+	require.NoError(t, err)
+	assert.Equal(t, 600_000, quota)
+
+	require.Equal(t, 0.5, prices["sora-2-pro"].Prompt)
+	highResolutionMultiplier := decimal.NewFromInt(8).
+		Mul(decimal.RequireFromString("1.666667"))
+	quota, err = ComputePerCallQuotaMultiplierForUser(
+		"sora-2-pro", "", "default", highResolutionMultiplier,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, 3_333_334, quota)
 }
 
 func TestCommitAcceptedPerCallIsAtomicAndIdempotent(t *testing.T) {

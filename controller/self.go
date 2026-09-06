@@ -58,20 +58,34 @@ func DeleteSelfPasskeys(c *gin.Context) {
 	userId := common.GetUserId(c)
 	// When the user has 2FA enabled, a 2FA security proof for the
 	// passkey.delete scope is required; otherwise confirm a passkey exists.
-	if service.TwoFAStatus(userId) {
+	twoFAEnabled, err := service.TwoFAStatusChecked(userId)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, dto.Fail("查询安全设置失败"))
+		return
+	}
+	if twoFAEnabled {
 		if !middleware.RequireSecurityProof(c, service.SecurityProofScopePasskeyDelete, []string{service.SecurityProofMethod2FA}) {
 			return
 		}
-	} else if !service.PasskeyEnabled(userId) {
-		c.JSON(http.StatusOK, gin.H{"success": false, "message": "该用户尚未绑定 Passkey"})
+	} else {
+		passkeyEnabled, err := service.PasskeyEnabledChecked(userId)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, dto.Fail("查询安全设置失败"))
+			return
+		}
+		if !passkeyEnabled {
+			c.JSON(http.StatusOK, gin.H{"success": false, "message": "该用户尚未绑定 Passkey"})
+			return
+		}
+	}
+	sid, ok := currentSid(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, dto.Fail("当前认证方式不支持解绑 Passkey"))
 		return
 	}
-	if err := service.DeleteAllPasskeys(userId); err != nil {
+	if err := service.DeleteAllPasskeysAndRotateSession(userId, sid); err != nil {
 		c.JSON(http.StatusInternalServerError, dto.Fail("解绑失败"))
 		return
-	}
-	if sid, ok := currentSid(c); ok {
-		_ = service.BumpAuthVersionKeepSession(userId, sid)
 	}
 	c.JSON(http.StatusOK, dto.OkMessage("Passkey 已解绑"))
 }
@@ -79,13 +93,28 @@ func DeleteSelfPasskeys(c *gin.Context) {
 // RegenerateBackupCodes replaces the user's 2FA backup codes with a fresh set.
 func RegenerateBackupCodes(c *gin.Context) {
 	userId := common.GetUserId(c)
-	codes, err := service.RegenerateBackupCodes(userId)
+	twoFAEnabled, err := service.TwoFAStatusChecked(userId)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, dto.Fail("查询安全设置失败"))
+		return
+	}
+	if !twoFAEnabled {
+		c.JSON(http.StatusBadRequest, dto.Fail(service.ErrTwoFANotEnabled.Error()))
+		return
+	}
+	if !middleware.RequireSecurityProof(c, service.SecurityProofScopeBackupCodeReset,
+		[]string{service.SecurityProofMethod2FA, service.SecurityProofMethodPasskey}) {
+		return
+	}
+	sid, ok := currentSid(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, dto.Fail("当前认证方式不支持重置备用码"))
+		return
+	}
+	codes, err := service.RegenerateBackupCodesAndRotateSession(userId, sid)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, dto.Fail(err.Error()))
 		return
-	}
-	if sid, ok := currentSid(c); ok {
-		_ = service.BumpAuthVersionKeepSession(userId, sid)
 	}
 	c.JSON(http.StatusOK, dto.Ok(gin.H{"backup_codes": codes}))
 }
@@ -93,15 +122,48 @@ func RegenerateBackupCodes(c *gin.Context) {
 // UpdateUserSetting stores the per-user quota warning configuration.
 func UpdateUserSetting(c *gin.Context) {
 	var req struct {
-		QuotaWarningThreshold int    `json:"quota_warning_threshold"`
-		QuotaWarningType      string `json:"quota_warning_type"`
+		QuotaWarningThreshold            int    `json:"quota_warning_threshold"`
+		QuotaWarningType                 string `json:"quota_warning_type"`
+		NotifyType                       string `json:"notify_type"`
+		WebhookURL                       string `json:"webhook_url"`
+		WebhookSecret                    string `json:"webhook_secret"`
+		NotificationEmail                string `json:"notification_email"`
+		BarkURL                          string `json:"bark_url"`
+		GotifyURL                        string `json:"gotify_url"`
+		GotifyToken                      string `json:"gotify_token"`
+		GotifyPriority                   int    `json:"gotify_priority"`
+		AcceptUnsetRatioModel            bool   `json:"accept_unset_model_ratio_model"`
+		RecordIPLog                      bool   `json:"record_ip_log"`
+		UpstreamModelUpdateNotifyEnabled *bool  `json:"upstream_model_update_notify_enabled"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, dto.Fail("参数错误"))
 		return
 	}
-	if err := service.UpdateUserSetting(common.GetUserId(c), req.QuotaWarningThreshold, req.QuotaWarningType); err != nil {
-		c.JSON(http.StatusBadRequest, dto.Fail(err.Error()))
+	notifyType := req.QuotaWarningType
+	if notifyType == "" {
+		notifyType = req.NotifyType
+	}
+	if req.QuotaWarningType != "" && req.NotifyType != "" && req.QuotaWarningType != req.NotifyType {
+		c.JSON(http.StatusBadRequest, dto.Fail("通知设置格式无效"))
+		return
+	}
+	if err := service.UpdateUserNotificationSettings(common.GetUserId(c), common.GetRole(c),
+		service.UserNotificationSettingsInput{
+			NotifyType:                       notifyType,
+			QuotaWarningThreshold:            req.QuotaWarningThreshold,
+			WebhookURL:                       req.WebhookURL,
+			WebhookSecret:                    req.WebhookSecret,
+			NotificationEmail:                req.NotificationEmail,
+			BarkURL:                          req.BarkURL,
+			GotifyURL:                        req.GotifyURL,
+			GotifyToken:                      req.GotifyToken,
+			GotifyPriority:                   req.GotifyPriority,
+			AcceptUnsetRatioModel:            req.AcceptUnsetRatioModel,
+			RecordIPLog:                      req.RecordIPLog,
+			UpstreamModelUpdateNotifyEnabled: req.UpstreamModelUpdateNotifyEnabled,
+		}); err != nil {
+		c.JSON(http.StatusBadRequest, dto.Fail("通知设置格式无效"))
 		return
 	}
 	c.JSON(http.StatusOK, dto.OkMessage("设置已保存"))
@@ -128,7 +190,11 @@ func GetOAuthBindings(c *gin.Context) {
 // The path carries the numeric provider id; no existence check is performed
 // (reference semantics — unbinding a non-bound provider succeeds).
 func UnbindOAuth(c *gin.Context) {
-	if err := service.UnbindOAuth(common.GetUserId(c), c.Param("provider_id")); err != nil {
+	identity, ok := requireLoginSession(c)
+	if !ok {
+		return
+	}
+	if err := service.UnbindOAuth(identity.UserID, c.Param("provider_id")); err != nil {
 		c.JSON(http.StatusBadRequest, dto.Fail(err.Error()))
 		return
 	}

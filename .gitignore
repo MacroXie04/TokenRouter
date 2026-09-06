@@ -5,6 +5,8 @@
 # Databases / data
 *.db
 *.db-journal
+/.tokenrouter-jimeng-recovery/
+/.tokenrouter-video-recovery/
 /data/
 
 # Environment / secrets

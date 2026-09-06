@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -13,6 +14,42 @@ import (
 	"github.com/tokenrouter/tokenrouter/model"
 	"github.com/tokenrouter/tokenrouter/setting"
 )
+
+func TestJimengTaskHistoryNeverReturnsLegacyProviderBodies(t *testing.T) {
+	_, do, userID := setupTaskHistory(t, constant.RoleRootUser)
+	providerSecret := "provider-echoed-access-secret"
+	providerTaskID := "opaque-provider-task-id"
+	require.NoError(t, model.DB.Create(&model.Task{
+		TaskID: "task-jimeng-private-history", Platform: "47",
+		UserId: userID, Status: model.TaskStatusFailure, Progress: "100%", FailReason: providerSecret,
+		Data: `{"message":"` + providerSecret + `","data":{"task_id":"` + providerTaskID + `"}}`,
+	}).Error)
+
+	rec := do(http.MethodGet, "/api/task/self?task_id=task-jimeng-private-history", "")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	items, _ := taskHistoryItems(t, rec)
+	require.Len(t, items, 1)
+	assert.NotContains(t, rec.Body.String(), providerSecret)
+	assert.NotContains(t, rec.Body.String(), providerTaskID)
+	assert.Equal(t, map[string]any{"status": model.TaskStatusFailure}, items[0]["data"])
+	assert.Equal(t, "Jimeng task failed", items[0]["fail_reason"])
+	assert.NotContains(t, items[0], "result_url")
+
+	// The administrator view applies the identical redaction policy.
+	require.NoError(t, model.DB.Create(&model.Task{
+		TaskID: "task-jimeng-private-admin", Platform: strconv.Itoa(int(constant.ChannelTypeJimeng)),
+		UserId: userID, Status: model.TaskStatusFailure, Progress: "100%", FailReason: providerSecret,
+		Data: `{"message":"` + providerSecret + `","data":{"task_id":"` + providerTaskID + `"}}`,
+	}).Error)
+	adminRec := do(http.MethodGet, "/api/task/?task_id=task-jimeng-private-admin", "")
+	require.Equal(t, http.StatusOK, adminRec.Code, adminRec.Body.String())
+	adminItems, _ := taskHistoryItems(t, adminRec)
+	require.Len(t, adminItems, 1)
+	assert.NotContains(t, adminRec.Body.String(), providerSecret)
+	assert.NotContains(t, adminRec.Body.String(), providerTaskID)
+	assert.Equal(t, "Jimeng task failed", adminItems[0]["fail_reason"])
+	assert.NotContains(t, adminItems[0], "result_url")
+}
 
 func setupTaskHistory(t *testing.T, role int) (http.Handler, func(method, path, body string) *httptest.ResponseRecorder, int) {
 	t.Helper()
@@ -231,4 +268,10 @@ func TestTaskHistoryPageBounds(t *testing.T) {
 	items, page = taskHistoryItems(t, rec)
 	assert.Len(t, items, 3)
 	assert.Equal(t, float64(3), page["page_size"])
+
+	rec = do(http.MethodGet, "/api/task/self?p=2147483647&page_size=2147483647", "")
+	items, page = taskHistoryItems(t, rec)
+	assert.Empty(t, items)
+	assert.Equal(t, float64(1_000_000), page["page"])
+	assert.Equal(t, float64(100), page["page_size"])
 }

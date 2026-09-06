@@ -2,8 +2,10 @@ package service
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/glebarez/sqlite"
@@ -24,7 +26,33 @@ func TestParseBalance(t *testing.T) {
 	assert.Equal(t, 0.0, parseBalance([]byte(`{"nope":1}`)))
 }
 
+func TestUpdateChannelBalanceResponseIsBounded(t *testing.T) {
+	t.Cleanup(common.InitSSRF)
+	t.Setenv("SSRF_DISABLE", "true")
+	common.InitSSRF()
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(&model.Channel{}))
+	model.DB = db
+
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(strings.Repeat("x", int(maxBalanceResponseBytes)+1)))
+	}))
+	defer mock.Close()
+	channel := model.Channel{Name: "bounded", Type: 1, Key: "k", Status: 1, Balance: 9,
+		Setting: `{"balance_url":"` + mock.URL + `"}`}
+	require.NoError(t, model.DB.Create(&channel).Error)
+
+	_, err = UpdateChannelBalance(channel.Id)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, common.ErrBodyTooLarge))
+	var got model.Channel
+	require.NoError(t, model.DB.First(&got, channel.Id).Error)
+	assert.Equal(t, 9.0, got.Balance, "an oversized response must not update the stored balance")
+}
+
 func TestUpdateChannelBalance(t *testing.T) {
+	t.Cleanup(common.InitSSRF)
 	t.Setenv("SSRF_DISABLE", "true")
 	common.InitSSRF()
 

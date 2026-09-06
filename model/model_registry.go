@@ -1,18 +1,21 @@
 package model
 
-import "gorm.io/gorm"
+import (
+	"github.com/tokenrouter/tokenrouter/constant"
+	"gorm.io/gorm"
+)
 
 // Vendor is a model vendor/provider registry entry.
 type Vendor struct {
 	Id          int            `json:"id" gorm:"primaryKey"`
-	Name        string         `json:"name" gorm:"type:varchar(128);not null"`
+	Name        string         `json:"name" gorm:"size:128;not null;uniqueIndex:uk_vendor_name_delete_at,priority:1"`
 	ActiveName  *string        `json:"-" gorm:"type:varchar(128)"`
 	Description string         `json:"description,omitempty" gorm:"type:text"`
 	Icon        string         `json:"icon,omitempty" gorm:"type:varchar(128)"`
-	Status      int            `json:"status"`
-	CreatedTime int64          `json:"created_time"`
-	UpdatedTime int64          `json:"updated_time"`
-	DeletedAt   gorm.DeletedAt `json:"-" gorm:"index"`
+	Status      int            `json:"status" gorm:"default:1"`
+	CreatedTime int64          `json:"created_time" gorm:"bigint"`
+	UpdatedTime int64          `json:"updated_time" gorm:"bigint"`
+	DeletedAt   gorm.DeletedAt `json:"-" gorm:"index;uniqueIndex:uk_vendor_name_delete_at,priority:2"`
 }
 
 func (Vendor) TableName() string { return "vendors" }
@@ -20,25 +23,26 @@ func (Vendor) TableName() string { return "vendors" }
 // Model is a model metadata registry entry.
 type Model struct {
 	Id           int            `json:"id" gorm:"primaryKey"`
-	ModelName    string         `json:"model_name" gorm:"type:varchar(128);not null"`
+	ModelName    string         `json:"model_name" gorm:"size:128;not null;uniqueIndex:uk_model_name_delete_at,priority:1"`
 	ActiveName   *string        `json:"-" gorm:"type:varchar(128)"`
 	Description  string         `json:"description,omitempty" gorm:"type:text"`
 	Icon         string         `json:"icon,omitempty" gorm:"type:varchar(128)"`
 	Tags         string         `json:"tags,omitempty" gorm:"type:varchar(255)"`
 	VendorID     int            `json:"vendor_id,omitempty" gorm:"index"`
 	Endpoints    string         `json:"endpoints,omitempty" gorm:"type:text"`
-	Status       int            `json:"status"`
-	SyncOfficial int            `json:"sync_official"`
-	CreatedTime  int64          `json:"created_time"`
-	UpdatedTime  int64          `json:"updated_time"`
-	NameRule     int            `json:"name_rule"`
-	DeletedAt    gorm.DeletedAt `json:"-" gorm:"index"`
+	Status       int            `json:"status" gorm:"default:1"`
+	SyncOfficial int            `json:"sync_official" gorm:"default:1"`
+	CreatedTime  int64          `json:"created_time" gorm:"bigint"`
+	UpdatedTime  int64          `json:"updated_time" gorm:"bigint"`
+	NameRule     int            `json:"name_rule" gorm:"default:0"`
+	DeletedAt    gorm.DeletedAt `json:"-" gorm:"index;uniqueIndex:uk_model_name_delete_at,priority:2"`
 
-	BoundChannels []BoundChannel `json:"bound_channels,omitempty" gorm:"-"`
-	EnableGroups  []string       `json:"enable_groups,omitempty" gorm:"-"`
-	QuotaTypes    []int          `json:"quota_types,omitempty" gorm:"-"`
-	MatchedModels []string       `json:"matched_models,omitempty" gorm:"-"`
-	MatchedCount  int            `json:"matched_count,omitempty" gorm:"-"`
+	BoundChannels          []BoundChannel          `json:"bound_channels,omitempty" gorm:"-"`
+	EnableGroups           []string                `json:"enable_groups,omitempty" gorm:"-"`
+	QuotaTypes             []int                   `json:"quota_types,omitempty" gorm:"-"`
+	MatchedModels          []string                `json:"matched_models,omitempty" gorm:"-"`
+	MatchedCount           int                     `json:"matched_count,omitempty" gorm:"-"`
+	SupportedEndpointTypes []constant.EndpointType `json:"supported_endpoint_types" gorm:"-"`
 }
 
 func (Model) TableName() string { return "models" }

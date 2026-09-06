@@ -17,7 +17,7 @@ import (
 func createRedemptionRow(t *testing.T, name string, status int, quota, expiredTime int64) model.Redemption {
 	t.Helper()
 	r := model.Redemption{
-		UserId: 1, Key: common.GenerateUUID(), Status: status, Name: name,
+		UserId: 1, Key: common.BestEffortUUID(), Status: status, Name: name,
 		Quota: int(quota), CreatedTime: common.NowTimestamp(), ExpiredTime: expiredTime,
 	}
 	require.NoError(t, model.DB.Create(&r).Error)

@@ -1,8 +1,14 @@
 package controller
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
+	"strings"
+	"time"
+	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
 
@@ -11,13 +17,21 @@ import (
 	"github.com/tokenrouter/tokenrouter/service"
 )
 
-// maxFlowQuotaSpanSeconds is the reference 1-month (30-day) span limit for
-// self-service flow/quota data queries.
-const maxFlowQuotaSpanSeconds = 2592000
+const (
+	dashboardDataQueryTimeout     = 5 * time.Second
+	dashboardDataMaxResponseBytes = 2 * 1024 * 1024
+	dashboardDataMaxUsernameRunes = 64
+	dashboardDataErrorMessage     = "unable to load dashboard data"
+)
 
-// parseFlowQuotaTimeRange parses and validates the reference
-// start_timestamp/end_timestamp pair (both required, end >= start).
-func parseFlowQuotaTimeRange(c *gin.Context) (int64, int64, bool) {
+var (
+	errDashboardDataEncoding         = errors.New("dashboard data response encoding failed")
+	errDashboardDataResponseTooLarge = errors.New("dashboard data response exceeds safe limits")
+)
+
+// parseDashboardDataTimeRange uniformly validates every dashboard endpoint's
+// required positive timestamps, ordering, and maximum 30-day span.
+func parseDashboardDataTimeRange(c *gin.Context) (int64, int64, bool) {
 	startTimestamp, err := strconv.ParseInt(c.Query("start_timestamp"), 10, 64)
 	if err != nil || startTimestamp <= 0 {
 		c.JSON(http.StatusOK, gin.H{"success": false, "message": "invalid start_timestamp"})
@@ -32,85 +46,178 @@ func parseFlowQuotaTimeRange(c *gin.Context) (int64, int64, bool) {
 		c.JSON(http.StatusOK, gin.H{"success": false, "message": "invalid time range"})
 		return 0, 0, false
 	}
+	if err := service.ValidateDashboardDataRange(startTimestamp, endTimestamp); err != nil {
+		message := "invalid time range"
+		if errors.Is(err, service.ErrDashboardDataRangeTooLarge) {
+			message = "时间跨度不能超过 1 个月"
+		}
+		c.JSON(http.StatusOK, gin.H{"success": false, "message": message})
+		return 0, 0, false
+	}
 	return startTimestamp, endTimestamp, true
+}
+
+// parseDashboardDataUsername validates the optional administrator filter at
+// the same 64-code-point boundary as the persisted usage username field. A
+// repeated parameter is ambiguous and therefore rejected rather than taking
+// the first value silently.
+func parseDashboardDataUsername(c *gin.Context) (string, bool) {
+	values, present := c.GetQueryArray("username")
+	if !present {
+		return "", true
+	}
+	if len(values) != 1 {
+		c.JSON(http.StatusOK, gin.H{"success": false, "message": "invalid username"})
+		return "", false
+	}
+	username := values[0]
+	if !utf8.ValidString(username) || utf8.RuneCountInString(username) > dashboardDataMaxUsernameRunes || strings.TrimSpace(username) != username {
+		c.JSON(http.StatusOK, gin.H{"success": false, "message": "invalid username"})
+		return "", false
+	}
+	for _, character := range username {
+		if character <= 0x1f || (character >= 0x7f && character <= 0x9f) ||
+			(character >= 0x202a && character <= 0x202e) || (character >= 0x2066 && character <= 0x2069) {
+			c.JSON(http.StatusOK, gin.H{"success": false, "message": "invalid username"})
+			return "", false
+		}
+	}
+	return username, true
+}
+
+func dashboardDataContext(c *gin.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(c.Request.Context(), dashboardDataQueryTimeout)
+}
+
+func dashboardDataFailureKind(err error) string {
+	switch {
+	case errors.Is(err, context.Canceled):
+		return "canceled"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "timeout"
+	case errors.Is(err, service.ErrDashboardDataTooLarge), errors.Is(err, errDashboardDataResponseTooLarge):
+		return "result_too_large"
+	case errors.Is(err, service.ErrInvalidDashboardDataRange), errors.Is(err, service.ErrDashboardDataRangeTooLarge):
+		return "invalid_range"
+	case errors.Is(err, errDashboardDataEncoding):
+		return "encoding"
+	default:
+		return "query"
+	}
+}
+
+func writeDashboardDataError(c *gin.Context, err error) {
+	common.LogError("dashboard data request failed",
+		"path", c.FullPath(),
+		"failure", dashboardDataFailureKind(err),
+		"request_id", common.GetRequestId(c),
+	)
+	c.JSON(http.StatusOK, gin.H{"success": false, "message": dashboardDataErrorMessage})
+}
+
+func writeDashboardDataSuccess(c *gin.Context, data any) {
+	payload, err := json.Marshal(gin.H{"success": true, "message": "", "data": data})
+	if err != nil {
+		writeDashboardDataError(c, errDashboardDataEncoding)
+		return
+	}
+	if len(payload) > dashboardDataMaxResponseBytes {
+		writeDashboardDataError(c, errDashboardDataResponseTooLarge)
+		return
+	}
+	c.Data(http.StatusOK, "application/json; charset=utf-8", payload)
 }
 
 // GetAllQuotaDates returns the admin quota histogram (reference /api/data/).
 func GetAllQuotaDates(c *gin.Context) {
-	startTimestamp, _ := strconv.ParseInt(c.Query("start_timestamp"), 10, 64)
-	endTimestamp, _ := strconv.ParseInt(c.Query("end_timestamp"), 10, 64)
-	username := c.Query("username")
-	dates, err := service.GetAllQuotaDates(startTimestamp, endTimestamp, username)
-	if err != nil {
-		c.JSON(http.StatusOK, gin.H{"success": false, "message": err.Error()})
+	startTimestamp, endTimestamp, ok := parseDashboardDataTimeRange(c)
+	if !ok {
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"success": true, "message": "", "data": dates})
+	ctx, cancel := dashboardDataContext(c)
+	defer cancel()
+	username, ok := parseDashboardDataUsername(c)
+	if !ok {
+		return
+	}
+	dates, err := service.GetAllQuotaDatesContext(ctx, startTimestamp, endTimestamp, username)
+	if err != nil {
+		writeDashboardDataError(c, err)
+		return
+	}
+	writeDashboardDataSuccess(c, dates)
 }
 
 // GetQuotaDatesByUser returns the admin per-(username, hour) histogram
 // (reference /api/data/users).
 func GetQuotaDatesByUser(c *gin.Context) {
-	startTimestamp, _ := strconv.ParseInt(c.Query("start_timestamp"), 10, 64)
-	endTimestamp, _ := strconv.ParseInt(c.Query("end_timestamp"), 10, 64)
-	dates, err := service.GetQuotaDataGroupByUser(startTimestamp, endTimestamp)
-	if err != nil {
-		c.JSON(http.StatusOK, gin.H{"success": false, "message": err.Error()})
+	startTimestamp, endTimestamp, ok := parseDashboardDataTimeRange(c)
+	if !ok {
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"success": true, "message": "", "data": dates})
+	ctx, cancel := dashboardDataContext(c)
+	defer cancel()
+	dates, err := service.GetQuotaDataGroupByUserContext(ctx, startTimestamp, endTimestamp)
+	if err != nil {
+		writeDashboardDataError(c, err)
+		return
+	}
+	writeDashboardDataSuccess(c, dates)
 }
 
 // GetUserQuotaDates returns the authenticated user's per-(model, hour)
 // histogram with the reference 1-month span limit (reference /api/data/self).
 func GetUserQuotaDates(c *gin.Context) {
 	userId := common.GetUserId(c)
-	startTimestamp, _ := strconv.ParseInt(c.Query("start_timestamp"), 10, 64)
-	endTimestamp, _ := strconv.ParseInt(c.Query("end_timestamp"), 10, 64)
-	if endTimestamp-startTimestamp > maxFlowQuotaSpanSeconds {
-		c.JSON(http.StatusOK, gin.H{"success": false, "message": "时间跨度不能超过 1 个月"})
+	startTimestamp, endTimestamp, ok := parseDashboardDataTimeRange(c)
+	if !ok {
 		return
 	}
-	dates, err := service.GetQuotaDataByUserId(userId, startTimestamp, endTimestamp)
+	ctx, cancel := dashboardDataContext(c)
+	defer cancel()
+	dates, err := service.GetQuotaDataByUserIDContext(ctx, userId, startTimestamp, endTimestamp)
 	if err != nil {
-		c.JSON(http.StatusOK, gin.H{"success": false, "message": err.Error()})
+		writeDashboardDataError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"success": true, "message": "", "data": dates})
+	writeDashboardDataSuccess(c, dates)
 }
 
 // GetAllFlowQuotaDates returns the role-scoped flow histogram for the admin
 // console (reference /api/data/flow).
 func GetAllFlowQuotaDates(c *gin.Context) {
-	startTimestamp, endTimestamp, ok := parseFlowQuotaTimeRange(c)
+	startTimestamp, endTimestamp, ok := parseDashboardDataTimeRange(c)
 	if !ok {
 		return
 	}
-	username := c.Query("username")
-	dates, err := service.GetFlowQuotaData(startTimestamp, endTimestamp, username, 0, common.GetRole(c))
-	if err != nil {
-		c.JSON(http.StatusOK, gin.H{"success": false, "message": err.Error()})
+	ctx, cancel := dashboardDataContext(c)
+	defer cancel()
+	username, ok := parseDashboardDataUsername(c)
+	if !ok {
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"success": true, "message": "", "data": dates})
+	dates, err := service.GetFlowQuotaDataContext(ctx, startTimestamp, endTimestamp, username, 0, common.GetRole(c))
+	if err != nil {
+		writeDashboardDataError(c, err)
+		return
+	}
+	writeDashboardDataSuccess(c, dates)
 }
 
 // GetUserFlowQuotaDates returns the authenticated user's flow histogram with
 // the reference validations (reference /api/data/flow/self).
 func GetUserFlowQuotaDates(c *gin.Context) {
 	userId := common.GetUserId(c)
-	startTimestamp, endTimestamp, ok := parseFlowQuotaTimeRange(c)
+	startTimestamp, endTimestamp, ok := parseDashboardDataTimeRange(c)
 	if !ok {
 		return
 	}
-	if endTimestamp-startTimestamp > maxFlowQuotaSpanSeconds {
-		c.JSON(http.StatusOK, gin.H{"success": false, "message": "时间跨度不能超过 1 个月"})
-		return
-	}
-	dates, err := service.GetFlowQuotaData(startTimestamp, endTimestamp, "", userId, constant.RoleCommonUser)
+	ctx, cancel := dashboardDataContext(c)
+	defer cancel()
+	dates, err := service.GetFlowQuotaDataContext(ctx, startTimestamp, endTimestamp, "", userId, constant.RoleCommonUser)
 	if err != nil {
-		c.JSON(http.StatusOK, gin.H{"success": false, "message": err.Error()})
+		writeDashboardDataError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"success": true, "message": "", "data": dates})
+	writeDashboardDataSuccess(c, dates)
 }

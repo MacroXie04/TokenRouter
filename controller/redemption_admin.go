@@ -16,7 +16,7 @@ func SearchRedemptions(c *gin.Context) {
 	keyword := c.Query("keyword")
 	status := c.Query("status")
 	pi := getPageQuery(c)
-	items, total, err := service.SearchRedemptions(keyword, status, (pi.Page-1)*pi.PageSize, pi.PageSize)
+	items, total, err := service.SearchRedemptions(keyword, status, pi.Offset(), pi.PageSize)
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{"success": false, "message": err.Error()})
 		return
@@ -64,6 +64,10 @@ func UpdateRedemption(c *gin.Context) {
 	if statusOnly == "" {
 		if req.ExpiredTime != 0 && req.ExpiredTime < common.NowTimestamp() {
 			c.JSON(http.StatusOK, gin.H{"success": false, "message": "过期时间不能早于当前时间"})
+			return
+		}
+		if req.Quota <= 0 || !common.QuotaWithinBounds(req.Quota) {
+			c.JSON(http.StatusOK, gin.H{"success": false, "message": "兑换额度必须在安全范围内"})
 			return
 		}
 	}

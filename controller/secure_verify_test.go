@@ -39,9 +39,12 @@ func setupSecureTest(t *testing.T, role int) (http.Handler, func(method, path, b
 	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
 	require.NoError(t, err)
 	require.NoError(t, db.AutoMigrate(&model.User{}, &model.Token{}, &model.UserSession{},
-		&model.Channel{}, &model.TwoFA{}, &model.PasskeyCredential{}, &model.AuthFlow{}, &model.Log{}, &model.Option{}))
+		&model.Channel{}, &model.TwoFA{}, &model.TwoFABackupCode{}, &model.PasskeyCredential{},
+		&model.AuthFlow{}, &model.Log{}, &model.Option{}, &model.AuthzRole{}, &model.CasbinRule{}))
 	model.DB = db
 	model.LOG_DB = db
+	require.NoError(t, service.InitCasbin())
+	require.NoError(t, service.InitPermissionAuthz())
 	require.NoError(t, setting.UpdateOption(setting.QuotaPerUnitOption, "500000"))
 	require.NoError(t, service.InitWebAuthn())
 
@@ -112,6 +115,33 @@ func issueProof(t *testing.T, do func(method, path, body string, headers map[str
 	return decode(t, rec)["data"].(map[string]any)["proof_token"].(string)
 }
 
+type storedTwoFAState struct {
+	Secret       string
+	Enabled      bool
+	BackupHashes []string
+}
+
+func snapshotTwoFA(t *testing.T, userId int) storedTwoFAState {
+	t.Helper()
+	var twoFA model.TwoFA
+	require.NoError(t, model.DB.Where("user_id = ?", userId).First(&twoFA).Error)
+	var backups []model.TwoFABackupCode
+	require.NoError(t, model.DB.Where("user_id = ?", userId).Order("id").Find(&backups).Error)
+	state := storedTwoFAState{Secret: twoFA.Secret, Enabled: twoFA.IsEnabled}
+	for _, backup := range backups {
+		state.BackupHashes = append(state.BackupHashes, backup.CodeHash)
+	}
+	return state
+}
+
+func seedProtectedTwoFA(t *testing.T, userId int) {
+	t.Helper()
+	enableTwoFA(t, userId)
+	require.NoError(t, model.DB.Create(&model.TwoFABackupCode{
+		UserId: userId, CodeHash: common.SHA256Hex("87654321"), CreatedAt: time.Now(),
+	}).Error)
+}
+
 // --- UniversalVerify (POST /api/verify) ---
 
 func TestUniversalVerify2FA(t *testing.T) {
@@ -153,6 +183,175 @@ func TestUniversalVerifyRejectsBadInput(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), "用户未启用2FA")
 }
 
+// --- 2FA setup/reset protection ---
+
+func TestTwoFAFirstSetupRemainsSessionAuthenticated(t *testing.T) {
+	_, do, userId, _ := setupSecureTest(t, constant.RoleCommonUser)
+	rec := do(http.MethodPost, "/api/user/2fa/start", "", nil)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	data := decode(t, rec)["data"].(map[string]any)
+	require.NotEmpty(t, data["secret"])
+	state := snapshotTwoFA(t, userId)
+	assert.Equal(t, data["secret"], state.Secret)
+	assert.False(t, state.Enabled)
+}
+
+func TestTwoFAFirstSetupRejectsPATWithoutSession(t *testing.T) {
+	r, _, userId, _ := setupSecureTest(t, constant.RoleCommonUser)
+	pat, err := service.GenerateUserAccessToken(userId)
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/api/user/2fa/start", nil)
+	req.Header.Set("Authorization", "Bearer "+pat)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, "SECURITY_PROOF_INVALID", decode(t, rec)["code"])
+	var count int64
+	require.NoError(t, model.DB.Model(&model.TwoFA{}).Where("user_id = ?", userId).Count(&count).Error)
+	assert.Zero(t, count)
+}
+
+func TestTwoFAEnabledResetRequiresBoundProofWithoutStateLoss(t *testing.T) {
+	t.Run("missing proof", func(t *testing.T) {
+		_, do, userId, _ := setupSecureTest(t, constant.RoleCommonUser)
+		seedProtectedTwoFA(t, userId)
+		before := snapshotTwoFA(t, userId)
+
+		rec := do(http.MethodPost, "/api/user/2fa/start", "", nil)
+		require.Equal(t, http.StatusForbidden, rec.Code)
+		assert.Equal(t, "SECURITY_PROOF_REQUIRED", decode(t, rec)["code"])
+		assert.Equal(t, before, snapshotTwoFA(t, userId))
+	})
+
+	t.Run("forged proof", func(t *testing.T) {
+		_, do, userId, _ := setupSecureTest(t, constant.RoleCommonUser)
+		seedProtectedTwoFA(t, userId)
+		before := snapshotTwoFA(t, userId)
+
+		rec := do(http.MethodPost, "/api/user/2fa/start", "",
+			map[string]string{"X-Security-Proof": "not.a.jwt"})
+		require.Equal(t, http.StatusForbidden, rec.Code)
+		assert.Equal(t, "SECURITY_PROOF_INVALID", decode(t, rec)["code"])
+		assert.Equal(t, before, snapshotTwoFA(t, userId))
+	})
+
+	t.Run("wrong scope", func(t *testing.T) {
+		_, do, userId, _ := setupSecureTest(t, constant.RoleCommonUser)
+		seedProtectedTwoFA(t, userId)
+		proof := issueProof(t, do, service.SecurityProofScopeChannelKeyRead)
+		before := snapshotTwoFA(t, userId)
+
+		rec := do(http.MethodPost, "/api/user/2fa/start", "",
+			map[string]string{"X-Security-Proof": proof})
+		require.Equal(t, http.StatusForbidden, rec.Code)
+		assert.Equal(t, "SECURITY_PROOF_SCOPE_MISMATCH", decode(t, rec)["code"])
+		assert.Equal(t, before, snapshotTwoFA(t, userId))
+	})
+
+	t.Run("different session", func(t *testing.T) {
+		_, do, userId, sid := setupSecureTest(t, constant.RoleCommonUser)
+		seedProtectedTwoFA(t, userId)
+		var user model.User
+		var session model.UserSession
+		require.NoError(t, model.DB.First(&user, userId).Error)
+		require.NoError(t, model.DB.Where("sid = ?", sid).First(&session).Error)
+		proof, _, err := service.IssueSecurityProof(service.SessionIdentity{
+			UserID: userId, SessionID: "another-session",
+			UserAuthVersion: user.AuthVersion, SessionVersion: session.Version,
+		}, service.SecurityProofMethod2FA, []string{service.SecurityProofScopeTwoFAReset})
+		require.NoError(t, err)
+		before := snapshotTwoFA(t, userId)
+
+		rec := do(http.MethodPost, "/api/user/2fa/start", "",
+			map[string]string{"X-Security-Proof": proof})
+		require.Equal(t, http.StatusForbidden, rec.Code)
+		assert.Equal(t, "SECURITY_PROOF_INVALID", decode(t, rec)["code"])
+		assert.Equal(t, before, snapshotTwoFA(t, userId))
+	})
+
+	t.Run("stale auth version", func(t *testing.T) {
+		_, do, userId, sid := setupSecureTest(t, constant.RoleCommonUser)
+		seedProtectedTwoFA(t, userId)
+		proof := issueProof(t, do, service.SecurityProofScopeTwoFAReset)
+		before := snapshotTwoFA(t, userId)
+		require.NoError(t, service.BumpAuthVersionKeepSession(userId, sid))
+
+		rec := do(http.MethodPost, "/api/user/2fa/start", "",
+			map[string]string{"X-Security-Proof": proof})
+		require.Equal(t, http.StatusUnauthorized, rec.Code)
+		assert.Equal(t, "未登录或会话已过期", decode(t, rec)["message"])
+		assert.Equal(t, before, snapshotTwoFA(t, userId))
+	})
+
+	t.Run("valid proof", func(t *testing.T) {
+		_, do, userId, _ := setupSecureTest(t, constant.RoleCommonUser)
+		seedProtectedTwoFA(t, userId)
+		proof := issueProof(t, do, service.SecurityProofScopeTwoFAReset)
+		before := snapshotTwoFA(t, userId)
+
+		rec := do(http.MethodPost, "/api/user/2fa/start", "",
+			map[string]string{"X-Security-Proof": proof})
+		require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+		after := snapshotTwoFA(t, userId)
+		assert.NotEqual(t, before.Secret, after.Secret)
+		assert.True(t, after.Enabled, "proved reset must not open an unproved setup window")
+		assert.Equal(t, before.BackupHashes, after.BackupHashes)
+
+		// Even directly after an authorized reset, an unproved follow-up reset
+		// remains denied and cannot replace the just-issued secret.
+		rec = do(http.MethodPost, "/api/user/2fa/start", "", nil)
+		require.Equal(t, http.StatusForbidden, rec.Code)
+		assert.Equal(t, after, snapshotTwoFA(t, userId))
+	})
+}
+
+func TestRegenerateBackupCodesRequiresScopedProof(t *testing.T) {
+	_, do, userId, _ := setupSecureTest(t, constant.RoleCommonUser)
+	seedProtectedTwoFA(t, userId)
+	before := snapshotTwoFA(t, userId)
+
+	rec := do(http.MethodPost, "/api/user/2fa/backup_codes", "", nil)
+	require.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, "SECURITY_PROOF_REQUIRED", decode(t, rec)["code"])
+	assert.Equal(t, before, snapshotTwoFA(t, userId))
+
+	wrongScope := issueProof(t, do, service.SecurityProofScopeTwoFAReset)
+	rec = do(http.MethodPost, "/api/user/2fa/backup_codes", "",
+		map[string]string{"X-Security-Proof": wrongScope})
+	require.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, "SECURITY_PROOF_SCOPE_MISMATCH", decode(t, rec)["code"])
+	assert.Equal(t, before, snapshotTwoFA(t, userId))
+
+	proof := issueProof(t, do, service.SecurityProofScopeBackupCodeReset)
+	rec = do(http.MethodPost, "/api/user/2fa/backup_codes", "",
+		map[string]string{"X-Security-Proof": proof})
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	after := snapshotTwoFA(t, userId)
+	assert.Equal(t, before.Secret, after.Secret)
+	assert.True(t, after.Enabled)
+	assert.Len(t, after.BackupHashes, 8)
+	assert.NotContains(t, after.BackupHashes, before.BackupHashes[0])
+}
+
+func TestDisableTwoFAVerifiesExistingFactorWithoutStateLoss(t *testing.T) {
+	_, do, userId, _ := setupSecureTest(t, constant.RoleCommonUser)
+	seedProtectedTwoFA(t, userId)
+	before := snapshotTwoFA(t, userId)
+
+	rec := do(http.MethodPost, "/api/user/2fa/disable", `{"code":"not-a-code"}`, nil)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Equal(t, before, snapshotTwoFA(t, userId))
+
+	// An existing one-time recovery code is an accepted step-up alternative.
+	rec = do(http.MethodPost, "/api/user/2fa/disable", `{"code":"87654321"}`, nil)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	after := snapshotTwoFA(t, userId)
+	assert.Equal(t, before.Secret, after.Secret)
+	assert.False(t, after.Enabled)
+	assert.Empty(t, after.BackupHashes)
+}
+
 // --- Channel key protection ---
 
 func TestChannelKeyMaskedAndStepUp(t *testing.T) {
@@ -188,6 +387,35 @@ func TestChannelKeyMaskedAndStepUp(t *testing.T) {
 	assert.Equal(t, "sk-secret-upstream", decode(t, rec)["data"].(map[string]any)["key"])
 }
 
+func TestLegacyMultiKeyCredentialsStayOffOrdinaryChannelResponses(t *testing.T) {
+	_, do, userId, _ := setupSecureTest(t, constant.RoleRootUser)
+	weight := uint(1)
+	channel := model.Channel{
+		Name: "legacy-multi-key", Type: int(constant.ChannelTypeOpenAI), Key: "",
+		Other: `["legacy-secret-one","legacy-secret-two"]`, Status: constant.ChannelStatusEnabled,
+		BaseURL: "https://api.example.com", Models: "gpt-4", Group: "default", Weight: &weight,
+	}
+	require.NoError(t, model.DB.Create(&channel).Error)
+
+	for _, path := range []string{
+		"/api/channel",
+		"/api/channel/" + common.Int2Str(channel.Id),
+		"/api/channel/search?keyword=legacy-multi-key",
+	} {
+		rec := do(http.MethodGet, path, "", nil)
+		require.Equal(t, http.StatusOK, rec.Code, "path: %s; body: %s", path, rec.Body.String())
+		assert.NotContains(t, rec.Body.String(), "legacy-secret-one", path)
+		assert.NotContains(t, rec.Body.String(), "legacy-secret-two", path)
+	}
+
+	enableTwoFA(t, userId)
+	proof := issueProof(t, do, service.SecurityProofScopeChannelKeyRead)
+	rec := do(http.MethodPost, "/api/channel/"+common.Int2Str(channel.Id)+"/key", "",
+		map[string]string{"X-Security-Proof": proof})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, "legacy-secret-one\nlegacy-secret-two", decode(t, rec)["data"].(map[string]any)["key"])
+}
+
 func TestChannelKeyRootOnlyAndScopeCheck(t *testing.T) {
 	// A plain admin is not root: RootAuth rejects before the proof check.
 	_, do, _, _ := setupSecureTest(t, constant.RoleAdminUser)
@@ -210,6 +438,11 @@ func TestChannelKeyRootOnlyAndScopeCheck(t *testing.T) {
 
 func TestPasskeyRegisterGateWith2FA(t *testing.T) {
 	_, do, userId, _ := setupSecureTest(t, constant.RoleCommonUser)
+	previousPasskeyEnabled := setting.GetOption(setting.PasskeyEnabledOption)
+	require.NoError(t, setting.UpdateOption(setting.PasskeyEnabledOption, "true"))
+	t.Cleanup(func() {
+		require.NoError(t, setting.UpdateOption(setting.PasskeyEnabledOption, previousPasskeyEnabled))
+	})
 	enableTwoFA(t, userId)
 
 	// Without a proof the register begin is rejected.
@@ -229,6 +462,21 @@ func TestPasskeyRegisterGateWith2FA(t *testing.T) {
 	rec = do(http.MethodDelete, "/api/user/passkey", "", map[string]string{"X-Security-Proof": proof2})
 	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
 	assert.Contains(t, rec.Body.String(), "Passkey 已解绑")
+}
+
+func TestPasskeyRegisterRejectsPATBeforeTwoFAStorageAccess(t *testing.T) {
+	r, _, userID, _ := setupSecureTest(t, constant.RoleCommonUser)
+	pat, err := service.GenerateUserAccessToken(userID)
+	require.NoError(t, err)
+	require.NoError(t, model.DB.Migrator().DropTable(&model.TwoFA{}))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/user/passkey/register/begin", nil)
+	req.Header.Set("Authorization", "Bearer "+pat)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assert.Equal(t, "AUTH_SESSION_REQUIRED", decode(t, rec)["code"])
 }
 
 func TestPasskeyDeleteWithout2FA(t *testing.T) {

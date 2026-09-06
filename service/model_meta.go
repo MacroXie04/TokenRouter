@@ -208,6 +208,11 @@ func EnrichModelMetadata(metadata []*model.Model) error {
 		if quotaType {
 			item.QuotaTypes = []int{1}
 		}
+		channelTypes := make([]int, 0, len(item.BoundChannels))
+		for _, channel := range item.BoundChannels {
+			channelTypes = append(channelTypes, channel.Type)
+		}
+		item.SupportedEndpointTypes = EndpointTypesForModelAndChannelTypes(item.ModelName, channelTypes)
 	}
 	return nil
 }

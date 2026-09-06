@@ -1,6 +1,8 @@
 package controller
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -13,6 +15,16 @@ import (
 	"github.com/tokenrouter/tokenrouter/model"
 	"github.com/tokenrouter/tokenrouter/service"
 )
+
+type fetchModelsRequest struct {
+	ChannelID      int     `json:"channel_id"`
+	BaseURL        *string `json:"base_url"`
+	Type           int     `json:"type"`
+	Key            string  `json:"key"`
+	AdvancedCustom *string `json:"advanced_custom"`
+	HeaderOverride *string `json:"header_override"`
+	Proxy          *string `json:"proxy"`
+}
 
 // channelAudit records an admin channel-management action in the system log.
 func channelAudit(c *gin.Context, action string, payload any) {
@@ -42,7 +54,11 @@ func UpdateChannelStatus(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "参数错误"})
 		return
 	}
-	changed := service.UpdateChannelStatus(id, req.Status, "manual operation")
+	changed, err := service.UpdateChannelStatusChecked(id, req.Status, "manual operation")
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"success": false, "message": err.Error()})
+		return
+	}
 	channelAudit(c, "channel.status_update", map[string]any{"id": id, "status": req.Status, "changed": changed})
 	c.JSON(http.StatusOK, gin.H{"success": true, "message": "", "data": changed})
 }
@@ -58,11 +74,10 @@ func BatchUpdateChannelStatus(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "参数错误"})
 		return
 	}
-	changedCount := 0
-	for _, id := range req.Ids {
-		if service.UpdateChannelStatus(id, req.Status, "manual batch operation") {
-			changedCount++
-		}
+	changedCount, err := service.UpdateChannelStatusesChecked(req.Ids, req.Status, "manual batch operation")
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"success": false, "message": err.Error()})
+		return
 	}
 	channelAudit(c, "channel.status_update_batch", map[string]any{
 		"count": changedCount, "total": len(req.Ids), "status": req.Status,
@@ -238,30 +253,19 @@ func FetchUpstreamModels(c *gin.Context) {
 // FetchModels previews the upstream model list for a not-yet-saved channel
 // description (type/base_url/key).
 func FetchModels(c *gin.Context) {
-	var req struct {
-		ChannelID      int     `json:"channel_id"`
-		BaseURL        *string `json:"base_url"`
-		Type           int     `json:"type"`
-		Key            string  `json:"key"`
-		AdvancedCustom *string `json:"advanced_custom"`
-		HeaderOverride *string `json:"header_override"`
-		Proxy          *string `json:"proxy"`
-	}
+	var req fetchModelsRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "Invalid request"})
 		return
 	}
 
 	var channel *model.Channel
-	if req.ChannelID > 0 {
-		saved, err := service.GetChannelByID(req.ChannelID)
+	if req.Type == int(constant.ChannelTypeAdvancedCustom) || req.ChannelID > 0 {
+		var err error
+		channel, err = buildAdvancedCustomModelPreviewChannel(req)
 		if err != nil {
 			c.JSON(http.StatusOK, gin.H{"success": false, "message": err.Error()})
 			return
-		}
-		channel = saved
-		if req.BaseURL != nil {
-			channel.BaseURL = strings.TrimSpace(*req.BaseURL)
 		}
 	} else {
 		baseURL := ""
@@ -271,7 +275,11 @@ func FetchModels(c *gin.Context) {
 		if baseURL == "" && req.Type > 0 && req.Type < len(constant.ChannelBaseURLs) {
 			baseURL = constant.ChannelBaseURLs[req.Type]
 		}
-		channel = &model.Channel{Type: req.Type, Key: req.Key, BaseURL: baseURL}
+		key := strings.TrimSpace(req.Key)
+		if req.Type != int(constant.ChannelTypeCodex) {
+			key = strings.TrimSpace(strings.Split(key, "\n")[0])
+		}
+		channel = &model.Channel{Type: req.Type, Key: key, BaseURL: baseURL}
 	}
 
 	ids, err := service.FetchUpstreamModelsForChannel(channel)
@@ -283,6 +291,71 @@ func FetchModels(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"success": true, "message": "", "data": ids})
+}
+
+func buildAdvancedCustomModelPreviewChannel(req fetchModelsRequest) (*model.Channel, error) {
+	var channel *model.Channel
+	if req.ChannelID > 0 {
+		saved, err := service.GetChannelByID(req.ChannelID)
+		if err != nil {
+			return nil, err
+		}
+		if saved.Type != int(constant.ChannelTypeAdvancedCustom) {
+			return nil, fmt.Errorf("channel %d is not an advanced custom channel", req.ChannelID)
+		}
+		channel = saved
+	} else {
+		if req.Type != int(constant.ChannelTypeAdvancedCustom) {
+			return nil, fmt.Errorf("channel type must be advanced custom")
+		}
+		channel = &model.Channel{
+			Type: req.Type,
+			Key:  strings.TrimSpace(strings.Split(strings.TrimSpace(req.Key), "\n")[0]),
+		}
+	}
+	if req.BaseURL != nil {
+		channel.BaseURL = strings.TrimSpace(*req.BaseURL)
+	}
+
+	settings := make(map[string]json.RawMessage)
+	if raw := strings.TrimSpace(channel.OtherSettings); raw != "" {
+		if err := common.UnmarshalJsonStr(raw, &settings); err != nil || settings == nil {
+			return nil, errors.New("channel settings must be a JSON object")
+		}
+	}
+	if req.AdvancedCustom != nil {
+		rawConfig := strings.TrimSpace(*req.AdvancedCustom)
+		if rawConfig == "" {
+			return nil, errors.New("advanced_custom is required")
+		}
+		var config map[string]json.RawMessage
+		if err := common.UnmarshalJsonStr(rawConfig, &config); err != nil || config == nil {
+			return nil, errors.New("advanced_custom must be a JSON object")
+		}
+		settings["advanced_custom"] = json.RawMessage(rawConfig)
+	} else if req.ChannelID <= 0 {
+		return nil, errors.New("advanced_custom is required")
+	}
+	encodedSettings, err := common.Marshal(settings)
+	if err != nil {
+		return nil, errors.New("encode advanced_custom settings")
+	}
+	channel.OtherSettings = string(encodedSettings)
+
+	if req.HeaderOverride != nil {
+		rawHeaderOverride := strings.TrimSpace(*req.HeaderOverride)
+		if rawHeaderOverride != "" {
+			var headers map[string]any
+			if err := common.UnmarshalJsonStr(rawHeaderOverride, &headers); err != nil || headers == nil {
+				return nil, errors.New("header_override must be a JSON object")
+			}
+		}
+		channel.HeaderOverride = rawHeaderOverride
+	}
+	if req.Proxy != nil && strings.TrimSpace(*req.Proxy) != "" {
+		return nil, errors.New("per-channel proxy is not supported for model discovery")
+	}
+	return channel, nil
 }
 
 // BatchSetChannelTag sets the tag of the given channels.
@@ -472,9 +545,14 @@ func UpdateChannelBalance(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"success": false, "message": "多密钥渠道不支持余额查询"})
 		return
 	}
-	balance, err := service.FetchChannelBalance(channel)
+	balance, err := service.FetchChannelBalanceContext(c.Request.Context(), channel)
 	if err != nil {
-		c.JSON(http.StatusOK, gin.H{"success": false, "message": err.Error()})
+		if errors.Is(err, service.ErrChannelBalanceUnsupported) {
+			c.JSON(http.StatusOK, gin.H{"success": false, "message": "尚未实现"})
+			return
+		}
+		common.SysError("channel balance refresh failed: " + err.Error())
+		c.JSON(http.StatusOK, gin.H{"success": false, "message": "余额查询失败"})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"success": true, "message": "", "balance": balance})
@@ -483,8 +561,9 @@ func UpdateChannelBalance(c *gin.Context) {
 // UpdateAllChannelsBalance refreshes the balance of every enabled single-key
 // channel; channels that run out of balance are disabled.
 func UpdateAllChannelsBalance(c *gin.Context) {
-	if err := service.UpdateAllChannelsBalances(); err != nil {
-		c.JSON(http.StatusOK, gin.H{"success": false, "message": err.Error()})
+	if err := service.UpdateAllChannelsBalancesContext(c.Request.Context()); err != nil {
+		common.SysError("all-channel balance refresh failed: " + err.Error())
+		c.JSON(http.StatusOK, gin.H{"success": false, "message": "余额批量刷新失败"})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"success": true, "message": ""})

@@ -6,20 +6,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/tokenrouter/tokenrouter/common"
 	"github.com/tokenrouter/tokenrouter/service"
 )
-
-// GetUptimeKumaStatus returns a small status payload for Uptime Kuma HTTP
-// monitoring (200 when the gateway is up).
-func GetUptimeKumaStatus(c *gin.Context) {
-	c.JSON(http.StatusOK, gin.H{
-		"status":    "up",
-		"version":   common.Version,
-		"node_name": service.NodeName(),
-		"uptime":    common.NowTimestamp() - StartTime,
-	})
-}
 
 func GetPerfMetricsSummary(c *gin.Context) {
 	result, err := service.QueryPerfMetricsSummary(perfMetricHours(c), service.ActivePerfMetricGroups())

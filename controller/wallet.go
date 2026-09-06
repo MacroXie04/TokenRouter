@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"errors"
 	"net/http"
 	"unicode/utf8"
 
@@ -8,7 +9,6 @@ import (
 
 	"github.com/tokenrouter/tokenrouter/common"
 	"github.com/tokenrouter/tokenrouter/dto"
-	"github.com/tokenrouter/tokenrouter/model"
 	"github.com/tokenrouter/tokenrouter/service"
 )
 
@@ -48,6 +48,10 @@ func CreateRedemption(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"success": false, "message": "过期时间不能早于当前时间"})
 		return
 	}
+	if req.Quota <= 0 || !common.QuotaWithinBounds(req.Quota) {
+		c.JSON(http.StatusOK, gin.H{"success": false, "message": "兑换额度必须在安全范围内"})
+		return
+	}
 	keys, err := service.CreateRedemptionBatch(common.GetUserId(c), req.Name, req.Quota, req.ExpiredTime, req.Count)
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{
@@ -65,7 +69,7 @@ func CreateRedemption(c *gin.Context) {
 // GetRedemptions lists redemption codes with the reference pageInfo paging.
 func GetRedemptions(c *gin.Context) {
 	pi := getPageQuery(c)
-	items, total, err := service.GetPagedRedemptions((pi.Page-1)*pi.PageSize, pi.PageSize)
+	items, total, err := service.GetPagedRedemptions(pi.Offset(), pi.PageSize)
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{"success": false, "message": err.Error()})
 		return
@@ -96,52 +100,73 @@ func Redeem(c *gin.Context) {
 
 // CheckIn records a daily check-in.
 func CheckIn(c *gin.Context) {
-	reward, err := service.CheckIn(common.GetUserId(c))
+	result, err := service.CheckInWithResult(common.GetUserId(c))
 	if err != nil {
-		c.JSON(http.StatusBadRequest, dto.Fail(err.Error()))
+		c.JSON(http.StatusOK, dto.Fail(err.Error()))
 		return
 	}
-	c.JSON(http.StatusOK, dto.Ok(gin.H{"reward": reward}))
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "签到成功",
+		"data": gin.H{
+			"quota_awarded": result.QuotaAwarded,
+			"checkin_date":  result.CheckinDate,
+		},
+	})
 }
 
 // CheckInStatus reports whether the user has checked in today.
 func CheckInStatus(c *gin.Context) {
-	c.JSON(http.StatusOK, dto.Ok(gin.H{"checked_in": service.CheckInStatus(common.GetUserId(c))}))
+	checkedIn, err := service.CheckInStatusChecked(common.GetUserId(c))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, dto.Fail("查询签到状态失败"))
+		return
+	}
+	c.JSON(http.StatusOK, dto.Ok(gin.H{"checked_in": checkedIn}))
 }
 
 // --- Wallet top-up ---
 
-// TopUp creates a recharge order. A "balance" payment method completes
-// immediately (offline-capable); external methods return a pending order that a
-// webhook/notification later settles.
+// TopUp redeems a server-issued recharge code. The reference API uses the
+// historical /user/topup path for redemption; clients must never be allowed to
+// create and immediately complete a self-declared "balance" recharge.
 func TopUp(c *gin.Context) {
+	if !service.PaymentComplianceConfirmed() {
+		c.JSON(http.StatusOK, gin.H{"success": false, "message": service.ErrPaymentComplianceRequired.Error()})
+		return
+	}
 	var req struct {
-		Amount        int    `json:"amount" binding:"required"`
-		Money         float64 `json:"money"`
-		PaymentMethod string `json:"payment_method" binding:"required"`
+		Key string `json:"key" binding:"required"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, dto.Fail("参数错误"))
+		c.JSON(http.StatusOK, gin.H{"success": false, "message": "兑换码无效"})
 		return
 	}
 	userId := common.GetUserId(c)
-	order, err := service.CreateTopUp(userId, int64(req.Amount), req.Money, req.PaymentMethod, "balance")
+	quota, err := service.Redeem(userId, req.Key)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, dto.Fail("创建订单失败"))
+		// Keep redemption failures intentionally indistinguishable so callers
+		// cannot enumerate whether a code exists, was used, or has expired.
+		common.SysLog("top-up redemption failed for user " + common.Int2Str(userId) + ": " + err.Error())
+		c.JSON(http.StatusOK, gin.H{"success": false, "message": "兑换失败"})
 		return
 	}
-	if req.PaymentMethod == "balance" {
-		if err := service.CompleteTopUp(userId, order.TradeNo, int64(req.Amount)); err != nil {
-			c.JSON(http.StatusInternalServerError, dto.Fail("充值失败"))
-			return
-		}
-	}
-	c.JSON(http.StatusOK, dto.Ok(gin.H{"trade_no": order.TradeNo, "status": order.Status}))
+	c.JSON(http.StatusOK, gin.H{"success": true, "message": "", "data": quota})
 }
 
 // GetSelfTopUps lists the user's top-up orders.
 func GetSelfTopUps(c *gin.Context) {
-	var orders []model.TopUp
-	model.DB.Where("user_id = ?", common.GetUserId(c)).Order("id desc").Find(&orders)
-	c.JSON(http.StatusOK, dto.Ok(orders))
+	page := getPageQuery(c)
+	orders, total, err := service.ListUserTopUps(common.GetUserId(c), c.Query("keyword"), page.Page, page.PageSize)
+	if err != nil {
+		if errors.Is(err, service.ErrTopUpQueryInvalid) {
+			c.JSON(http.StatusOK, dto.Fail(err.Error()))
+			return
+		}
+		c.JSON(http.StatusInternalServerError, dto.Fail("查询充值记录失败"))
+		return
+	}
+	page.Total = int(total)
+	page.Items = orders
+	c.JSON(http.StatusOK, dto.Ok(page))
 }

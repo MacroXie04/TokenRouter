@@ -30,6 +30,15 @@ func initMailDB(t *testing.T) {
 	model.LOG_DB = db
 }
 
+func markTestEmailVerified(t *testing.T, userID int, email string) {
+	t.Helper()
+	normalized, key, err := model.NormalizeVerifiedEmail(email)
+	require.NoError(t, err)
+	require.NoError(t, model.DB.Model(&model.User{}).Where("id = ?", userID).Updates(map[string]any{
+		"email": normalized, "email_verified": true, "verified_email_key": &key,
+	}).Error)
+}
+
 func TestPasswordResetFlow(t *testing.T) {
 	initMailDB(t)
 	prev := Mail
@@ -38,7 +47,7 @@ func TestPasswordResetFlow(t *testing.T) {
 	Mail = mock
 
 	u := newUser(t, 100)
-	require.NoError(t, model.DB.Model(u).Update("email", "user@example.com").Error)
+	markTestEmailVerified(t, u.Id, "user@example.com")
 
 	require.NoError(t, SendPasswordResetEmail("user@example.com"))
 	require.Len(t, mock.sent, 1)
@@ -69,7 +78,7 @@ func TestResetPasswordUnknownEmail(t *testing.T) {
 func TestResetPasswordWrongCode(t *testing.T) {
 	initMailDB(t)
 	u := newUser(t, 100)
-	require.NoError(t, model.DB.Model(u).Update("email", "user@example.com").Error)
+	markTestEmailVerified(t, u.Id, "user@example.com")
 	require.NoError(t, SendPasswordResetEmail("user@example.com"))
 	assert.Error(t, ResetPassword("user@example.com", "000000", "newpass123"))
 }

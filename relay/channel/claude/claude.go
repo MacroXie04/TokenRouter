@@ -2,8 +2,7 @@
 package claude
 
 import (
-	"bufio"
-	"io"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -12,6 +11,7 @@ import (
 	"github.com/tokenrouter/tokenrouter/constant"
 	"github.com/tokenrouter/tokenrouter/protocolkit"
 	relaycommon "github.com/tokenrouter/tokenrouter/relay/common"
+	"github.com/tokenrouter/tokenrouter/setting"
 )
 
 // Adaptor is the Anthropic adapter.
@@ -33,11 +33,14 @@ func (a *Adaptor) SetupRequestHeader(req *http.Request, meta *relaycommon.Meta) 
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("x-api-key", meta.APIKey)
 	req.Header.Set("anthropic-version", "2023-06-01")
+	setting.ApplyClaudeModelHeaders(meta.OriginalModelName, req.Header)
 	return nil
 }
 
 func (a *Adaptor) ConvertRequest(meta *relaycommon.Meta) ([]byte, error) {
 	claudeReq := protocolkit.OpenAIRequestToClaudeRequest(meta.Request)
+	claudeReq.Model = relaycommon.PrepareClaudeRequest(claudeReq, meta.OriginalModelName, meta.ModelName,
+		meta.Request != nil && (meta.Request.MaxTokens != nil || meta.Request.MaxCompletionTokens != nil))
 	return protocolkit.MarshalJSON(claudeReq)
 }
 
@@ -48,23 +51,28 @@ func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, meta *relaycom
 	if meta.IsStream {
 		return a.streamResponse(c, resp, meta)
 	}
-	return a.nonStreamResponse(c, resp)
+	return a.nonStreamResponse(c, resp, meta)
 }
 
-func (a *Adaptor) nonStreamResponse(c *gin.Context, resp *http.Response) (*protocolkit.Usage, error) {
-	body, err := io.ReadAll(resp.Body)
+func (a *Adaptor) nonStreamResponse(c *gin.Context, resp *http.Response, meta *relaycommon.Meta) (*protocolkit.Usage, error) {
+	body, err := relaycommon.ReadUpstreamBody(resp.Body, relaycommon.MaxUpstreamJSONBodyBytes)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("read Claude response: %w", err)
 	}
 	var claudeResp protocolkit.ClaudeResponse
 	if err := protocolkit.UnmarshalJSON(body, &claudeResp); err != nil {
-		return nil, relaycommon.HandleErrorResponse(resp)
+		return nil, fmt.Errorf("decode Claude response: %w", err)
+	}
+	if err := observeClaudeResponse(meta.ToolHooks(), &claudeResp); err != nil {
+		return nil, fmt.Errorf("observe Claude tool usage: %w", err)
 	}
 	openaiResp := protocolkit.ClaudeResponseToOpenAIResponse(&claudeResp)
 	out, _ := protocolkit.MarshalJSON(openaiResp)
 	c.Status(resp.StatusCode)
 	c.Header("Content-Type", "application/json")
-	_, _ = c.Writer.Write(out)
+	if _, err := c.Writer.Write(out); err != nil {
+		return openaiResp.Usage, fmt.Errorf("write Claude response: %w", err)
+	}
 	return openaiResp.Usage, nil
 }
 
@@ -79,18 +87,14 @@ func (a *Adaptor) streamResponse(c *gin.Context, resp *http.Response, meta *rela
 	var contentChars int
 	var claudeUsage *protocolkit.ClaudeUsage
 
-	scanner := bufio.NewScanner(resp.Body)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	scanner := relaycommon.NewUpstreamSSEScanner(resp.Body)
 
-	sendChunk := func(delta map[string]any) {
+	finishSent := false
+	sendChunk := func(delta protocolkit.ChatCompletionsStreamResponseChoiceDelta, finishReason *string) {
 		chunk := protocolkit.ChatCompletionsStreamResponse{
-			Object:  "chat.completion.chunk",
+			Object: "chat.completion.chunk",
 			Choices: []protocolkit.ChatCompletionsStreamResponseChoice{{
-				Index: 0,
-				Delta: protocolkit.ChatCompletionsStreamResponseChoiceDelta{
-					Content: strOr(delta["content"]),
-					Role:    strOr(delta["role"]),
-				},
+				Index: 0, Delta: delta, FinishReason: finishReason,
 			}},
 		}
 		b, _ := protocolkit.MarshalJSON(chunk)
@@ -113,24 +117,79 @@ func (a *Adaptor) streamResponse(c *gin.Context, resp *http.Response, meta *rela
 		}
 		switch event["type"] {
 		case "message_start":
-			if u := event["message"]; u != nil {
-				sendChunk(map[string]any{"role": "assistant"})
+			if message, ok := event["message"].(map[string]any); ok {
+				if decoded := decodeClaudeUsage(message["usage"]); decoded != nil {
+					if err := observeClaudeUsage(meta.ToolHooks(), decoded); err != nil {
+						return usage, fmt.Errorf("observe Claude stream tool usage: %w", err)
+					}
+					claudeUsage = decoded
+				}
+				sendChunk(protocolkit.ChatCompletionsStreamResponseChoiceDelta{Role: "assistant"}, nil)
 			}
 		case "content_block_delta":
-			if delta, ok := event["delta"].(map[string]any); ok && delta["type"] == "text_delta" {
-				text := strOr(delta["text"])
-				contentChars += len(text)
-				sendChunk(map[string]any{"content": text})
+			if delta, ok := event["delta"].(map[string]any); ok {
+				switch delta["type"] {
+				case "text_delta":
+					text := strOr(delta["text"])
+					contentChars += len(text)
+					sendChunk(protocolkit.ChatCompletionsStreamResponseChoiceDelta{Content: text}, nil)
+				case "thinking_delta":
+					text := strOr(delta["thinking"])
+					contentChars += len(text)
+					sendChunk(protocolkit.ChatCompletionsStreamResponseChoiceDelta{ReasoningContent: text}, nil)
+				case "input_json_delta":
+					partial := strOr(delta["partial_json"])
+					toolIndex := intFromAny(event["index"])
+					sendChunk(protocolkit.ChatCompletionsStreamResponseChoiceDelta{ToolCalls: []protocolkit.ToolCallResponse{{
+						Index: toolIndex, Function: &protocolkit.FunctionResponse{Arguments: partial},
+					}}}, nil)
+				}
 			}
 		case "content_block_start":
-			// Ignore non-text blocks (tool_use) in this pass-through mode.
+			if block, ok := event["content_block"].(map[string]any); ok && block["type"] == "tool_use" {
+				toolIndex := intFromAny(event["index"])
+				if hooks := meta.ToolHooks(); hooks != nil && hooks.ObserveClaudeToolUse != nil {
+					if err := hooks.ObserveClaudeToolUse(relaycommon.ToolClaudeObservation{
+						BlockIndex: &toolIndex, ID: strOr(block["id"]), Name: strOr(block["name"]),
+					}); err != nil {
+						return usage, fmt.Errorf("observe Claude stream tool use: %w", err)
+					}
+				}
+				arguments := ""
+				if input, exists := block["input"]; exists {
+					arguments = protocolkit.ToJSONString(input)
+					if arguments == "{}" {
+						arguments = ""
+					}
+				}
+				sendChunk(protocolkit.ChatCompletionsStreamResponseChoiceDelta{ToolCalls: []protocolkit.ToolCallResponse{{
+					Index: toolIndex, Id: strOr(block["id"]), Type: "function",
+					Function: &protocolkit.FunctionResponse{Name: strOr(block["name"]), Arguments: arguments},
+				}}}, nil)
+			}
 		case "message_delta":
-			if u, ok := event["usage"].(map[string]any); ok {
-				claudeUsage = &protocolkit.ClaudeUsage{
-					OutputTokens: intFromAny(u["output_tokens"]),
+			if decoded := decodeClaudeUsage(event["usage"]); decoded != nil {
+				if err := observeClaudeUsage(meta.ToolHooks(), decoded); err != nil {
+					return usage, fmt.Errorf("observe Claude stream tool usage: %w", err)
+				}
+				if claudeUsage == nil {
+					claudeUsage = decoded
+				} else {
+					claudeUsage.OutputTokens = decoded.OutputTokens
+				}
+			}
+			if delta, ok := event["delta"].(map[string]any); ok {
+				if reason := mapClaudeStreamStopReason(strOr(delta["stop_reason"])); reason != "" {
+					sendChunk(protocolkit.ChatCompletionsStreamResponseChoiceDelta{}, &reason)
+					finishSent = true
 				}
 			}
 		case "message_stop":
+			if !finishSent {
+				reason := "stop"
+				sendChunk(protocolkit.ChatCompletionsStreamResponseChoiceDelta{}, &reason)
+				finishSent = true
+			}
 			_, _ = c.Writer.WriteString("data: [DONE]\n\n")
 			c.Writer.Flush()
 		}
@@ -141,7 +200,65 @@ func (a *Adaptor) streamResponse(c *gin.Context, resp *http.Response, meta *rela
 	} else {
 		usage = protocolkit.ClaudeUsageToOpenAIUsage(claudeUsage)
 	}
+	if err := scanner.Err(); err != nil {
+		return usage, fmt.Errorf("read Claude event stream (maximum event %d bytes): %w",
+			relaycommon.MaxUpstreamSSEEventBytes, err)
+	}
 	return usage, nil
+}
+
+func observeClaudeResponse(hooks *relaycommon.ToolUsageHooks, response *protocolkit.ClaudeResponse) error {
+	if hooks == nil || response == nil {
+		return nil
+	}
+	for index := range response.Content {
+		block := &response.Content[index]
+		if block.Type != "tool_use" || hooks.ObserveClaudeToolUse == nil {
+			continue
+		}
+		blockIndex := index
+		if err := hooks.ObserveClaudeToolUse(relaycommon.ToolClaudeObservation{
+			BlockIndex: &blockIndex, ID: block.ID, Name: block.Name,
+		}); err != nil {
+			return err
+		}
+	}
+	return observeClaudeUsage(hooks, response.Usage)
+}
+
+func observeClaudeUsage(hooks *relaycommon.ToolUsageHooks, usage *protocolkit.ClaudeUsage) error {
+	if hooks == nil || hooks.SetClaudeWebSearchCount == nil || usage == nil || usage.ServerToolUse == nil {
+		return nil
+	}
+	return hooks.SetClaudeWebSearchCount(usage.ServerToolUse.WebSearchRequests)
+}
+
+func mapClaudeStreamStopReason(reason string) string {
+	switch reason {
+	case "end_turn", "stop_sequence":
+		return "stop"
+	case "max_tokens":
+		return "length"
+	case "tool_use":
+		return "tool_calls"
+	default:
+		return reason
+	}
+}
+
+func decodeClaudeUsage(value any) *protocolkit.ClaudeUsage {
+	if value == nil {
+		return nil
+	}
+	raw, err := protocolkit.MarshalJSON(value)
+	if err != nil {
+		return nil
+	}
+	var usage protocolkit.ClaudeUsage
+	if err := protocolkit.UnmarshalJSON(raw, &usage); err != nil {
+		return nil
+	}
+	return &usage
 }
 
 func strOr(v any) string {

@@ -4,6 +4,8 @@ import (
 	"errors"
 	"strings"
 
+	"gorm.io/gorm"
+
 	"github.com/tokenrouter/tokenrouter/common"
 	"github.com/tokenrouter/tokenrouter/model"
 	"github.com/tokenrouter/tokenrouter/setting"
@@ -29,6 +31,14 @@ var ErrTokenExpired = errors.New("token expired")
 // ErrInsufficientTokenQuota is returned when an atomic task reservation cannot
 // be made without overspending the token.
 var ErrInsufficientTokenQuota = errors.New("insufficient token quota")
+
+// ErrTokenQuotaOverflow is returned when a token credit or usage increment
+// would exceed the persisted quota range.
+var ErrTokenQuotaOverflow = errors.New("token quota overflow")
+
+// ErrUserTokenLimitReached is returned when a new token would exceed the
+// operator's per-user token limit.
+var ErrUserTokenLimitReached = errors.New("user token limit reached")
 
 // TokenByKey loads an enabled token by its key.
 func TokenByKey(key string) (*model.Token, error) {
@@ -67,30 +77,36 @@ func CheckTokenUsable(token *model.Token) error {
 
 // IncreaseTokenUsedQuota increments a token's used quota.
 func IncreaseTokenUsedQuota(id int, quota int) error {
-	if quota <= 0 {
-		return nil
-	}
-	return model.DB.Model(&model.Token{}).Where("id = ?", id).
-		Updates(map[string]any{
-			"used_quota":   gormExpr("used_quota + ?", quota),
-			"remain_quota": gormExpr("remain_quota - ?", quota),
-		}).Error
+	return DecreaseTokenQuota(id, quota)
 }
 
 // ReserveTokenQuota atomically removes quota from a limited token before an
 // asynchronous upstream operation begins. The reservation is committed to
 // used_quota only after the provider accepts the task.
 func ReserveTokenQuota(id, quota int) error {
-	if quota <= 0 {
+	if id <= 0 {
+		return ErrTokenNotFound
+	}
+	if err := validateQuotaAmount(quota); err != nil {
+		return err
+	}
+	if quota == 0 {
 		return nil
 	}
 	result := model.DB.Model(&model.Token{}).
-		Where("id = ? AND remain_quota >= ?", id, quota).
+		Where("id = ? AND remain_quota >= ? AND remain_quota <= ?", id, quota, common.MaxQuota).
 		UpdateColumn("remain_quota", gormExpr("remain_quota - ?", quota))
 	if result.Error != nil {
 		return result.Error
 	}
 	if result.RowsAffected == 0 {
+		var count int64
+		if err := model.DB.Model(&model.Token{}).Where("id = ?", id).Count(&count).Error; err != nil {
+			return err
+		}
+		if count == 0 {
+			return ErrTokenNotFound
+		}
 		return ErrInsufficientTokenQuota
 	}
 	return nil
@@ -98,47 +114,121 @@ func ReserveTokenQuota(id, quota int) error {
 
 // RefundTokenQuotaReservation releases a failed asynchronous reservation.
 func RefundTokenQuotaReservation(id, quota int) error {
-	if quota <= 0 {
-		return nil
-	}
-	result := model.DB.Model(&model.Token{}).Where("id = ?", id).
-		UpdateColumn("remain_quota", gormExpr("remain_quota + ?", quota))
-	if result.Error != nil {
-		return result.Error
-	}
-	if result.RowsAffected == 0 {
+	if id <= 0 {
 		return ErrTokenNotFound
 	}
-	return nil
+	if err := validateQuotaAmount(quota); err != nil {
+		return err
+	}
+	if quota == 0 {
+		return nil
+	}
+	return model.DB.Transaction(func(tx *gorm.DB) error {
+		var token model.Token
+		if err := subscriptionLockForUpdate(tx).Unscoped().Select("id", "remain_quota").First(&token, id).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrTokenNotFound
+			}
+			return err
+		}
+		newRemainQuota, ok := common.AddQuotaWithinBounds(token.RemainQuota, quota)
+		if !ok {
+			return ErrTokenQuotaOverflow
+		}
+		result := tx.Unscoped().Model(&model.Token{}).
+			Where("id = ? AND remain_quota = ?", id, token.RemainQuota).
+			UpdateColumn("remain_quota", newRemainQuota)
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return ErrTokenNotFound
+		}
+		return nil
+	})
 }
 
 // CommitTokenQuotaReservation records a successful reservation as used quota;
 // remain_quota was already deducted atomically by ReserveTokenQuota.
 func CommitTokenQuotaReservation(id, quota int) error {
-	if quota <= 0 {
-		return nil
-	}
-	result := model.DB.Model(&model.Token{}).Where("id = ?", id).
-		UpdateColumn("used_quota", gormExpr("used_quota + ?", quota))
-	if result.Error != nil {
-		return result.Error
-	}
-	if result.RowsAffected == 0 {
+	if id <= 0 {
 		return ErrTokenNotFound
 	}
-	return nil
+	if err := validateQuotaAmount(quota); err != nil {
+		return err
+	}
+	if quota == 0 {
+		return nil
+	}
+	return model.DB.Transaction(func(tx *gorm.DB) error {
+		var token model.Token
+		if err := subscriptionLockForUpdate(tx).Unscoped().Select("id", "used_quota").First(&token, id).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrTokenNotFound
+			}
+			return err
+		}
+		newUsedQuota, ok := common.AddQuotaWithinBounds(token.UsedQuota, quota)
+		if !ok {
+			return ErrTokenQuotaOverflow
+		}
+		result := tx.Unscoped().Model(&model.Token{}).
+			Where("id = ? AND used_quota = ?", id, token.UsedQuota).
+			UpdateColumn("used_quota", newUsedQuota)
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return ErrTokenNotFound
+		}
+		return nil
+	})
 }
 
 // DecreaseTokenQuota atomically deducts from remain_quota and adds to used_quota.
 func DecreaseTokenQuota(id int, quota int) error {
-	if quota <= 0 {
+	if id <= 0 {
+		return ErrTokenNotFound
+	}
+	if err := validateQuotaAmount(quota); err != nil {
+		return err
+	}
+	if quota == 0 {
 		return nil
 	}
-	return model.DB.Model(&model.Token{}).Where("id = ?", id).
-		Updates(map[string]any{
-			"remain_quota": gormExpr("remain_quota - ?", quota),
-			"used_quota":   gormExpr("used_quota + ?", quota),
-		}).Error
+	return model.DB.Transaction(func(tx *gorm.DB) error {
+		var token model.Token
+		if err := subscriptionLockForUpdate(tx).Unscoped().
+			Select("id", "remain_quota", "used_quota").First(&token, id).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrTokenNotFound
+			}
+			return err
+		}
+		if !common.QuotaWithinBounds(token.RemainQuota) {
+			return ErrTokenQuotaOverflow
+		}
+		if token.RemainQuota < quota {
+			return ErrInsufficientTokenQuota
+		}
+		newUsedQuota, ok := common.AddQuotaWithinBounds(token.UsedQuota, quota)
+		if !ok {
+			return ErrTokenQuotaOverflow
+		}
+		result := tx.Unscoped().Model(&model.Token{}).
+			Where("id = ? AND remain_quota = ? AND used_quota = ?", id, token.RemainQuota, token.UsedQuota).
+			Updates(map[string]any{
+				"remain_quota": token.RemainQuota - quota,
+				"used_quota":   newUsedQuota,
+			})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return ErrTokenNotFound
+		}
+		return nil
+	})
 }
 
 // UpdateTokenAccessedTime updates last-access timestamp.
@@ -172,6 +262,37 @@ func CountUserTokens(userId int) (int64, error) {
 	var total int64
 	err := model.DB.Model(&model.Token{}).Where("user_id = ?", userId).Count(&total).Error
 	return total, err
+}
+
+// CreateUserTokenWithinLimit serializes token creation on the owning user and
+// checks the configured limit in the same transaction as the insert. This
+// prevents concurrent dashboard requests from racing past the limit.
+func CreateUserTokenWithinLimit(token *model.Token, limit int) error {
+	if token == nil || token.UserId <= 0 || limit < 1 || limit > setting.MaxMaxUserTokens {
+		return errors.New("invalid token creation request")
+	}
+	return model.DB.Transaction(func(tx *gorm.DB) error {
+		var owner model.User
+		if err := subscriptionLockForUpdate(tx).Select("id").First(&owner, token.UserId).Error; err != nil {
+			return err
+		}
+		var boundary model.Token
+		err := tx.Model(&model.Token{}).
+			Select("id").
+			Where("user_id = ?", token.UserId).
+			Order("id").
+			Offset(limit - 1).
+			Limit(1).
+			Take(&boundary).Error
+		switch {
+		case err == nil:
+			return ErrUserTokenLimitReached
+		case !errors.Is(err, gorm.ErrRecordNotFound):
+			return err
+		default:
+			return tx.Create(token).Error
+		}
+	})
 }
 
 // searchHardLimit caps token-search result pages (reference contract).
@@ -266,8 +387,8 @@ func DeleteTokenById(id, userId int) error {
 // BatchDeleteTokens soft-deletes tokens scoped to their owner and returns the
 // deleted count.
 func BatchDeleteTokens(ids []int, userId int) (int, error) {
-	if len(ids) == 0 {
-		return 0, errors.New("ids 不能为空！")
+	if !validTokenBatch(ids, userId) {
+		return 0, errors.New("invalid token batch")
 	}
 	res := model.DB.Where("user_id = ? AND id IN ?", userId, ids).Delete(&model.Token{})
 	if res.Error != nil {
@@ -278,8 +399,28 @@ func BatchDeleteTokens(ids []int, userId int) (int, error) {
 
 // GetTokenKeysByIds loads id+key pairs scoped to the owner.
 func GetTokenKeysByIds(ids []int, userId int) ([]model.Token, error) {
+	if !validTokenBatch(ids, userId) {
+		return nil, errors.New("invalid token batch")
+	}
 	var tokens []model.Token
 	err := model.DB.Select("id", "key").
 		Where("user_id = ? AND id IN ?", userId, ids).Find(&tokens).Error
 	return tokens, err
+}
+
+func validTokenBatch(ids []int, userId int) bool {
+	if userId <= 0 || len(ids) == 0 || len(ids) > 100 {
+		return false
+	}
+	seen := make(map[int]struct{}, len(ids))
+	for _, id := range ids {
+		if id <= 0 {
+			return false
+		}
+		if _, duplicate := seen[id]; duplicate {
+			return false
+		}
+		seen[id] = struct{}{}
+	}
+	return true
 }

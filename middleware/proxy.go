@@ -10,19 +10,42 @@ import (
 )
 
 // InitTrustedProxies configures gin's trusted-proxy handling from TRUSTED_PROXIES.
-//   - unset/empty: trust all proxies (with a startup warning)
-//   - "none":      trust no proxies (strict mode)
-//   - list:        trust only the given CIDRs/IPs
+//   - unset/empty or "none": trust no proxies
+//   - list:                  trust only the given CIDRs/IPs
+//
+// Invalid lists fail closed. Gin retains the valid prefix of a proxy list when
+// parsing a later entry fails, so every error must explicitly clear that state.
 func InitTrustedProxies(r *gin.Engine) {
-	trusted := common.GetEnv("TRUSTED_PROXIES", "")
-	switch {
-	case trusted == "":
-		common.Logger.Warn("TRUSTED_PROXIES unset: trusting all proxies")
-	case trusted == "none":
-		_ = r.SetTrustedProxies([]string{})
-	default:
-		_ = r.SetTrustedProxies(strings.Split(trusted, ","))
+	// Gin trusts every proxy by default. Disable that behavior before parsing
+	// configuration so every early return remains fail-closed.
+	r.ForwardedByClientIP = false
+	_ = r.SetTrustedProxies(nil)
+
+	configured := strings.TrimSpace(common.GetEnv("TRUSTED_PROXIES", ""))
+	if configured == "" || strings.EqualFold(configured, "none") {
+		return
 	}
+
+	parts := strings.Split(configured, ",")
+	trusted := make([]string, 0, len(parts))
+	for _, part := range parts {
+		proxy := strings.TrimSpace(part)
+		if proxy == "" || strings.EqualFold(proxy, "none") {
+			common.Logger.Error("invalid TRUSTED_PROXIES; forwarded client IP headers disabled",
+				"value", configured)
+			return
+		}
+		trusted = append(trusted, proxy)
+	}
+
+	if err := r.SetTrustedProxies(trusted); err != nil {
+		// SetTrustedProxies assigns Gin's partially parsed CIDRs even on error.
+		_ = r.SetTrustedProxies(nil)
+		common.Logger.Error("invalid TRUSTED_PROXIES; forwarded client IP headers disabled",
+			"err", err.Error())
+		return
+	}
+	r.ForwardedByClientIP = true
 }
 
 // OriginGuard protects cookie-based endpoints (refresh/logout) from

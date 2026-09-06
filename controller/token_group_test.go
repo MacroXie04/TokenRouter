@@ -2,15 +2,19 @@ package controller_test
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 
+	"github.com/tokenrouter/tokenrouter/common"
 	"github.com/tokenrouter/tokenrouter/constant"
 	"github.com/tokenrouter/tokenrouter/model"
 	"github.com/tokenrouter/tokenrouter/service"
@@ -63,6 +67,23 @@ func TestTokenListMaskedAndScoped(t *testing.T) {
 	assert.Equal(t, "mine", body.Data.Items[0].Name)
 	assert.NotEqual(t, "sk-abcdefgh12345678zzzz", body.Data.Items[0].Key, "list must mask keys")
 	assert.True(t, strings.Contains(body.Data.Items[0].Key, "****"), "masked key shape")
+}
+
+func TestTokenListPropagatesCountFailure(t *testing.T) {
+	_, do, userId, _ := setupAuthAdjacent(t, constant.RoleCommonUser)
+	createTestToken(t, userId, "mine", "sk-count-failure")
+	var tokenQueries atomic.Int32
+	callbackName := "test:fail_token_count"
+	require.NoError(t, model.DB.Callback().Query().Before("gorm:query").Register(callbackName, func(tx *gorm.DB) {
+		if tx.Statement.Table == (model.Token{}).TableName() && tokenQueries.Add(1) == 2 {
+			tx.AddError(errors.New("injected token count failure"))
+		}
+	}))
+	t.Cleanup(func() { _ = model.DB.Callback().Query().Remove(callbackName) })
+
+	rec := do(http.MethodGet, "/api/token/", "")
+	require.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
+	assert.Equal(t, false, decodeBody(t, rec)["success"])
 }
 
 func TestTokenSearch(t *testing.T) {
@@ -118,6 +139,11 @@ func TestTokenCreateUpdate(t *testing.T) {
 	rec = do(http.MethodPost, "/api/token/", `{"name":"neg","remain_quota":-5}`)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 
+	// Persisted token quota uses the same int32-safe accounting domain as
+	// users, reservations, and logs.
+	rec = do(http.MethodPost, "/api/token/", `{"name":"huge","remain_quota":2147483648}`)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+
 	// Valid create (unlimited).
 	rec = do(http.MethodPost, "/api/token/", `{"name":"ok","unlimited_quota":true}`)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
@@ -126,6 +152,7 @@ func TestTokenCreateUpdate(t *testing.T) {
 	require.NoError(t, model.DB.Where("user_id = ? AND name = ?", userId, "ok").First(&created).Error)
 	assert.True(t, created.UnlimitedQuota)
 	assert.Equal(t, service.TokenStatusEnabled, created.Status)
+	assert.Empty(t, created.Group, "an omitted create group remains a dynamic user-group inheritance marker")
 
 	// Update with status_only=1 only flips the status.
 	rec = do(http.MethodPut, "/api/token/?status_only=1", `{"id":`+strconv.Itoa(created.Id)+`,"status":2,"name":"renamed"}`)
@@ -171,14 +198,21 @@ func TestTokenDeleteAndBatch(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 	assert.Contains(t, rec.Body.String(), "sk-keepme")
 
-	// More than 100 ids is rejected.
+	// More than 100 ids and ambiguous duplicate ids are rejected for both
+	// destructive and credential-disclosure batches.
 	var ids []string
 	for i := 0; i < 101; i++ {
 		ids = append(ids, strconv.Itoa(i+1))
 	}
-	rec = do(http.MethodPost, "/api/token/batch/keys", `{"ids":[`+strings.Join(ids, ",")+`]}`)
-	assert.Equal(t, http.StatusBadRequest, rec.Code)
-	assert.Contains(t, rec.Body.String(), "100")
+	for _, path := range []string{"/api/token/batch", "/api/token/batch/keys"} {
+		rec = do(http.MethodPost, path, `{"ids":[`+strings.Join(ids, ",")+`]}`)
+		assert.Equal(t, http.StatusBadRequest, rec.Code)
+		assert.Contains(t, rec.Body.String(), "100")
+		rec = do(http.MethodPost, path, `{"ids":[`+strconv.Itoa(keep.Id)+`,`+strconv.Itoa(keep.Id)+`]}`)
+		assert.Equal(t, http.StatusBadRequest, rec.Code)
+	}
+	model.DB.Model(&model.Token{}).Where("id = ?", keep.Id).Count(&count)
+	assert.Equal(t, int64(1), count, "invalid destructive batches must not delete a token")
 }
 
 func TestTokenMaxCount(t *testing.T) {
@@ -193,9 +227,34 @@ func TestTokenMaxCount(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), "已达到最大令牌数量限制")
 }
 
+type tokenEntropyFailureReader struct{}
+
+func (tokenEntropyFailureReader) Read([]byte) (int, error) {
+	return 0, errors.New("injected entropy failure")
+}
+
+func TestTokenCreateEntropyFailureDoesNotPersistCredential(t *testing.T) {
+	_, do, userId, _ := setupAuthAdjacent(t, constant.RoleCommonUser)
+	restore := common.SetSecureRandomReaderForTesting(tokenEntropyFailureReader{})
+	t.Cleanup(restore)
+
+	rec := do(http.MethodPost, "/api/token/", `{"name":"must-not-exist","unlimited_quota":true}`)
+	assert.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
+	assert.Equal(t, false, decodeBody(t, rec)["success"])
+
+	var count int64
+	require.NoError(t, model.DB.Model(&model.Token{}).
+		Where("user_id = ? AND name = ?", userId, "must-not-exist").Count(&count).Error)
+	assert.Zero(t, count)
+}
+
 func TestTokenAutoGroups(t *testing.T) {
 	_, do, _, _ := setupAuthAdjacent(t, constant.RoleCommonUser)
 	service.SetGroupRatios(map[string]float64{"vip": 2.0, "default": 1.0, "": 1.0})
+	require.NoError(t, setting.UpdateOptions(map[string]string{
+		setting.AutoGroupsOption:         `["vip","missing","default"]`,
+		setting.MaxTokenAutoGroupsOption: "1",
+	}))
 
 	rec := do(http.MethodGet, "/api/token/auto-groups", "")
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
@@ -206,17 +265,137 @@ func TestTokenAutoGroups(t *testing.T) {
 		} `json:"data"`
 	}
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
-	assert.Equal(t, []string{"default", "vip"}, body.Data.Groups)
-	assert.Equal(t, 5, body.Data.MaxCount)
+	assert.Equal(t, []string{"vip", "default"}, body.Data.Groups, "global priority order must be preserved after permission filtering")
+	assert.Equal(t, 1, body.Data.MaxCount)
 
 	// Creating a group-auto token stores JSON auto-groups.
-	rec = do(http.MethodPost, "/api/token/", `{"name":"auto-tok","group":"auto","auto_groups":["vip"]}`)
+	require.NoError(t, setting.UpdateOption(setting.MaxTokenAutoGroupsOption, "5"))
+	rec = do(http.MethodPost, "/api/token/", `{"name":"auto-tok","group":"auto","auto_groups":["vip","default"]}`)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	var created model.Token
 	require.NoError(t, model.DB.Where("name = ?", "auto-tok").First(&created).Error)
 	groups, err := created.GetAutoGroups()
 	require.NoError(t, err)
-	assert.Equal(t, []string{"vip"}, groups)
+	assert.Equal(t, []string{"vip", "default"}, groups, "submitted priority order must be stored unchanged")
+}
+
+func TestTokenGroupAuthorizationOnCreate(t *testing.T) {
+	_, do, userId, _ := setupAuthAdjacent(t, constant.RoleCommonUser)
+	require.NoError(t, setting.UpdateOption(setting.UserUsableGroupsOption, `{"default":"Default","vip":"VIP"}`))
+	service.SetGroupRatios(map[string]float64{"default": 1, "vip": 2, "staff": 1, "team": 1})
+
+	for _, test := range []struct {
+		name       string
+		payload    string
+		wantStatus int
+	}{
+		{name: "configured group", payload: `{"name":"vip-token","group":"vip"}`, wantStatus: http.StatusOK},
+		{name: "configured ratio outside allowlist", payload: `{"name":"staff-token","group":"staff"}`, wantStatus: http.StatusBadRequest},
+		{name: "explicit empty group", payload: `{"name":"empty-token","group":""}`, wantStatus: http.StatusBadRequest},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			rec := do(http.MethodPost, "/api/token/", test.payload)
+			assert.Equal(t, test.wantStatus, rec.Code, rec.Body.String())
+		})
+	}
+
+	require.NoError(t, service.SetUserGroup(userId, "team"))
+	rec := do(http.MethodPost, "/api/token/", `{"name":"own-token","group":"team"}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	require.NoError(t, service.SetUserGroup(userId, "no-ratio"))
+	rec = do(http.MethodPost, "/api/token/", `{"name":"own-without-ratio","group":"no-ratio"}`)
+	assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+}
+
+func TestTokenAutoGroupValidationOnCreate(t *testing.T) {
+	_, do, _, _ := setupAuthAdjacent(t, constant.RoleCommonUser)
+	require.NoError(t, setting.UpdateOption(setting.UserUsableGroupsOption, `{"default":"Default","vip":"VIP"}`))
+	service.SetGroupRatios(map[string]float64{"default": 1, "vip": 2, "staff": 1})
+
+	for _, test := range []struct {
+		name     string
+		groups   string
+		wantText string
+	}{
+		{name: "duplicate", groups: `["vip","vip"]`, wantText: "不能重复"},
+		{name: "over limit", groups: `["default","vip","default","vip","default","vip"]`, wantText: "超过限制"},
+		{name: "empty", groups: `[""]`, wantText: "名称无效"},
+		{name: "reserved", groups: `["auto"]`, wantText: "名称无效"},
+		{name: "unauthorized", groups: `["staff"]`, wantText: "无权使用"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			payload := `{"name":"invalid-` + test.name + `","group":"auto","auto_groups":` + test.groups + `}`
+			rec := do(http.MethodPost, "/api/token/", payload)
+			assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+			assert.Contains(t, rec.Body.String(), test.wantText)
+		})
+	}
+}
+
+func TestTokenGroupAuthorizationOnUpdate(t *testing.T) {
+	_, do, userId, _ := setupAuthAdjacent(t, constant.RoleCommonUser)
+	require.NoError(t, setting.UpdateOption(setting.UserUsableGroupsOption, `{"default":"Default","vip":"VIP"}`))
+	service.SetGroupRatios(map[string]float64{"default": 1, "vip": 2, "staff": 1, "team": 1})
+
+	token := createTestToken(t, userId, "ordered", "sk-ordered")
+	token.Group = service.GroupAuto
+	require.NoError(t, token.SetAutoGroups([]string{"vip", "default"}))
+	require.NoError(t, model.DB.Save(token).Error)
+	id := strconv.Itoa(token.Id)
+
+	// Omitted group fields retain the existing group and auto-group priority.
+	rec := do(http.MethodPut, "/api/token/", `{"id":`+id+`,"name":"renamed"}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var stored model.Token
+	require.NoError(t, model.DB.First(&stored, token.Id).Error)
+	assert.Equal(t, service.GroupAuto, stored.Group)
+	groups, err := stored.GetAutoGroups()
+	require.NoError(t, err)
+	assert.Equal(t, []string{"vip", "default"}, groups)
+
+	// An explicitly supplied list is validated and stored in caller order.
+	rec = do(http.MethodPut, "/api/token/", `{"id":`+id+`,"name":"reordered","auto_groups":["default","vip"]}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.NoError(t, model.DB.First(&stored, token.Id).Error)
+	groups, err = stored.GetAutoGroups()
+	require.NoError(t, err)
+	assert.Equal(t, []string{"default", "vip"}, groups)
+
+	rec = do(http.MethodPut, "/api/token/", `{"id":`+id+`,"name":"forbidden-auto","auto_groups":["staff"]}`)
+	assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	require.NoError(t, model.DB.First(&stored, token.Id).Error)
+	groups, err = stored.GetAutoGroups()
+	require.NoError(t, err)
+	assert.Equal(t, []string{"default", "vip"}, groups, "a rejected update must not change stored groups")
+
+	// Authorized ordinary groups replace auto mode and clear its stale list.
+	rec = do(http.MethodPut, "/api/token/", `{"id":`+id+`,"name":"ordinary","group":"vip"}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.NoError(t, model.DB.First(&stored, token.Id).Error)
+	assert.Equal(t, "vip", stored.Group)
+	assert.Empty(t, stored.AutoGroups)
+
+	rec = do(http.MethodPut, "/api/token/", `{"id":`+id+`,"name":"ordinary-renamed"}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.NoError(t, model.DB.First(&stored, token.Id).Error)
+	assert.Equal(t, "vip", stored.Group, "an omitted group must not reset an ordinary token")
+
+	rec = do(http.MethodPut, "/api/token/", `{"id":`+id+`,"name":"forbidden","group":"staff"}`)
+	assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	require.NoError(t, model.DB.First(&stored, token.Id).Error)
+	assert.Equal(t, "vip", stored.Group)
+
+	require.NoError(t, service.SetUserGroup(userId, "team"))
+	rec = do(http.MethodPut, "/api/token/", `{"id":`+id+`,"name":"own","group":"team"}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	// status_only ignores unrelated group input, as before.
+	rec = do(http.MethodPut, "/api/token/?status_only=1", `{"id":`+id+`,"status":2,"group":"staff"}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.NoError(t, model.DB.First(&stored, token.Id).Error)
+	assert.Equal(t, "team", stored.Group)
+	assert.Equal(t, service.TokenStatusDisabled, stored.Status)
 }
 
 func TestTokenUsageEndpoint(t *testing.T) {

@@ -1,6 +1,7 @@
 package controller_test
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 
 	"github.com/tokenrouter/tokenrouter/model"
 	"github.com/tokenrouter/tokenrouter/router"
@@ -80,6 +82,17 @@ func TestUserSubscriptionPlans(t *testing.T) {
 	second := items[1].(map[string]any)["plan"].(map[string]any)
 	assert.Equal(t, "low", second["title"])
 	assert.Equal(t, true, first["allow_balance_pay"], "defaults normalized")
+
+	const callback = "test:subscription_plan_read_failure"
+	require.NoError(t, model.DB.Callback().Query().Before("gorm:query").Register(callback, func(tx *gorm.DB) {
+		if tx.Statement.Table == (model.SubscriptionPlan{}).TableName() {
+			tx.AddError(errors.New("injected plan read failure"))
+		}
+	}))
+	rec = do(http.MethodGet, "/api/subscription/plans", "")
+	require.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
+	assert.Equal(t, false, subDecode(t, rec)["success"])
+	require.NoError(t, model.DB.Callback().Query().Remove(callback))
 }
 
 // TestSubscriptionBalancePay covers POST /api/subscription/balance/pay: the

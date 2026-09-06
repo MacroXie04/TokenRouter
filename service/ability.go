@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"errors"
 	"math/rand"
 	"sort"
@@ -20,24 +21,50 @@ var (
 
 // InitAbilityCache loads all enabled abilities into memory.
 func InitAbilityCache() error {
+	return InitAbilityCacheContext(context.Background())
+}
+
+// InitAbilityCacheContext loads all enabled abilities into memory while
+// allowing a lost scheduler lease or process shutdown to cancel the database
+// read and the in-memory rebuild. The previous cache remains published unless
+// the complete replacement was built successfully.
+func InitAbilityCacheContext(ctx context.Context) error {
+	if ctx == nil {
+		return errors.New("ability-cache context is nil")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	var abilities []model.Ability
-	if err := model.DB.Where("enabled = ?", true).Find(&abilities).Error; err != nil {
+	if err := model.DB.WithContext(ctx).Where("enabled = ?", true).Find(&abilities).Error; err != nil {
+		return err
+	}
+	replacement := make(map[string][]*model.Ability, len(abilities))
+	for i := range abilities {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		a := &abilities[i]
+		key := abilityKey(a.Group, a.Model)
+		replacement[key] = append(replacement[key], a)
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 	abilityMu.Lock()
-	defer abilityMu.Unlock()
-	abilityCache = make(map[string][]*model.Ability, len(abilities))
-	for i := range abilities {
-		a := &abilities[i]
-		key := abilityKey(a.Group, a.Model)
-		abilityCache[key] = append(abilityCache[key], a)
-	}
+	abilityCache = replacement
+	abilityMu.Unlock()
 	return nil
 }
 
 // SyncAbilityCache reloads abilities (hot reload).
 func SyncAbilityCache() error {
 	return InitAbilityCache()
+}
+
+// SyncAbilityCacheContext is SyncAbilityCache's cancellable form.
+func SyncAbilityCacheContext(ctx context.Context) error {
+	return InitAbilityCacheContext(ctx)
 }
 
 func abilityKey(group, modelName string) string {
@@ -72,12 +99,6 @@ type selectableChannel struct {
 func GetRandomSatisfiedChannel(group, modelName string, ignoreChannel map[int]struct{}, r *rand.Rand) (*model.Channel, error) {
 	candidates := collectCandidates(group, modelName, ignoreChannel)
 	if len(candidates) == 0 {
-		// Fall back to the default group when the specific group has nothing.
-		if group != GroupDefault {
-			candidates = collectCandidates(GroupDefault, modelName, ignoreChannel)
-		}
-	}
-	if len(candidates) == 0 {
 		return nil, ErrChannelNotFound
 	}
 
@@ -108,6 +129,25 @@ func GetRandomSatisfiedChannel(group, modelName string, ignoreChannel map[int]st
 	}
 	idx := weightedRandomIndex(r, weights)
 	return pool[idx].channel, nil
+}
+
+// GetRandomSatisfiedChannelFromGroups selects from the first authorized group
+// (in caller-provided order) that has an eligible channel. It never injects a
+// default-group fallback and returns the actual group used for pricing/logging.
+func GetRandomSatisfiedChannelFromGroups(groups []string, modelName string, ignoreChannel map[int]struct{}, r *rand.Rand) (*model.Channel, string, error) {
+	for _, group := range groups {
+		if group == "" || group == GroupAuto {
+			continue
+		}
+		channel, err := GetRandomSatisfiedChannel(group, modelName, ignoreChannel, r)
+		if err == nil {
+			return channel, group, nil
+		}
+		if !errors.Is(err, ErrChannelNotFound) {
+			return nil, "", err
+		}
+	}
+	return nil, "", ErrChannelNotFound
 }
 
 func collectCandidates(group, modelName string, ignore map[int]struct{}) []*selectableChannel {
@@ -173,30 +213,62 @@ func collectCandidates(group, modelName string, ignore map[int]struct{}) []*sele
 // weightedRandomIndex picks an index weighted by weights using r (or a default
 // source when r is nil).
 func weightedRandomIndex(r *rand.Rand, weights []uint) int {
-	var total uint
-	for _, w := range weights {
-		total += w
+	if len(weights) == 0 {
+		return -1
+	}
+
+	// A database row may predate current input validation or have been written
+	// outside the dashboard. Summing arbitrary uint weights directly can wrap;
+	// converting that wrapped value to int can then make rand.Intn panic. Scale
+	// every weight by the same power of two until the total fits Int63n. Rounding
+	// non-zero weights upward keeps every configured channel selectable while
+	// preserving the relative distribution as closely as integer arithmetic
+	// permits.
+	scaled := make([]uint64, len(weights))
+	for i, weight := range weights {
+		scaled[i] = uint64(weight)
+	}
+	const maxWeightedRandomTotal = uint64(^uint64(0) >> 1)
+	var total uint64
+	for {
+		total = 0
+		fits := true
+		for _, weight := range scaled {
+			if weight > maxWeightedRandomTotal-total {
+				fits = false
+				break
+			}
+			total += weight
+		}
+		if fits {
+			break
+		}
+		for i, weight := range scaled {
+			if weight > 1 {
+				scaled[i] = weight/2 + weight%2
+			}
+		}
 	}
 	if total == 0 {
 		if r != nil {
-			return r.Intn(len(weights))
+			return r.Intn(len(scaled))
 		}
-		return rand.Intn(len(weights))
+		return rand.Intn(len(scaled))
 	}
-	var roll int
+	var roll uint64
 	if r != nil {
-		roll = r.Intn(int(total))
+		roll = uint64(r.Int63n(int64(total)))
 	} else {
-		roll = rand.Intn(int(total))
+		roll = uint64(rand.Int63n(int64(total)))
 	}
-	acc := 0
-	for i, w := range weights {
-		acc += int(w)
+	var acc uint64
+	for i, weight := range scaled {
+		acc += weight
 		if roll < acc {
 			return i
 		}
 	}
-	return len(weights) - 1
+	return len(scaled) - 1
 }
 
 // GetSatisfiedChannelWithPreferred selects an eligible channel for a request.
@@ -205,9 +277,6 @@ func weightedRandomIndex(r *rand.Rand, weights []uint) int {
 func GetSatisfiedChannelWithPreferred(group, modelName string, preferredChannelID int, ignore map[int]struct{}, r *rand.Rand) (*model.Channel, bool, error) {
 	if preferredChannelID > 0 {
 		candidates := collectCandidates(group, modelName, ignore)
-		if len(candidates) == 0 && group != GroupDefault {
-			candidates = collectCandidates(GroupDefault, modelName, ignore)
-		}
 		for _, candidate := range candidates {
 			if candidate.channel.Id == preferredChannelID {
 				return candidate.channel, true, nil

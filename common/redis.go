@@ -2,6 +2,9 @@ package common
 
 import (
 	"context"
+	"errors"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -34,31 +37,64 @@ var RedisEnabled = false
 // cache invalidation and rate limiting are shared.
 var Store KVStore = newMemoryStore()
 
-// InitRedis parses REDIS_CONN_STRING and connects if present. On failure it
-// logs a warning and falls back to the in-memory store rather than aborting
-// startup, which keeps single-node deployments (and tests) working.
+const (
+	defaultRedisPoolSize = 10
+	maxRedisPoolSize     = 10_000
+)
+
+// InitRedis parses REDIS_CONN_STRING and connects if present. An omitted
+// connection string intentionally selects the in-memory single-node store. A
+// configured but invalid or unreachable Redis endpoint is an error: silently
+// degrading in that case would split rate limits and coordination state across
+// nodes while operators believe the shared store is active.
 func InitRedis() error {
-	conn := GetEnv("REDIS_CONN_STRING", "")
+	resetRedisState()
+	conn := strings.TrimSpace(GetEnv("REDIS_CONN_STRING", ""))
 	if conn == "" {
 		return nil
 	}
 	opt, err := redis.ParseURL(conn)
 	if err != nil {
-		Logger.Warn("invalid REDIS_CONN_STRING, falling back to memory cache", "err", err.Error())
-		return nil
+		return errors.New("REDIS_CONN_STRING is invalid")
 	}
+	poolSize, err := redisPoolSize()
+	if err != nil {
+		return err
+	}
+	opt.PoolSize = poolSize
 	client := redis.NewClient(opt)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	if err := client.Ping(ctx).Err(); err != nil {
-		Logger.Warn("redis unreachable, falling back to memory cache", "err", err.Error())
-		return nil
+		_ = client.Close()
+		return errors.New("configured Redis is unreachable")
 	}
 	RedisClient = client
 	RedisEnabled = true
 	Store = &redisStore{client: client}
 	Logger.Info("redis connected")
 	return nil
+}
+
+func redisPoolSize() (int, error) {
+	raw := strings.TrimSpace(GetEnv("REDIS_POOL_SIZE", ""))
+	if raw == "" {
+		return defaultRedisPoolSize, nil
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || strconv.Itoa(value) != raw || value < 1 || value > maxRedisPoolSize {
+		return 0, errors.New("REDIS_POOL_SIZE must be an integer from 1 to 10000")
+	}
+	return value, nil
+}
+
+func resetRedisState() {
+	if RedisClient != nil {
+		_ = RedisClient.Close()
+	}
+	RedisClient = nil
+	RedisEnabled = false
+	Store = newMemoryStore()
 }
 
 // redisStore adapts go-redis v8 to KVStore.

@@ -1,79 +1,74 @@
 # External Validation
 
-Status of validation against live external systems.
+Last reconciled: 2026-09-06
 
-## Live providers (OpenAI, Anthropic, Gemini, ...)
+This document separates live external proof from deterministic local or
+disposable-infrastructure evidence. A mocked signature, callback, or provider
+response is not described as a live third-party result.
 
-**BLOCKED_MISSING_CREDENTIALS** — no live provider credentials are available in
-this environment and `ALLOW_LIVE_EXTERNAL_TESTS=false`. Provider behavior was
-validated against a local mock upstream (an OpenAI-compatible HTTP server) that
-exercises non-stream and SSE-stream responses, usage extraction, and settlement.
+## Credentialed third-party systems
 
-## OAuth applications
+The following remain **BLOCKED_MISSING_CREDENTIALS**. No authorized credentials,
+paid requests, production records, or externally reachable callbacks were used.
 
-**BLOCKED_MISSING_CREDENTIALS** — no OAuth client credentials configured.
+| Boundary | Live status | Local evidence already available |
+|---|---|---|
+| AI providers, including OpenAI, Anthropic, Gemini, and Jimeng | BLOCKED_MISSING_CREDENTIALS | Provider-specific mock servers exercise supported authentication, paths, conversion, streams, bounds, usage, task recovery, and billing. No operative deterministic provider row remains open; this block is solely the absence of a credentialed live exchange. |
+| Built-in and custom OAuth providers | BLOCKED_MISSING_CREDENTIALS | State, redirect, token/userinfo, binding, ownership, discovery, and failure behavior use local fixtures. |
+| WeChat login | BLOCKED_MISSING_CREDENTIALS | The code-to-openid exchange, binding, and failure paths use a local server. |
+| Stripe wallet and subscription checkout/webhooks | BLOCKED_MISSING_CREDENTIALS | Signed webhook fixtures, immutable economic binding, durable pending orders, reconciliation leases/fencing, fulfillment, expiry, and reversal/manual-review policy are tested locally. |
+| EPay wallet checkout/webhook | BLOCKED_MISSING_CREDENTIALS | Request signing, callback verification, exact order binding, replay/idempotency, and settlement are covered locally. |
+| Creem, classic Waffo, and Waffo Pancake payments | BLOCKED_MISSING_CREDENTIALS | Fixed-endpoint clients, exact signatures and wire contracts, bounded failure handling, immutable wallet/subscription economics, replay-safe signed webhook settlement, and root configuration workflows use deterministic local transports and fixtures. |
+| Cloudflare Turnstile | BLOCKED_MISSING_CREDENTIALS | Local success/failure fixtures cover the target integration boundary. |
+| SMTP delivery | BLOCKED_MISSING_CREDENTIALS | An injectable mailer proves message construction and application behavior; it does not prove deliverability or reputation. |
 
-## WeChat login server
+EPay subscription checkout/callback plus Creem, classic Waffo, and Waffo
+Pancake payment endpoints are implemented and locally verified. Credentialed
+checkout and callback delivery remain external blocks; deterministic fixtures
+are not presented as live-provider proof.
 
-**BLOCKED_MISSING_CREDENTIALS** — the code→openid exchange was validated against
-a local mock server (`go test ./controller/ -run TestWeChat`); no real WeChat
-login server address/token is available in this environment.
+## Live disposable infrastructure
 
-## Payments (Stripe, EPay, Creem, Waffo)
+These checks used real server implementations with synthetic data. Current
+2026-09-06 results and explicitly dated historical evidence are distinguished:
 
-**BLOCKED_MISSING_CREDENTIALS** — no sandbox keys configured; no live calls made.
+| System | Result | Exercised boundary |
+|---|---|---|
+| MySQL 9.5 | PASS (current snapshot) | The exact expanded nine-test manifest passed full migration/restart, relational retention, relay accounting and channel-key concurrency, scheduler cadence, audit-outbox leasing/delivery, subscription usage epochs, provider-neutral TaskOperation accounting, and Jimeng atomic lifecycle against a newly initialized loopback-only Homebrew server and disposable data directory. |
+| PostgreSQL 17 | PASS (current snapshot) | The exact expanded nine-test manifest passed full migration/restart, relational retention, relay accounting and channel-key concurrency, scheduler cadence, audit-outbox leasing/delivery, subscription usage epochs, provider-neutral TaskOperation accounting, and Jimeng atomic lifecycle. |
+| ClickHouse 24.8 | PASS (current snapshot) | Both current manifest tests passed configurable TTL addition/removal, DDL/migration, raw log insertion, stable audit retry deduplication, content readback, and retention lifecycle. |
+| Redis 7 | NOT RUN LOCALLY | Its exact shared-store atomicity/expiry selector and manifest wiring are statically verified, but no local service or cached image was available. |
+| Docker | PASS (current snapshot) | Both complete acceptance runs built the multi-stage frontend/backend image, started it in release mode with isolated SQLite, probed `/api/status`, and cleaned up. |
 
-## Reference runtime comparison
+The database manifest runner requires exactly one run and pass event for every
+named test and rejects missing, skipped, failed, or malformed events.
 
-The reference system is inspected read-only. Reference runtime execution is
-permitted in isolated synthetic environments, but a complete side-by-side golden
-suite has not yet been run. Protocol DTOs are reconciled against the reference's
-OpenAPI/DTO inventory. Iteration 87 reconciled the model-ratio reset from the
-reference handler and default-registry contracts, then verified TokenRouter's
-observable response, database effects, live quota effect, authorization, and
-multi-node reload behavior with fresh SQLite fixtures; no external service or
-production data was involved. Iteration 88 reconciled both performance-metrics
-response contracts, option defaults, bucket arithmetic, relay success/failure and
-first-token timing hooks, durable additive upserts, retention, and active-group
-filtering against the read-only reference source. Target behavior was exercised
-with synthetic SQLite buckets and local mock OpenAI/Claude streams only.
-Iteration 89 reconciled the rule-based channel-affinity settings, cache/clear
-contracts, retry behavior, usage-cache counters, and option defaults against the
-read-only reference. TokenRouter exercised the complete routing lifecycle with
-synthetic SQLite channels and local mock upstreams. Redis behavior is implemented
-through the configured shared go-redis client with atomic Lua updates and a
-bounded in-memory fallback; no external Redis or provider credentials were used.
-Iteration 90 reconciled the group and prefill-group controllers, JSON wire shape,
-soft-delete uniqueness, timestamps, filters, and response envelopes against the
-read-only reference. Validation used fresh and legacy synthetic SQLite schemas;
-no production data or external service was involved.
-Iteration 91 reconciled model metadata CRUD/search/enrichment, missing-model
-calculation, sync preview/apply shapes, catalog URLs, and selective overwrite
-behavior against the read-only reference. All upstream behavior was exercised
-against local synthetic HTTP catalogs, including explicit disabled status,
-failure envelopes, transport failures, bounded/cancelled requests, and no-op
-sync. Fresh and deliberately duplicated legacy SQLite registries verified the
-portable active-name migration and reference-preserving soft-delete recovery;
-no paid provider, production data, or external metadata service was contacted.
-Iteration 92 reconciled Midjourney and generic asynchronous task history paging,
-filters, role/ownership boundaries, public DTOs, and image-forwarding behavior
-against the read-only reference. Synthetic SQLite tasks covered own-user and
-cross-user views, malformed legacy JSON, missing tables, and private-data
-redaction. The image proxy used only a local HTTP server and exercised success,
-upstream-error, MIME hardening, missing-task, response bounds, and SSRF rejection;
-no task-provider credential, production record, or external image host was used.
-Iteration 93 reconciled the dashboard playground's session/PAT boundary,
-request-local token context, optional group selection, and delegation to the full
-chat relay lifecycle. A local synthetic OpenAI server covered non-stream and SSE
-responses, channel authentication/path setup, usage settlement, wallet deduction,
-logs, and group authorization; no provider credential or external endpoint was
-used.
-Iteration 94 reconciled the official Jimeng submit/GetResult actions, v3 model
-normalization, direct HMAC-SHA256 and gateway-bearer authentication, public/private
-task IDs, status/result mapping, per-call duration billing, and ownership-scoped
-polling against the read-only reference. Local HTTP providers validated signed
-query/payload contracts, accepted-task persistence, terminal caching, definitive
-failure refunds, no post-dispatch retries, atomic user/token accounting, and
-concurrent terminal-state monotonicity. No Jimeng credential, paid endpoint,
-production task, or external image URL was used; live Jimeng parity remains
-BLOCKED_MISSING_CREDENTIALS.
+The CI manifest contains nine MySQL tests, nine PostgreSQL tests, two ClickHouse
+tests, and one Redis test. All selectors, manifest wiring, normal/race
+compilation, vet, and workflow YAML are verified. The full MySQL, PostgreSQL,
+and ClickHouse manifests ran on the current snapshot; Redis live execution
+remains unavailable without additional local infrastructure.
+
+## Reference comparison
+
+The reference checkout at
+`/Users/hongzhe/Code/new-api@ccd535ef8e50cf6e5846a59278c40b7ff59d1b7d`
+was inspected read-only. TokenRouter was compared through route/entity/provider
+inventories, DTO and wire-contract analysis, and target-side behavioral tests.
+A complete side-by-side golden runtime suite has not been executed. The strict
+matrices therefore distinguish demonstrated local behavior, consciously
+retained schema differences, pinned-reference placeholders, and live external
+blocks instead of treating source-shape identity as observable parity.
+
+Local provider servers and synthetic databases cover deterministic success,
+failure, retry, streaming, ownership, accounting, and recovery behavior without
+contacting a real vendor. These tests are strong implementation evidence but do
+not establish account validity, regional availability, current vendor behavior,
+deliverability, or production operational readiness.
+
+## Requirements to clear the blocks
+
+Clearing a live block requires explicit authorization, isolated sandbox
+accounts, least-privilege credentials, exact registered callback URLs, bounded
+test spend, a cleanup plan, and recorded redacted results. Production
+credentials or data should not be introduced merely to turn a matrix row green.

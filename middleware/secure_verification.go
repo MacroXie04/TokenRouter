@@ -7,7 +7,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/tokenrouter/tokenrouter/model"
 	"github.com/tokenrouter/tokenrouter/service"
 )
 
@@ -28,36 +27,15 @@ func SecureVerificationRequired() gin.HandlerFunc {
 // (user + session + auth/version counters) that security proofs bind to.
 func GetSessionAuthIdentity(c *gin.Context) (service.SessionIdentity, bool) {
 	claims, err := dashboardClaims(c)
-	if err != nil || claims.UserID <= 0 {
-		return service.SessionIdentity{}, false
-	}
-	// The session id travels in the refresh cookie as "<sid>.<refresh>" and is
-	// the only cookie-scoped handle to the current session.
-	var sid string
-	if cookie, err := c.Cookie("refresh_token"); err == nil {
-		if i := strings.Index(cookie, "."); i > 0 {
-			sid = cookie[:i]
-		}
-	}
-	if sid == "" {
-		return service.SessionIdentity{}, false
-	}
-	var session model.UserSession
-	if err := model.DB.Where("sid = ? AND user_id = ?", sid, claims.UserID).First(&session).Error; err != nil {
-		return service.SessionIdentity{}, false
-	}
-	if session.Status == "revoked" || session.RevokedAt > 0 {
-		return service.SessionIdentity{}, false
-	}
-	var user model.User
-	if err := model.DB.First(&user, claims.UserID).Error; err != nil {
+	if err != nil || claims.UserID <= 0 || claims.SessionID == "" ||
+		claims.UserAuthVersion <= 0 || claims.SessionVersion <= 0 {
 		return service.SessionIdentity{}, false
 	}
 	return service.SessionIdentity{
 		UserID:          claims.UserID,
-		SessionID:       sid,
-		UserAuthVersion: user.AuthVersion,
-		SessionVersion:  session.Version,
+		SessionID:       claims.SessionID,
+		UserAuthVersion: claims.UserAuthVersion,
+		SessionVersion:  claims.SessionVersion,
 	}, true
 }
 

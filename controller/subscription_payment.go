@@ -1,14 +1,12 @@
 package controller
 
 import (
+	"errors"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/stripe/stripe-go/v81"
-	"github.com/stripe/stripe-go/v81/checkout/session"
-
 	"github.com/tokenrouter/tokenrouter/common"
 	"github.com/tokenrouter/tokenrouter/model"
 	"github.com/tokenrouter/tokenrouter/service"
@@ -48,12 +46,17 @@ func SubscriptionRequestStripePay(c *gin.Context) {
 		return
 	}
 	stripeSecret := common.GetEnv("STRIPE_SECRET_KEY", "")
-	if !strings.HasPrefix(stripeSecret, "sk_") && !strings.HasPrefix(stripeSecret, "rk_") {
+	if !validStripeSecret(stripeSecret) {
 		c.JSON(http.StatusOK, gin.H{"success": false, "message": "Stripe 未配置或密钥无效"})
 		return
 	}
-	if common.GetEnv("STRIPE_WEBHOOK_SECRET", "") == "" {
+	if strings.TrimSpace(common.GetEnv("STRIPE_WEBHOOK_SECRET", "")) == "" {
 		c.JSON(http.StatusOK, gin.H{"success": false, "message": "Stripe Webhook 未配置"})
+		return
+	}
+	returnURL := paymentReturnPath("/wallet")
+	if returnURL == "" {
+		c.JSON(http.StatusOK, gin.H{"success": false, "message": "Stripe 回调地址配置无效"})
 		return
 	}
 
@@ -64,42 +67,59 @@ func SubscriptionRequestStripePay(c *gin.Context) {
 		return
 	}
 
-	if plan.MaxPurchasePerUser > 0 {
-		count, err := service.CountUserSubscriptionsByPlan(userId, plan.Id)
-		if err != nil {
+	expectedCurrency, err := service.NormalizeStripeCurrency(plan.Currency)
+	if err != nil || !service.StripeCurrencySupported(expectedCurrency) {
+		c.JSON(http.StatusOK, gin.H{"success": false, "message": "套餐币种配置无效"})
+		return
+	}
+	expectedAmount, err := service.StripeMoneyToMinorUnitsForCurrency(strings.TrimSpace(plan.PriceAmount), expectedCurrency)
+	if err != nil || expectedAmount <= 0 {
+		c.JSON(http.StatusOK, gin.H{"success": false, "message": "套餐价格配置无效"})
+		return
+	}
+	referenceSuffix, err := common.SecureRandomAlphanumeric(4)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "创建订单失败"})
+		return
+	}
+	stripePrice, err := retrieveStripePrice(stripeSecret, plan.StripePriceId)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "校验 Stripe Price 失败"})
+		return
+	}
+	if err := validateStripeSubscriptionPrice(stripePrice, plan.StripePriceId, expectedAmount, expectedCurrency); err != nil {
+		c.JSON(http.StatusOK, gin.H{"message": "error", "data": err.Error()})
+		return
+	}
+
+	referenceId := service.NewSubscriptionStripeTradeNo(user.Id, time.Now().UnixMilli(), referenceSuffix)
+	order, err := service.CreateBoundStripeSubscriptionOrder(userId, plan.Id, service.ValidatedStripePrice{
+		ID: stripePrice.ID, AmountMinor: stripePrice.UnitAmount, Currency: string(stripePrice.Currency),
+	}, referenceId)
+	if err != nil {
+		if errors.Is(err, service.ErrSubscriptionPurchaseLimit) {
 			c.JSON(http.StatusOK, gin.H{"success": false, "message": err.Error()})
 			return
 		}
-		if count >= int64(plan.MaxPurchasePerUser) {
-			c.JSON(http.StatusOK, gin.H{"success": false, "message": "已达到该套餐购买上限"})
-			return
-		}
+		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "创建订单失败"})
+		return
 	}
-
-	referenceId := service.NewSubscriptionStripeTradeNo(user.Id, time.Now().UnixMilli(), common.RandomAlphanumeric(4))
-	payLink, err := genStripeSubscriptionLink(referenceId, user.StripeCustomer, user.Email, plan.StripePriceId)
+	payLink, err := genStripeSubscriptionLink(stripeSecret, order, user.StripeCustomer, user.Email, returnURL)
 	if err != nil {
+		if stripeRequestDefinitelyRejected(err) {
+			if statusErr := service.UpdatePendingSubscriptionOrderStatus(referenceId, service.PaymentProviderStripe, service.TopUpStatusFailed); statusErr != nil {
+				common.SysError("Stripe subscription checkout rejection status update failed trade_no=" + referenceId + ": " + statusErr.Error())
+			}
+		} else if errors.Is(err, service.ErrStripeCheckoutBindingMismatch) {
+			if flagErr := service.FlagStripeSubscriptionReconciliation(referenceId, service.StripeReconciliationBindingMismatch); flagErr != nil {
+				common.SysError("Stripe subscription reconciliation update failed trade_no=" + referenceId + ": " + flagErr.Error())
+			}
+		} else {
+			if flagErr := service.FlagStripeSubscriptionReconciliation(referenceId, service.StripeReconciliationCreationUnknown); flagErr != nil {
+				common.SysError("Stripe subscription reconciliation update failed trade_no=" + referenceId + ": " + flagErr.Error())
+			}
+		}
 		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "拉起支付失败"})
-		return
-	}
-
-	price, err := service.ParseSubscriptionPlanPrice(plan.PriceAmount)
-	if err != nil || price < 0 {
-		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "创建订单失败"})
-		return
-	}
-	order := model.SubscriptionOrder{
-		UserId:          userId,
-		PlanId:          plan.Id,
-		Money:           price,
-		TradeNo:         referenceId,
-		PaymentMethod:   service.PaymentMethodStripe,
-		PaymentProvider: service.PaymentProviderStripe,
-		CreateTime:      time.Now().Unix(),
-		Status:          service.TopUpStatusPending,
-	}
-	if err := model.DB.Create(&order).Error; err != nil {
-		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "创建订单失败"})
 		return
 	}
 
@@ -111,35 +131,40 @@ func SubscriptionRequestStripePay(c *gin.Context) {
 	})
 }
 
-// genStripeSubscriptionLink opens a subscription-mode checkout session
-// (reference: ClientReferenceID as the order reference, price with quantity
-// 1, success/cancel back to the wallet page, customer email/creation or
-// existing Stripe customer).
-func genStripeSubscriptionLink(referenceId string, customerId string, email string, priceId string) (string, error) {
-	params := &stripe.CheckoutSessionParams{
-		ClientReferenceID: stripe.String(referenceId),
-		SuccessURL:        stripe.String(paymentReturnPath("/wallet")),
-		CancelURL:         stripe.String(paymentReturnPath("/wallet")),
-		LineItems: []*stripe.CheckoutSessionLineItemParams{
-			{
-				Price:    stripe.String(priceId),
-				Quantity: stripe.Int64(1),
-			},
-		},
-		Mode: stripe.String(string(stripe.CheckoutSessionModeSubscription)),
+// genStripeSubscriptionLink opens a one-time payment Checkout session. Local
+// entitlements have a fixed end date and this service does not implement
+// Stripe renewal fulfillment, so recurring billing would be unsafe.
+func genStripeSubscriptionLink(apiKey string, order *model.SubscriptionOrder, customerId string, email string, returnURL string) (string, error) {
+	if !validStripeSecret(apiKey) || order == nil || strings.TrimSpace(order.ProviderPriceId) == "" {
+		return "", service.ErrSubscriptionOrderDataInvalid
 	}
+	referenceId := order.TradeNo
+	customerEmail := ""
 	if customerId == "" {
-		if email != "" {
-			params.CustomerEmail = stripe.String(email)
-		}
-		params.CustomerCreation = stripe.String(string(stripe.CheckoutSessionCustomerCreationAlways))
-	} else {
-		params.Customer = stripe.String(customerId)
+		customerEmail = email
 	}
-	result, err := session.New(params)
+	snapshot := service.StripeCheckoutRequestSnapshot{
+		Version: service.StripeCheckoutRequestSnapshotVersion,
+		TradeNo: referenceId, OrderType: service.StripeOrderTypeSubscription, Mode: service.StripeCheckoutModeSubscription,
+		AmountMinor: order.ProviderAmountMinor, Currency: order.ProviderCurrency, PriceID: order.ProviderPriceId,
+		SuccessURL: returnURL, CancelURL: returnURL,
+		CustomerID: customerId, CustomerEmail: customerEmail,
+		IdempotencyKey: "subscription-checkout-" + referenceId,
+	}
+	if err := service.ConfigureStripeSubscriptionCheckoutRequest(referenceId, snapshot); err != nil {
+		return "", err
+	}
+	params := stripeCheckoutParamsFromSnapshot(snapshot)
+	result, err := createStripeCheckoutSession(apiKey, params)
 	if err != nil {
+		return "", err
+	}
+	if err := validateCreatedStripeCheckoutSession(result, referenceId, service.StripeCheckoutModeSubscription,
+		service.StripeOrderTypeSubscription, order.ProviderAmountMinor, order.ProviderCurrency, order.ProviderPriceId); err != nil {
+		return "", err
+	}
+	if err := service.BindStripeSubscriptionSessionWithExpiry(referenceId, result.ID, result.ExpiresAt); err != nil {
 		return "", err
 	}
 	return result.URL, nil
 }
-

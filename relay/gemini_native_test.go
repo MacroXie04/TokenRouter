@@ -19,21 +19,25 @@ import (
 	"github.com/tokenrouter/tokenrouter/model"
 	"github.com/tokenrouter/tokenrouter/router"
 	"github.com/tokenrouter/tokenrouter/service"
+	"github.com/tokenrouter/tokenrouter/setting"
 )
 
 // setupChannelIntegration creates a fresh relay DB with one enabled channel of
 // the given type serving one model.
 func setupChannelIntegration(t *testing.T, mockURL string, channelType constant.ChannelType, modelName string) string {
 	t.Helper()
+	t.Cleanup(common.InitSSRF)
 	t.Setenv("SSRF_DISABLE", "true")
 	common.InitSSRF()
 	dsn := "file:" + filepath.Join(t.TempDir(), "relay.db") + "?_pragma=busy_timeout(5000)"
 	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
 	require.NoError(t, err)
 	require.NoError(t, db.AutoMigrate(&model.User{}, &model.Token{}, &model.Channel{}, &model.Ability{}, &model.Log{},
-		&model.SubscriptionPlan{}, &model.UserSubscription{}, &model.SubscriptionPreConsumeRecord{}))
+		&model.SubscriptionPlan{}, &model.UserSubscription{}, &model.SubscriptionPreConsumeRecord{},
+		&model.RelayQuotaReservationRecord{}, &model.Option{}))
 	model.DB = db
 	model.LOG_DB = db
+	require.NoError(t, setting.Init())
 
 	user := model.User{Username: "guser", Password: "x", Role: constant.RoleCommonUser, Status: 1, Group: "default", Quota: 500000, AuthVersion: 1}
 	require.NoError(t, model.DB.Create(&user).Error)
@@ -48,6 +52,85 @@ func setupChannelIntegration(t *testing.T, mockURL string, channelType constant.
 	require.NoError(t, model.DB.Create(&model.Ability{Group: "default", Model: modelName, ChannelId: channel.Id, Enabled: true, Weight: 1}).Error)
 	require.NoError(t, service.InitAbilityCache())
 	return key
+}
+
+func TestGeminiNativeTieredMultimodalUsageSettlesExactAccounting(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	const modelName = "gemini-multimodal-billing"
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/v1beta/models/"+modelName+":generateContent", r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"candidates":[{"content":{"role":"model","parts":[{"text":"done"}]},"finishReason":"STOP","index":0}],
+			"usageMetadata":{
+				"promptTokenCount":31,
+				"candidatesTokenCount":29,
+				"totalTokenCount":60,
+				"promptTokensDetails":[{"modality":"TEXT","tokenCount":23},{"modality":"IMAGE","tokenCount":3},{"modality":"AUDIO","tokenCount":5}],
+				"candidatesTokensDetails":[{"modality":"TEXT","tokenCount":11},{"modality":"IMAGE","tokenCount":7},{"modality":"AUDIO","tokenCount":11}]
+			}
+		}`))
+	}))
+	defer mock.Close()
+
+	key := setupChannelIntegration(t, mock.URL, constant.ChannelTypeGemini, modelName)
+	previousPrices := service.ExportedModelPrices()
+	previousRatios := service.ExportedGroupRatios()
+	service.SetModelPriceRegistry(map[string]service.ModelPrice{modelName: {Prompt: 2, Completion: 2}})
+	service.SetGroupRatios(map[string]float64{"default": 1})
+	t.Cleanup(func() {
+		service.SetModelPriceRegistry(previousPrices)
+		service.SetGroupRatios(previousRatios)
+	})
+	require.NoError(t, setting.UpdateOptions(map[string]string{
+		"ModelBillingMode": `{"` + modelName + `":"tiered_expr"}`,
+		"ModelBillingExpr": `{"` + modelName + `":"p * 2 + c * 4 + img * 10 + ai * 14 + img_o * 18 + ao * 22"}`,
+	}))
+	t.Cleanup(func() {
+		_ = setting.UpdateOptions(map[string]string{"ModelBillingMode": `{}`, "ModelBillingExpr": `{}`})
+	})
+
+	handler := router.SetUpRouter()
+	request := httptest.NewRequest(http.MethodPost, "/v1beta/models/"+modelName+":generateContent",
+		strings.NewReader(`{"contents":[],"generationConfig":{"maxOutputTokens":512}}`))
+	request.Header.Set("Authorization", "Bearer "+key)
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+
+	const (
+		reservedQuota = 512
+		actualQuota   = 279
+	)
+	var user model.User
+	var token model.Token
+	var channel model.Channel
+	var reservation model.RelayQuotaReservationRecord
+	var log model.Log
+	require.NoError(t, model.DB.Where("username = ?", "guser").First(&user).Error)
+	require.NoError(t, model.DB.Where("key = ?", key).First(&token).Error)
+	require.NoError(t, model.DB.First(&channel).Error)
+	require.NoError(t, model.DB.First(&reservation).Error)
+	require.NoError(t, model.LOG_DB.Where("type = ?", service.LogTypeConsume).First(&log).Error)
+	assert.Equal(t, 500_000-actualQuota, user.Quota)
+	assert.Equal(t, actualQuota, user.UsedQuota)
+	assert.Equal(t, 1, user.RequestCount)
+	assert.Equal(t, 500_000-actualQuota, token.RemainQuota)
+	assert.Equal(t, actualQuota, token.UsedQuota)
+	assert.Equal(t, int64(actualQuota), channel.UsedQuota)
+	assert.Equal(t, reservedQuota, reservation.RequestedQuota)
+	assert.Equal(t, reservedQuota, reservation.ReservedQuota)
+	assert.Equal(t, reservedQuota, reservation.TokenReserved)
+	assert.Equal(t, actualQuota, reservation.ActualQuota)
+	assert.Equal(t, model.RelayQuotaReservationStatusSettled, reservation.Status)
+	assert.Equal(t, 31, log.PromptTokens)
+	assert.Equal(t, 29, log.CompletionTokens)
+	assert.Equal(t, actualQuota, log.Quota)
+	var other map[string]any
+	require.NoError(t, json.Unmarshal([]byte(log.Other), &other))
+	assert.Equal(t, service.BillingSourceWallet, other["billing_source"])
+	assert.Equal(t, reservation.ReservationID, other["relay_reservation_id"])
 }
 
 func TestGeminiNativePassthrough(t *testing.T) {
@@ -104,6 +187,110 @@ func TestGeminiNativePassthrough(t *testing.T) {
 	var count int64
 	model.LOG_DB.Model(&model.Log{}).Where("user_id = ?", user.Id).Count(&count)
 	assert.Equal(t, int64(1), count)
+}
+
+func TestGeminiNativeAppliesVersionThinkingAndFunctionResponsePolicies(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	const (
+		clientModel   = "gemini-policy-thinking"
+		upstreamModel = "gemini-policy"
+	)
+	var gotPath string
+	var gotBody map[string]any
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		gotPath = request.URL.Path
+		require.NoError(t, json.NewDecoder(request.Body).Decode(&gotBody))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":"policy reply"}]},"finishReason":"STOP","index":0}],"usageMetadata":{"promptTokenCount":4,"candidatesTokenCount":2,"totalTokenCount":6}}`))
+	}))
+	defer mock.Close()
+
+	key := setupChannelIntegration(t, mock.URL, constant.ChannelTypeGemini, clientModel)
+	require.NoError(t, setting.UpdateOptions(map[string]string{
+		setting.GeminiVersionSettingsOption:          `{"default":"v1beta","gemini-policy":"v1"}`,
+		setting.GeminiThinkingAdapterEnabledOption:   "true",
+		setting.GeminiThinkingBudgetPercentageOption: "0.5",
+	}))
+	body := `{
+		"model":"models/gemini-policy-thinking",
+		"contents":[{"role":"user","parts":[{"text":"hi"},{"functionResponse":{"id":"call-1","name":"lookup","response":{"ok":true}},"futurePart":7}]}],
+		"generationConfig":{"maxOutputTokens":2000,"futureGeneration":"kept"},
+		"futureTopLevel":{"enabled":true}
+	}`
+	request := httptest.NewRequest(http.MethodPost, "/v1beta/models/"+clientModel+":generateContent", strings.NewReader(body))
+	request.Header.Set("Authorization", "Bearer "+key)
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	router.SetUpRouter().ServeHTTP(recorder, request)
+
+	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+	assert.Equal(t, "/v1/models/"+upstreamModel+":generateContent", gotPath)
+	assert.Equal(t, "models/"+upstreamModel, gotBody["model"])
+	assert.Equal(t, map[string]any{"enabled": true}, gotBody["futureTopLevel"])
+	generation := gotBody["generationConfig"].(map[string]any)
+	assert.Equal(t, "kept", generation["futureGeneration"])
+	thinking := generation["thinkingConfig"].(map[string]any)
+	assert.Equal(t, float64(1000), thinking["thinkingBudget"])
+	assert.Equal(t, true, thinking["includeThoughts"])
+	part := gotBody["contents"].([]any)[0].(map[string]any)["parts"].([]any)[1].(map[string]any)
+	assert.Equal(t, float64(7), part["futurePart"])
+	assert.NotContains(t, part["functionResponse"].(map[string]any), "id")
+}
+
+func TestGeminiNativeV1RoutePassthroughAndAccounting(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	const modelName = "gemini-v1-route"
+	previousPrices := service.ExportedModelPrices()
+	previousRatios := service.ExportedGroupRatios()
+	service.SetModelPriceRegistry(map[string]service.ModelPrice{modelName: {Prompt: 1, Completion: 3}})
+	service.SetGroupRatios(map[string]float64{"default": 1})
+	t.Cleanup(func() {
+		service.SetModelPriceRegistry(previousPrices)
+		service.SetGroupRatios(previousRatios)
+	})
+
+	var gotPath, gotKey string
+	var gotBody map[string]any
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		gotPath = request.URL.Path
+		gotKey = request.Header.Get("x-goog-api-key")
+		require.NoError(t, json.NewDecoder(request.Body).Decode(&gotBody))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":"v1 route reply"}]},"finishReason":"STOP","index":0}],"usageMetadata":{"promptTokenCount":9,"candidatesTokenCount":2,"totalTokenCount":11}}`))
+	}))
+	defer mock.Close()
+
+	key := setupChannelIntegration(t, mock.URL, constant.ChannelTypeGemini, modelName)
+	handler := router.SetUpRouter()
+	body := `{"contents":[{"role":"user","parts":[{"text":"exercise the v1 alias"}]}],"generationConfig":{"temperature":0.25}}`
+	request := httptest.NewRequest(http.MethodPost, "/v1/models/"+modelName+":generateContent", strings.NewReader(body))
+	request.Header.Set("Authorization", "Bearer "+key)
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+
+	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+	assert.Equal(t, "/v1beta/models/"+modelName+":generateContent", gotPath)
+	assert.Equal(t, "sk-upstream", gotKey)
+	gotBodyJSON, err := json.Marshal(gotBody)
+	require.NoError(t, err)
+	assert.JSONEq(t, body, string(gotBodyJSON))
+	assert.Contains(t, recorder.Body.String(), "v1 route reply")
+	assert.Contains(t, recorder.Body.String(), `"candidates"`)
+	assert.NotContains(t, recorder.Body.String(), `"choices"`)
+
+	var user model.User
+	require.NoError(t, model.DB.Where("username = ?", "guser").First(&user).Error)
+	var log model.Log
+	require.NoError(t, model.LOG_DB.Where("user_id = ? AND type = ?", user.Id, service.LogTypeConsume).First(&log).Error)
+	assert.Equal(t, 9, log.PromptTokens)
+	assert.Equal(t, 2, log.CompletionTokens)
+	assert.Greater(t, log.Quota, 0)
+	var reservation model.RelayQuotaReservationRecord
+	require.NoError(t, model.DB.Where("user_id = ?", user.Id).First(&reservation).Error)
+	assert.Equal(t, model.RelayQuotaReservationStatusSettled, reservation.Status)
+	assert.Equal(t, log.Quota, reservation.ActualQuota)
 }
 
 func TestGeminiNativeStreamPassthrough(t *testing.T) {

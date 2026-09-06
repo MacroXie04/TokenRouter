@@ -55,7 +55,7 @@ func TestPlaygroundChatCompletionsContract(t *testing.T) {
 	defer upstream.Close()
 
 	handler, do, userID := setupChannelRead(t, constant.RoleCommonUser)
-	require.NoError(t, model.DB.AutoMigrate(&model.UserSubscription{}))
+	require.NoError(t, model.DB.AutoMigrate(&model.UserSubscription{}, &model.RelayQuotaReservationRecord{}))
 	accessToken := "playground-dashboard-access-token"
 	require.NoError(t, model.DB.Model(&model.User{}).Where("id = ?", userID).Updates(map[string]any{
 		"group": "vip", "quota": 100000, "access_token": accessToken,
@@ -78,6 +78,7 @@ func TestPlaygroundChatCompletionsContract(t *testing.T) {
 		"playground-model": {Prompt: 1, Completion: 2},
 	})
 	service.SetGroupRatios(map[string]float64{"vip": 1.5, "staff": 2})
+	require.NoError(t, setting.UpdateOption(setting.UserUsableGroupsOption, `{"vip":"VIP","staff":"Staff"}`))
 	require.NoError(t, setting.UpdateOption(service.DataExportEnabledOption, "false"))
 	t.Cleanup(func() {
 		service.SetModelPriceRegistry(previousPrices)

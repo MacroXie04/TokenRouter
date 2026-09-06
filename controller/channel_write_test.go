@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -73,6 +74,52 @@ func TestChannelStatusUpdateEndpoints(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
+func TestChannelBatchMutationsRejectUnboundedOrAmbiguousIDs(t *testing.T) {
+	_, do, _ := setupChannelRead(t, constant.RoleRootUser)
+	channel := createWriteChannel(t, "bounded-batch", constant.ChannelStatusEnabled, "default", "gpt-4o", "original", 0)
+	require.NoError(t, model.DB.Create(&model.Ability{
+		Group: "default", Model: "gpt-4o", ChannelId: channel.Id, Enabled: true, Weight: 1, Tag: &channel.Tag,
+	}).Error)
+
+	oversizedIDs := make([]int, 501)
+	for index := range oversizedIDs {
+		oversizedIDs[index] = index + 1
+	}
+	for name, request := range map[string]struct {
+		method string
+		path   string
+		body   map[string]any
+	}{
+		"status": {http.MethodPost, "/api/channel/status/batch", map[string]any{"ids": oversizedIDs, "status": 3}},
+		"delete": {http.MethodPost, "/api/channel/batch", map[string]any{"ids": oversizedIDs}},
+		"tag":    {http.MethodPost, "/api/channel/batch/tag", map[string]any{"ids": oversizedIDs, "tag": "changed"}},
+	} {
+		t.Run(name+" oversized", func(t *testing.T) {
+			encoded, err := common.Marshal(request.body)
+			require.NoError(t, err)
+			rec := do(request.method, request.path, string(encoded))
+			assert.Equal(t, false, decodeBody(t, rec)["success"], rec.Body.String())
+		})
+
+		t.Run(name+" duplicate", func(t *testing.T) {
+			request.body["ids"] = []int{channel.Id, channel.Id}
+			encoded, err := common.Marshal(request.body)
+			require.NoError(t, err)
+			rec := do(request.method, request.path, string(encoded))
+			assert.Equal(t, false, decodeBody(t, rec)["success"], rec.Body.String())
+		})
+	}
+
+	stored := channelByID(t, channel.Id)
+	assert.Equal(t, constant.ChannelStatusEnabled, stored.Status)
+	assert.Equal(t, "original", stored.Tag)
+	var ability model.Ability
+	require.NoError(t, model.DB.Where("channel_id = ?", channel.Id).First(&ability).Error)
+	assert.True(t, ability.Enabled)
+	require.NotNil(t, ability.Tag)
+	assert.Equal(t, "original", *ability.Tag)
+}
+
 func TestChannelDeleteDisabledEndpoint(t *testing.T) {
 	_, do, _ := setupChannelRead(t, constant.RoleRootUser)
 	enabled := createWriteChannel(t, "keepme", constant.ChannelStatusEnabled, "default", "gpt-4o", "", 0)
@@ -110,6 +157,14 @@ func TestChannelTagEndpoints(t *testing.T) {
 	body := decodeBody(t, rec)
 	assert.Equal(t, false, body["success"])
 	assert.Equal(t, "参数错误", body["message"])
+
+	for _, unsafeTag := range []string{strings.Repeat("x", 65), "fast\u202e"} {
+		encoded, err := common.Marshal(map[string]string{"tag": unsafeTag})
+		require.NoError(t, err)
+		rec = do(http.MethodPost, "/api/channel/tag/disabled", string(encoded))
+		assert.Equal(t, false, decodeBody(t, rec)["success"])
+		assert.Equal(t, constant.ChannelStatusManuallyDisabled, channelByID(t, fast1.Id).Status)
+	}
 
 	// Enable by tag.
 	rec = do(http.MethodPost, "/api/channel/tag/enabled", `{"tag":"fast"}`)
@@ -289,6 +344,85 @@ func TestChannelFetchModelsEndpoints(t *testing.T) {
 	assert.Equal(t, false, decodeBody(t, rec)["success"])
 }
 
+func TestChannelFetchModelsAdvancedCustomPreview(t *testing.T) {
+	_, do, _ := setupChannelRead(t, constant.RoleRootUser)
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/provider/models", r.URL.Path)
+		assert.Equal(t, "override preview-key", r.Header.Get("x-api-key"))
+		assert.Empty(t, r.Header.Get("Authorization"))
+		_, _ = w.Write([]byte(`{"data":[{"id":"custom-model"}]}`))
+	}))
+	defer up.Close()
+	config := `{"advanced_routes":[{"incoming_path":"/v1/models","upstream_path":"/provider/models","converter":"none","auth":{"type":"header","name":"x-api-key","value":"route {api_key}"}}]}`
+	headerOverride := `{"x-api-key":"override {api_key}"}`
+	rec := do(http.MethodPost, "/api/channel/fetch_models", fmt.Sprintf(
+		`{"type":%d,"base_url":%q,"key":"preview-key","advanced_custom":%q,"header_override":%q}`,
+		constant.ChannelTypeAdvancedCustom, up.URL, config, headerOverride,
+	))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	body := decodeBody(t, rec)
+	assert.Equal(t, true, body["success"])
+	assert.Equal(t, []any{"custom-model"}, body["data"])
+
+	// Existing advanced-custom previews use the saved credential even when the
+	// request attempts to supply a replacement key. The route itself may still
+	// be previewed without persisting it.
+	storedUp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/edited/models", r.URL.Path)
+		assert.Equal(t, "Bearer saved-key", r.Header.Get("Authorization"))
+		assert.NotContains(t, r.Header.Get("Authorization"), "request-key")
+		_, _ = w.Write([]byte(`{"data":[{"id":"saved-model"}]}`))
+	}))
+	defer storedUp.Close()
+	priority := int64(0)
+	weight := uint(1)
+	stored := model.Channel{
+		Type: int(constant.ChannelTypeAdvancedCustom), Key: "saved-key", Name: "advanced-preview",
+		BaseURL: "http://127.0.0.1:1", Models: "old", Group: "default", Status: constant.ChannelStatusEnabled,
+		Priority: &priority, Weight: &weight,
+		OtherSettings: `{"future":true,"advanced_custom":{"advanced_routes":[{"incoming_path":"/v1/models","upstream_path":"/saved/models"}]}}`,
+	}
+	require.NoError(t, model.DB.Create(&stored).Error)
+	editedConfig := `{"advanced_routes":[{"incoming_path":"/v1/models","upstream_path":"/edited/models"}]}`
+	rec = do(http.MethodPost, "/api/channel/fetch_models", fmt.Sprintf(
+		`{"channel_id":%d,"type":1,"base_url":%q,"key":"request-key","advanced_custom":%q}`,
+		stored.Id, storedUp.URL, editedConfig,
+	))
+	body = decodeBody(t, rec)
+	assert.Equal(t, true, body["success"], rec.Body.String())
+	assert.Equal(t, []any{"saved-model"}, body["data"])
+	var unchanged model.Channel
+	require.NoError(t, model.DB.First(&unchanged, stored.Id).Error)
+	assert.Contains(t, unchanged.OtherSettings, `"future":true`)
+	assert.Contains(t, unchanged.OtherSettings, "/saved/models")
+
+	// A channel id on this preview endpoint is reserved for advanced-custom
+	// editing, matching the reference contract.
+	ordinary := createWriteChannel(t, "ordinary-preview", constant.ChannelStatusEnabled, "default", "gpt-4o", "", 0)
+	rec = do(http.MethodPost, "/api/channel/fetch_models", fmt.Sprintf(`{"channel_id":%d}`, ordinary.Id))
+	body = decodeBody(t, rec)
+	assert.Equal(t, false, body["success"])
+	assert.Contains(t, body["message"], "not an advanced custom channel")
+
+	// TokenRouter deliberately rejects per-channel proxying here: delegating
+	// DNS resolution to an arbitrary proxy would bypass the SSRF guard.
+	rec = do(http.MethodPost, "/api/channel/fetch_models", fmt.Sprintf(
+		`{"type":%d,"base_url":%q,"key":"preview-key","advanced_custom":%q,"proxy":"http://proxy.invalid"}`,
+		constant.ChannelTypeAdvancedCustom, up.URL, config,
+	))
+	body = decodeBody(t, rec)
+	assert.Equal(t, false, body["success"])
+	assert.Contains(t, body["message"], "proxy is not supported")
+
+	rec = do(http.MethodPost, "/api/channel/fetch_models", fmt.Sprintf(
+		`{"type":%d,"base_url":%q,"key":"preview-key","advanced_custom":"[]"}`,
+		constant.ChannelTypeAdvancedCustom, up.URL,
+	))
+	body = decodeBody(t, rec)
+	assert.Equal(t, false, body["success"])
+	assert.Contains(t, body["message"], "advanced_custom must be a JSON object")
+}
+
 func TestChannelBatchTagAndTagModels(t *testing.T) {
 	_, do, _ := setupChannelRead(t, constant.RoleRootUser)
 	ch1 := createWriteChannel(t, "tagme1", constant.ChannelStatusEnabled, "default", "m1,m2,m3", "old", 0)
@@ -305,7 +439,8 @@ func TestChannelBatchTagAndTagModels(t *testing.T) {
 	// Ability rows mirror the new tag.
 	var ab model.Ability
 	require.NoError(t, model.DB.First(&ab).Error)
-	assert.Equal(t, "bulk", ab.Tag)
+	require.NotNil(t, ab.Tag)
+	assert.Equal(t, "bulk", *ab.Tag)
 
 	// Tag models returns the longest model list.
 	rec = do(http.MethodGet, "/api/channel/tag/models?tag=bulk", "")
@@ -390,7 +525,8 @@ func TestChannelMultiKeyManageEndpoint(t *testing.T) {
 	assert.Equal(t, float64(1), data["total_pages"])
 	firstKey, ok := keys[0].(map[string]any)
 	require.True(t, ok)
-	assert.Equal(t, "sk-k1", firstKey["key_preview"])
+	assert.Regexp(t, `^sha256:[0-9a-f]{8}$`, firstKey["key_preview"])
+	assert.NotContains(t, rec.Body.String(), "sk-k1", "multi-key status must not disclose credential bytes")
 	assert.Equal(t, float64(1), firstKey["status"])
 
 	// Pagination: page_size=2 -> 2 keys on page 1, 1 on page 2.
@@ -398,6 +534,14 @@ func TestChannelMultiKeyManageEndpoint(t *testing.T) {
 	data = decodeBody(t, rec)["data"].(map[string]any)
 	assert.Len(t, data["keys"].([]any), 1)
 	assert.Equal(t, float64(2), data["total_pages"])
+
+	// Extreme cursors are bounded before offset arithmetic.
+	rec = do(http.MethodPost, "/api/channel/multi_key/manage", fmt.Sprintf(`{"channel_id":%d,"action":"get_key_status","page":2147483647,"page_size":2147483647}`, multikey.Id))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	data = decodeBody(t, rec)["data"].(map[string]any)
+	assert.Len(t, data["keys"].([]any), 3)
+	assert.Equal(t, float64(1), data["page"], "out-of-range pages clamp to the final available page")
+	assert.Equal(t, float64(100), data["page_size"])
 
 	// Disable one key.
 	rec = do(http.MethodPost, "/api/channel/multi_key/manage", fmt.Sprintf(`{"channel_id":%d,"action":"disable_key","key_index":0}`, multikey.Id))
@@ -460,6 +604,18 @@ func TestChannelMultiKeyManageEndpoint(t *testing.T) {
 	assert.Equal(t, "sk-a2", channelByID(t, autoCh.Id).Key)
 	rec = do(http.MethodPost, "/api/channel/multi_key/manage", fmt.Sprintf(`{"channel_id":%d,"action":"delete_disabled_keys"}`, autoCh.Id))
 	assert.Equal(t, "没有需要删除的自动禁用密钥", decodeBody(t, rec)["message"])
+
+	// A sweep must never erase the entire credential set, even when every key
+	// has been automatically disabled.
+	allAuto := createWriteChannel(t, "all-auto", constant.ChannelStatusEnabled, "default", "gpt-4o", "", 0)
+	require.NoError(t, model.DB.Model(&allAuto).Updates(map[string]any{
+		"key":          "sk-z1\nsk-z2",
+		"channel_info": `{"is_multi_key":true,"multi_key_size":2,"multi_key_status_list":{"0":3,"1":3},"multi_key_polling_index":0}`,
+	}).Error)
+	rec = do(http.MethodPost, "/api/channel/multi_key/manage", fmt.Sprintf(`{"channel_id":%d,"action":"delete_disabled_keys"}`, allAuto.Id))
+	assert.Equal(t, false, decodeBody(t, rec)["success"])
+	assert.Equal(t, "不能删除所有密钥", decodeBody(t, rec)["message"])
+	assert.Equal(t, "sk-z1\nsk-z2", channelByID(t, allAuto.Id).Key)
 
 	// Unknown action.
 	rec = do(http.MethodPost, "/api/channel/multi_key/manage", fmt.Sprintf(`{"channel_id":%d,"action":"dance"}`, multikey.Id))

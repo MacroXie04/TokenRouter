@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
 
+	"github.com/tokenrouter/tokenrouter/common"
 	"github.com/tokenrouter/tokenrouter/model"
 	"github.com/tokenrouter/tokenrouter/router"
 	"github.com/tokenrouter/tokenrouter/service"
@@ -27,10 +28,13 @@ import (
 func setupWeChatTest(t *testing.T, wechatData map[string]string, enable bool) {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
+	t.Cleanup(common.InitSSRF)
+	t.Setenv("SSRF_DISABLE", "true")
+	common.InitSSRF()
 	dsn := "file:" + filepath.Join(t.TempDir(), "wechat.db") + "?_pragma=busy_timeout(5000)"
 	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
 	require.NoError(t, err)
-	require.NoError(t, db.AutoMigrate(&model.User{}, &model.Option{}, &model.UserSession{}, &model.Log{}))
+	require.NoError(t, db.AutoMigrate(&model.User{}, &model.Option{}, &model.UserSession{}, &model.Log{}, &model.ExternalIdentityClaim{}))
 	model.DB = db
 	model.LOG_DB = db
 
@@ -77,8 +81,15 @@ func TestWeChatAuthRegistersAndLogsIn(t *testing.T) {
 	body := decodeWeChatBody(t, rec)
 	require.Equal(t, true, body["success"], "body: %s", rec.Body.String())
 	data := body["data"].(map[string]any)
-	assert.NotEmpty(t, data["access_token"])
+	accessToken, ok := data["access_token"].(string)
+	require.True(t, ok)
+	assert.NotEmpty(t, accessToken)
 	assert.NotEmpty(t, data["session"])
+	claims, err := common.ParseJWTSigned(accessToken, common.SessionSecret())
+	require.NoError(t, err)
+	require.NotNil(t, claims.ExpiresAt)
+	assert.EqualValues(t, claims.ExpiresAt.Time.Unix(), data["access_expires_at"],
+		"response metadata must expose the exact database-clock expiry signed into the JWT")
 	userData := data["user"].(map[string]any)
 	assert.Contains(t, userData["username"], "wechat_")
 
@@ -116,6 +127,37 @@ func TestWeChatAuthDisabled(t *testing.T) {
 	assert.Contains(t, body["message"], "未开启")
 }
 
+func TestWeChatAuthRedactsProviderFailureDetails(t *testing.T) {
+	setupWeChatTest(t, map[string]string{}, true)
+	r := router.SetUpRouter()
+
+	req := newWeChatRequest(http.MethodGet, "/api/oauth/wechat?code=secret-provider-code", nil)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	body := decodeWeChatBody(t, rec)
+	assert.Equal(t, false, body["success"])
+	assert.Equal(t, "微信登录失败", body["message"])
+	assert.NotContains(t, rec.Body.String(), "bad code")
+	assert.NotContains(t, rec.Body.String(), "secret-provider-code")
+}
+
+func TestWeChatAuthRejectsDuplicateCodeParameters(t *testing.T) {
+	setupWeChatTest(t, map[string]string{"code-1": "openid-1"}, true)
+	r := router.SetUpRouter()
+
+	req := newWeChatRequest(http.MethodGet, "/api/oauth/wechat?code=code-1&code=code-1", nil)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	body := decodeWeChatBody(t, rec)
+	assert.Equal(t, false, body["success"])
+	assert.Equal(t, "微信登录失败", body["message"])
+	var users int64
+	require.NoError(t, model.DB.Model(&model.User{}).Count(&users).Error)
+	assert.Zero(t, users)
+}
+
 func TestWeChatAuthRegisterDisabled(t *testing.T) {
 	setupWeChatTest(t, map[string]string{"code-2": "openid-2"}, true)
 	require.NoError(t, setting.UpdateOption(setting.RegistrationEnabledOption, "false"))
@@ -133,7 +175,12 @@ func TestWeChatAuthRegisterDisabled(t *testing.T) {
 func TestWeChatAuthBannedUser(t *testing.T) {
 	setupWeChatTest(t, map[string]string{"code-3": "openid-3"}, true)
 	user := model.User{Username: "wxban", Password: "x", Role: 1, Status: model.UserStatusDisabled, WeChatId: "openid-3", AuthVersion: 1}
-	require.NoError(t, model.DB.Create(&user).Error)
+	require.NoError(t, model.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(&user).Error; err != nil {
+			return err
+		}
+		return model.ClaimUserExternalIdentitiesWithTx(tx, &user)
+	}))
 	r := router.SetUpRouter()
 
 	req := newWeChatRequest(http.MethodGet, "/api/oauth/wechat?code=code-3", nil)
@@ -187,4 +234,15 @@ func TestWeChatBind(t *testing.T) {
 	rec3 := httptest.NewRecorder()
 	r.ServeHTTP(rec3, req3)
 	require.Equal(t, http.StatusUnauthorized, rec3.Code)
+
+	// A dashboard PAT is not a browser session and cannot add a new login
+	// identity to the account.
+	pat, err := service.GenerateUserAccessToken(user.Id)
+	require.NoError(t, err)
+	req4 := newWeChatRequest(http.MethodPost, "/api/oauth/wechat/bind", strings.NewReader(`{"code":"bind-1"}`))
+	req4.Header.Set("Content-Type", "application/json")
+	req4.Header.Set("Authorization", "Bearer "+pat)
+	rec4 := httptest.NewRecorder()
+	r.ServeHTTP(rec4, req4)
+	require.Equal(t, http.StatusForbidden, rec4.Code)
 }

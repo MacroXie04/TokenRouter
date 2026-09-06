@@ -21,17 +21,23 @@ func IsRequestBodyTooLargeError(err error) bool {
 	return errors.As(err, &mbe)
 }
 
-// defaultAnonymousRequestBodyLimitKB is the fallback limit for anonymous
-// request bodies (ANONYMOUS_REQUEST_BODY_LIMIT_KB).
-const defaultAnonymousRequestBodyLimitKB = 512
+const (
+	// defaultAnonymousRequestBodyLimitKB is the fallback limit for anonymous
+	// request bodies (ANONYMOUS_REQUEST_BODY_LIMIT_KB).
+	defaultAnonymousRequestBodyLimitKB = 512
+	// Anonymous requests are also covered by the 16 MiB process-wide ceiling.
+	// Bounding the configuration here prevents an overflowing KB-to-byte shift
+	// from accidentally turning the narrower limiter off.
+	maxAnonymousRequestBodyLimitKB = 16 << 10
+)
 
 // GetAnonymousRequestBodyLimitBytes returns the anonymous request-body limit
-// in bytes. ANONYMOUS_REQUEST_BODY_LIMIT_KB < 0 falls back to the default;
-// zero disables the limit entirely.
+// in bytes. Values outside 0..16 MiB fall back to the default; zero disables
+// the narrower limit (the process-wide request ceiling still applies).
 func GetAnonymousRequestBodyLimitBytes() int64 {
 	limitKB := GetEnvInt("ANONYMOUS_REQUEST_BODY_LIMIT_KB", defaultAnonymousRequestBodyLimitKB)
-	if limitKB < 0 {
+	if limitKB < 0 || limitKB > maxAnonymousRequestBodyLimitKB {
 		limitKB = defaultAnonymousRequestBodyLimitKB
 	}
-	return int64(limitKB) << 10
+	return int64(limitKB) * 1024
 }

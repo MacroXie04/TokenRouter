@@ -89,6 +89,25 @@ func TestWeightedSelectionStatisticallyBounded(t *testing.T) {
 	assert.InDelta(t, 0.75, ratio, 0.05)
 }
 
+func TestWeightedRandomIndexCannotOverflowOrPanic(t *testing.T) {
+	maximum := ^uint(0)
+	weights := []uint{maximum, maximum, maximum / 2, 1}
+	random := rand.New(rand.NewSource(77))
+	counts := make([]int, len(weights))
+	for i := 0; i < 10_000; i++ {
+		selected := weightedRandomIndex(random, weights)
+		require.GreaterOrEqual(t, selected, 0)
+		require.Less(t, selected, len(weights))
+		counts[selected]++
+	}
+	assert.Greater(t, counts[0], 0)
+	assert.Greater(t, counts[1], 0)
+	assert.Greater(t, counts[2], 0)
+
+	assert.Equal(t, -1, weightedRandomIndex(random, nil))
+	assert.Contains(t, []int{0, 1, 2}, weightedRandomIndex(random, []uint{0, 0, 0}))
+}
+
 func TestIgnoreChannel(t *testing.T) {
 	initTestDB(t)
 	channels := seedChannels(t, 2)
@@ -107,4 +126,20 @@ func TestNoChannelReturnsError(t *testing.T) {
 	_, err := GetRandomSatisfiedChannel("default", "missing", nil, nil)
 	assert.Error(t, err)
 	assert.Equal(t, ErrChannelNotFound, err)
+}
+
+func TestGroupSelectionIsOrderedAndNeverFallsBackToUnauthorizedDefault(t *testing.T) {
+	initTestDB(t)
+	channels := seedChannels(t, 2)
+	require.NoError(t, model.DB.Create(&model.Ability{Group: "default", Model: "m", ChannelId: channels[0].Id, Enabled: true}).Error)
+	require.NoError(t, model.DB.Create(&model.Ability{Group: "vip", Model: "m", ChannelId: channels[1].Id, Enabled: true}).Error)
+	require.NoError(t, InitAbilityCache())
+
+	_, err := GetRandomSatisfiedChannel("staff", "m", nil, nil)
+	assert.ErrorIs(t, err, ErrChannelNotFound, "an unavailable authorized group must not fall back to default")
+
+	selected, group, err := GetRandomSatisfiedChannelFromGroups([]string{"staff", "vip", "default"}, "m", nil, nil)
+	require.NoError(t, err)
+	assert.Equal(t, "vip", group)
+	assert.Equal(t, channels[1].Id, selected.Id)
 }

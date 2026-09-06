@@ -1,7 +1,7 @@
 {
   "generated": "2026-08-13T17:38:18.779Z",
   "counts": {
-    "routes": 341,
+    "routes": 354,
     "entities": 35,
     "channels": 211,
     "relay": 58,
@@ -11,7 +11,7 @@
   },
   "anchors": {
     "entities": "~34",
-    "routes": "~300-350",
+    "routes": "~350",
     "channel_types": "~57",
     "providers": "~37",
     "relay_formats": "~13",

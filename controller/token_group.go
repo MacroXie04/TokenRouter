@@ -17,7 +17,7 @@ import (
 )
 
 // tokenAutoGroupsInput distinguishes "field absent" from "explicit null/[]"
-// in update payloads (reference tokenAutoGroupsInput contract).
+// in update payloads.
 type tokenAutoGroupsInput struct {
 	Set    bool
 	Groups []string
@@ -32,9 +32,25 @@ func (input *tokenAutoGroupsInput) UnmarshalJSON(data []byte) error {
 	return common.Unmarshal(data, &input.Groups)
 }
 
-// tokenRequest is the create/update payload (reference contract).
+// tokenGroupInput preserves an existing group when an update omits the field.
+type tokenGroupInput struct {
+	Set   bool
+	Value string
+}
+
+func (input *tokenGroupInput) UnmarshalJSON(data []byte) error {
+	input.Set = true
+	if strings.TrimSpace(string(data)) == "null" {
+		input.Value = ""
+		return nil
+	}
+	return common.Unmarshal(data, &input.Value)
+}
+
+// tokenRequest is the create/update payload.
 type tokenRequest struct {
 	model.Token
+	Group      tokenGroupInput      `json:"group"`
 	AutoGroups tokenAutoGroupsInput `json:"auto_groups"`
 }
 
@@ -78,11 +94,16 @@ type pageInfo struct {
 	Items    any `json:"items"`
 }
 
+const maxPageNumber = 1_000_000
+
 // getPageQuery parses the reference paging query and compatibility aliases.
 func getPageQuery(c *gin.Context) *pageInfo {
 	page, _ := strconv.Atoi(c.DefaultQuery("p", "1"))
 	if page < 1 {
 		page = 1
+	}
+	if page > maxPageNumber {
+		page = maxPageNumber
 	}
 	size := 0
 	for _, key := range []string{"page_size", "ps", "size"} {
@@ -101,6 +122,10 @@ func getPageQuery(c *gin.Context) *pageInfo {
 	return &pageInfo{Page: page, PageSize: size}
 }
 
+func (p *pageInfo) Offset() int {
+	return (p.Page - 1) * p.PageSize
+}
+
 // validateTokenRequest enforces the shared create/update constraints.
 func validateTokenRequest(c *gin.Context, token *model.Token) bool {
 	if len(token.Name) > 50 {
@@ -112,8 +137,7 @@ func validateTokenRequest(c *gin.Context, token *model.Token) bool {
 			c.JSON(http.StatusBadRequest, dto.Fail("令牌额度不能为负数"))
 			return false
 		}
-		maxQuota := 1000000000 * setting.GetOptionIntOrDefault(setting.QuotaPerUnitOption, 500000)
-		if token.RemainQuota > maxQuota {
+		if int64(token.RemainQuota) > common.MaxQuota {
 			c.JSON(http.StatusBadRequest, dto.Fail("令牌额度超过最大限制"))
 			return false
 		}
@@ -122,10 +146,19 @@ func validateTokenRequest(c *gin.Context, token *model.Token) bool {
 }
 
 // setTokenAutoGroups validates and stores auto-groups for group "auto" tokens.
-func setTokenAutoGroups(c *gin.Context, token *model.Token, groups []string) bool {
+func setTokenAutoGroups(c *gin.Context, token *model.Token, userGroup string, groups []string) bool {
 	maxCount := setting.GetMaxTokenAutoGroups()
-	if len(groups) > maxCount {
-		c.JSON(http.StatusBadRequest, dto.Fail("自动分组数量超过限制"))
+	if err := service.ValidateUserAutoGroups(userGroup, groups, maxCount); err != nil {
+		message := "无权使用自动分组"
+		switch {
+		case errors.Is(err, service.ErrTooManyAutoGroups):
+			message = "自动分组数量超过限制"
+		case errors.Is(err, service.ErrDuplicateAutoGroup):
+			message = "自动分组不能重复"
+		case errors.Is(err, service.ErrInvalidAutoGroup):
+			message = "自动分组名称无效"
+		}
+		c.JSON(http.StatusBadRequest, dto.Fail(message))
 		return false
 	}
 	if err := token.SetAutoGroups(groups); err != nil {
@@ -139,12 +172,16 @@ func setTokenAutoGroups(c *gin.Context, token *model.Token, groups []string) boo
 func GetAllTokens(c *gin.Context) {
 	userId := common.GetUserId(c)
 	page := getPageQuery(c)
-	tokens, err := service.GetAllUserTokens(userId, (page.Page-1)*page.PageSize, page.PageSize)
+	tokens, err := service.GetAllUserTokens(userId, page.Offset(), page.PageSize)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, dto.Fail(err.Error()))
 		return
 	}
-	total, _ := service.CountUserTokens(userId)
+	total, err := service.CountUserTokens(userId)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, dto.Fail(err.Error()))
+		return
+	}
 	page.Total = int(total)
 	page.Items = buildMaskedTokenResponses(tokens)
 	c.JSON(http.StatusOK, dto.Ok(page))
@@ -156,7 +193,7 @@ func SearchTokens(c *gin.Context) {
 	keyword := c.Query("keyword")
 	tokenKey := c.Query("token")
 	page := getPageQuery(c)
-	tokens, total, err := service.SearchUserTokens(userId, keyword, tokenKey, (page.Page-1)*page.PageSize, page.PageSize)
+	tokens, total, err := service.SearchUserTokens(userId, keyword, tokenKey, page.Offset(), page.PageSize)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, dto.Fail(err.Error()))
 		return
@@ -176,7 +213,7 @@ func GetTokenAutoGroups(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, dto.Ok(gin.H{
-		"groups":    service.GetUserAutoGroups(user.Group),
+		"groups":    service.GetUserDefaultAutoGroups(user.Group),
 		"max_count": setting.GetMaxTokenAutoGroups(),
 	}))
 }
@@ -222,31 +259,49 @@ func AddToken(c *gin.Context) {
 	if !validateTokenRequest(c, token) {
 		return
 	}
+	userId := common.GetUserId(c)
 	maxTokens := setting.GetMaxUserTokens()
-	count, err := service.CountUserTokens(common.GetUserId(c))
+	user, err := service.GetUserByID(userId)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, dto.Fail(err.Error()))
+		c.JSON(http.StatusInternalServerError, dto.Fail("获取用户分组失败"))
 		return
 	}
-	if int(count) >= maxTokens {
-		c.JSON(http.StatusOK, gin.H{
-			"success": false,
-			"message": "已达到最大令牌数量限制 (" + common.Int2Str(maxTokens) + ")",
-		})
-		return
+	userGroup := user.Group
+	if userGroup == "" {
+		userGroup = service.GroupDefault
 	}
-	if token.Group == "auto" {
-		if !setTokenAutoGroups(c, token, request.AutoGroups.Groups) {
+	if request.Group.Set {
+		token.Group = request.Group.Value
+	} else {
+		// Empty is the persisted inheritance marker: relay authentication
+		// resolves it against the user's current group on every request.
+		token.Group = ""
+	}
+	if token.Group == service.GroupAuto {
+		if !setTokenAutoGroups(c, token, userGroup, request.AutoGroups.Groups) {
 			return
 		}
 	} else {
+		selectedGroup := token.Group
+		if !request.Group.Set {
+			selectedGroup = userGroup
+		}
+		if !service.IsUserSelectableGroup(userGroup, selectedGroup) {
+			c.JSON(http.StatusBadRequest, dto.Fail("无权使用该分组"))
+			return
+		}
 		token.CrossGroupRetry = false
 		_ = token.SetAutoGroups(nil)
 	}
+	key, err := common.SecureRandomAlphanumeric(48)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, dto.Fail("创建失败"))
+		return
+	}
 	clean := model.Token{
-		UserId:             common.GetUserId(c),
+		UserId:             userId,
 		Name:               token.Name,
-		Key:                "sk-" + common.RandomAlphanumeric(48),
+		Key:                "sk-" + key,
 		Status:             service.TokenStatusEnabled,
 		CreatedTime:        common.NowTimestamp(),
 		AccessedTime:       common.NowTimestamp(),
@@ -263,7 +318,14 @@ func AddToken(c *gin.Context) {
 	if clean.UnlimitedQuota {
 		clean.RemainQuota = -1
 	}
-	if err := model.DB.Create(&clean).Error; err != nil {
+	if err := service.CreateUserTokenWithinLimit(&clean, maxTokens); err != nil {
+		if errors.Is(err, service.ErrUserTokenLimitReached) {
+			c.JSON(http.StatusOK, gin.H{
+				"success": false,
+				"message": "已达到最大令牌数量限制 (" + common.Int2Str(maxTokens) + ")",
+			})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, dto.Fail("创建失败"))
 		return
 	}
@@ -305,6 +367,23 @@ func UpdateToken(c *gin.Context) {
 	if statusOnly != "" {
 		clean.Status = token.Status
 	} else {
+		user, err := service.GetUserByID(userId)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, dto.Fail("获取用户分组失败"))
+			return
+		}
+		userGroup := user.Group
+		if userGroup == "" {
+			userGroup = service.GroupDefault
+		}
+		if request.Group.Set {
+			if request.Group.Value != service.GroupAuto &&
+				!service.IsUserSelectableGroup(userGroup, request.Group.Value) {
+				c.JSON(http.StatusBadRequest, dto.Fail("无权使用该分组"))
+				return
+			}
+			clean.Group = request.Group.Value
+		}
 		clean.Name = token.Name
 		clean.ExpiredTime = token.ExpiredTime
 		clean.RemainQuota = token.RemainQuota
@@ -312,16 +391,15 @@ func UpdateToken(c *gin.Context) {
 		clean.ModelLimitsEnabled = token.ModelLimitsEnabled
 		clean.ModelLimits = token.ModelLimits
 		clean.AllowIps = token.AllowIps
-		clean.Group = token.Group
 		clean.CrossGroupRetry = token.CrossGroupRetry
 		if clean.UnlimitedQuota {
 			clean.RemainQuota = -1
 		}
-		if token.Group != "auto" {
+		if clean.Group != service.GroupAuto {
 			clean.CrossGroupRetry = false
 			_ = clean.SetAutoGroups(nil)
 		} else if request.AutoGroups.Set {
-			if !setTokenAutoGroups(c, clean, request.AutoGroups.Groups) {
+			if !setTokenAutoGroups(c, clean, userGroup, request.AutoGroups.Groups) {
 				return
 			}
 		}
@@ -356,10 +434,35 @@ type tokenBatch struct {
 	Ids []int `json:"ids"`
 }
 
+func validTokenBatchIDs(ids []int) bool {
+	if len(ids) == 0 || len(ids) > 100 {
+		return false
+	}
+	seen := make(map[int]struct{}, len(ids))
+	for _, id := range ids {
+		if id <= 0 {
+			return false
+		}
+		if _, duplicate := seen[id]; duplicate {
+			return false
+		}
+		seen[id] = struct{}{}
+	}
+	return true
+}
+
 // DeleteTokenBatch soft-deletes several of the user's tokens.
 func DeleteTokenBatch(c *gin.Context) {
 	var batch tokenBatch
 	if err := c.ShouldBindJSON(&batch); err != nil || len(batch.Ids) == 0 {
+		c.JSON(http.StatusBadRequest, dto.Fail("无效的请求参数"))
+		return
+	}
+	if len(batch.Ids) > 100 {
+		c.JSON(http.StatusBadRequest, dto.Fail("批量操作最多支持100个"))
+		return
+	}
+	if !validTokenBatchIDs(batch.Ids) {
 		c.JSON(http.StatusBadRequest, dto.Fail("无效的请求参数"))
 		return
 	}
@@ -380,6 +483,10 @@ func GetTokenKeysBatch(c *gin.Context) {
 	}
 	if len(batch.Ids) > 100 {
 		c.JSON(http.StatusBadRequest, dto.Fail("批量操作最多支持100个"))
+		return
+	}
+	if !validTokenBatchIDs(batch.Ids) {
+		c.JSON(http.StatusBadRequest, dto.Fail("无效的请求参数"))
 		return
 	}
 	tokens, err := service.GetTokenKeysByIds(batch.Ids, common.GetUserId(c))

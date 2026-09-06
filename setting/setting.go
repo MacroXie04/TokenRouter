@@ -3,6 +3,8 @@
 package setting
 
 import (
+	"context"
+	"errors"
 	"sort"
 	"strconv"
 	"sync"
@@ -45,9 +47,20 @@ const (
 	QuotaForInviterOption               = "QuotaForInviter"
 	QuotaForInviteeOption               = "QuotaForInvitee"
 	QuotaRemindThresholdOption          = "QuotaRemindThreshold"
+	PreConsumedQuotaOption              = "PreConsumedQuota"
 	ModelPriceOption                    = "ModelPrice"
 	ModelRatioOption                    = "ModelRatio"
+	CompletionRatioOption               = "CompletionRatio"
+	PerCallModelPriceOption             = "PerCallModelPrice"
+	ModelBillingModeOption              = "ModelBillingMode"
+	ModelBillingExprOption              = "ModelBillingExpr"
 	GroupRatioOption                    = "GroupRatio"
+	GroupGroupRatioOption               = "GroupGroupRatio"
+	ExposeRatioEnabledOption            = "ExposeRatioEnabled"
+	PasskeyEnabledOption                = "passkey.enabled"
+	CheckinEnabledOption                = "checkin_setting.enabled"
+	CheckinMinQuotaOption               = "checkin_setting.min_quota"
+	CheckinMaxQuotaOption               = "checkin_setting.max_quota"
 	PerfMetricsEnabledOption            = "perf_metrics_setting.enabled"
 	PerfMetricsFlushIntervalOption      = "perf_metrics_setting.flush_interval"
 	PerfMetricsBucketTimeOption         = "perf_metrics_setting.bucket_time"
@@ -59,11 +72,31 @@ const (
 	PaymentComplianceConfirmedIPOption  = "payment_setting.compliance_confirmed_ip"
 	LegacyPaymentComplianceOption       = "PaymentComplianceConfirmed"
 	RetryTimesOption                    = "RetryTimes"
+	AutoGroupsOption                    = "AutoGroups"
 	AutoGroupConsumeOption              = "AutoGroupConsume"
 	MaxTokenAutoGroupsOption            = "MaxTokenAutoGroups"
 	MaxUserTokensOption                 = "MaxUserTokens"
 	DisplayTokenCountOption             = "DisplayTokenCount"
 	DefaultStreamingTimeoutOption       = "DefaultStreamingTimeout"
+	HeaderNavModulesOption              = "HeaderNavModules"
+	SidebarModulesAdminOption           = "SidebarModulesAdmin"
+	ConsoleAnnouncementsOption          = "console_setting.announcements"
+	ConsoleAnnouncementsEnabledOption   = "console_setting.announcements_enabled"
+	ConsoleAPIInfoOption                = "console_setting.api_info"
+	ConsoleAPIInfoEnabledOption         = "console_setting.api_info_enabled"
+	ConsoleFAQOption                    = "console_setting.faq"
+	ConsoleFAQEnabledOption             = "console_setting.faq_enabled"
+	ConsoleUptimeKumaGroupsOption       = "console_setting.uptime_kuma_groups"
+	ConsoleUptimeKumaEnabledOption      = "console_setting.uptime_kuma_enabled"
+	SelfUseModeEnabledOption            = "SelfUseModeEnabled"
+	DemoSiteEnabledOption               = "DemoSiteEnabled"
+	ModelDeploymentIONetEnabledOption   = "model_deployment.ionet.enabled"
+	ModelDeploymentIONetAPIKeyOption    = "model_deployment.ionet.api_key"
+)
+
+const (
+	DefaultMaxUserTokens = 1000
+	MaxMaxUserTokens     = 1_000_000
 )
 
 var (
@@ -74,24 +107,108 @@ var (
 
 // Init loads all options into memory from the database.
 func Init() error {
-	optionUpdateMu.Lock()
-	defer optionUpdateMu.Unlock()
-	var options []*model.Option
-	if err := model.DB.Find(&options).Error; err != nil {
+	return InitContext(context.Background())
+}
+
+// InitContext loads and validates one coherent option snapshot while applying
+// the caller's cancellation boundary to the database read. Publication occurs
+// only after the complete snapshot has been built and cancellation rechecked.
+func InitContext(ctx context.Context) error {
+	if ctx == nil {
+		return errors.New("settings context is nil")
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
-	loaded := make(map[string]string, len(options))
-	for _, o := range options {
-		loaded[o.Key] = o.Value
+	if model.DB == nil {
+		return errors.New("settings database is nil")
+	}
+	optionUpdateMu.Lock()
+	defer optionUpdateMu.Unlock()
+	loaded, err := loadBoundedOptionSnapshot(model.DB.WithContext(ctx))
+	if err != nil {
+		return err
+	}
+	if _, err := ParseTopUpGroupRatioOption(loaded[TopUpGroupRatioOption]); err != nil {
+		return err
+	}
+	if _, err := parsePayMethods(loaded[PayMethodsOption]); err != nil {
+		return err
+	}
+	consoleContent, err := buildConsoleContentSetting(loaded)
+	if err != nil {
+		return err
 	}
 	affinityConfig, err := buildChannelAffinitySetting(loaded)
 	if err != nil {
+		return err
+	}
+	groupRouting, err := buildGroupRoutingSetting(loaded)
+	if err != nil {
+		return err
+	}
+	registrationGroupPolicy, err := buildRegistrationGroupPolicy(loaded)
+	if err != nil {
+		return err
+	}
+	checkin, err := buildCheckinSetting(loaded)
+	if err != nil {
+		return err
+	}
+	modelPolicy, err := buildModelPolicySetting(loaded)
+	if err != nil {
+		return err
+	}
+	usageRatio, err := buildUsageRatioSetting(loaded)
+	if err != nil {
+		return err
+	}
+	authentication, err := buildAuthenticationSetting(loaded)
+	if err != nil {
+		return err
+	}
+	modelRequestRateLimit, err := buildModelRequestRateLimitSetting(loaded)
+	if err != nil {
+		return err
+	}
+	grok, err := buildGrokSetting(loaded)
+	if err != nil {
+		return err
+	}
+	operations, err := buildOperationsSetting(loaded)
+	if err != nil {
+		return err
+	}
+	channelReliability, err := buildChannelReliabilitySetting(loaded)
+	if err != nil {
+		return err
+	}
+	toolPrices, err := parseToolPriceState(optionValueOrDefault(loaded, ToolPriceOption, "{}"))
+	if err != nil {
+		return err
+	}
+	if err := validatePricingConfiguration(loaded); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 	optionMapMu.Lock()
 	optionMap = loaded
 	optionMapMu.Unlock()
 	channelAffinityConfig.Store(&affinityConfig)
+	groupRoutingConfig.Store(&groupRouting)
+	publishRegistrationGroupPolicy(registrationGroupPolicy)
+	checkinConfig.Store(&checkin)
+	consoleContentConfig.Store(&consoleContent)
+	modelPolicyConfig.Store(&modelPolicy)
+	usageRatioConfig.Store(&usageRatio)
+	authenticationConfig.Store(&authentication)
+	modelRequestRateLimitConfig.Store(&modelRequestRateLimit)
+	grokConfig.Store(&grok)
+	operationsConfig.Store(&operations)
+	storeChannelReliabilitySetting(channelReliability)
+	publishToolPriceState(toolPrices)
 	return nil
 }
 
@@ -101,11 +218,41 @@ func Sync() error {
 	return Init()
 }
 
+// SyncContext is Sync's cancellable form for process-long maintenance loops.
+func SyncContext(ctx context.Context) error {
+	return InitContext(ctx)
+}
+
 // GetOption returns the raw option value (empty string if unset).
 func GetOption(key string) string {
+	value, _ := LookupOption(key)
+	return value
+}
+
+// LookupOption returns the raw option value and whether the key is present in
+// the hot-reloaded snapshot. This distinguishes an absent option (use a
+// documented default) from an explicitly empty value (invalid for settings
+// whose safe behavior is to fail closed).
+func LookupOption(key string) (string, bool) {
 	optionMapMu.RLock()
 	defer optionMapMu.RUnlock()
-	return optionMap[key]
+	value, found := optionMap[key]
+	return value, found
+}
+
+// GetOptions returns one coherent copy of the requested option values. It is
+// used when several settings jointly define one runtime decision, so an
+// UpdateOptions publication cannot be observed halfway through the copy.
+func GetOptions(keys ...string) map[string]string {
+	optionMapMu.RLock()
+	defer optionMapMu.RUnlock()
+	values := make(map[string]string, len(keys))
+	for _, key := range keys {
+		if value, found := optionMap[key]; found {
+			values[key] = value
+		}
+	}
+	return values
 }
 
 // GetOptionOrDefault returns the option or a default when unset.
@@ -180,6 +327,9 @@ func UpdateOption(key, value string) error {
 func UpdateOptions(updates map[string]string) error {
 	optionUpdateMu.Lock()
 	defer optionUpdateMu.Unlock()
+	if err := validateOptionSnapshot(updates); err != nil {
+		return err
+	}
 	keys := make([]string, 0, len(updates))
 	for key := range updates {
 		keys = append(keys, key)
@@ -194,8 +344,99 @@ func UpdateOptions(updates map[string]string) error {
 	for key, value := range updates {
 		candidate[key] = value
 	}
+	if err := validateOptionSnapshot(candidate); err != nil {
+		return err
+	}
+	if _, err := ParseTopUpGroupRatioOption(candidate[TopUpGroupRatioOption]); err != nil {
+		return err
+	}
+	for key := range updates {
+		if isCreemOptionKey(key) {
+			if _, err := buildCreemConfig(candidate); err != nil {
+				return err
+			}
+			break
+		}
+	}
+	for key := range updates {
+		if isWaffoOptionKey(key) {
+			if _, err := buildWaffoConfig(candidate); err != nil {
+				return err
+			}
+			break
+		}
+	}
+	for key := range updates {
+		if isWaffoPancakeOptionKey(key) {
+			if _, err := buildWaffoPancakeConfig(candidate); err != nil {
+				return err
+			}
+			break
+		}
+	}
+	if raw, changed := updates[ChatsOption]; changed {
+		if _, err := parseChatPresets(raw); err != nil {
+			return err
+		}
+	}
+	if raw, changed := updates[PayMethodsOption]; changed {
+		if _, err := parsePayMethods(raw); err != nil {
+			return err
+		}
+	}
+	consoleContent, err := buildConsoleContentSetting(candidate)
+	if err != nil {
+		return err
+	}
 	affinityConfig, err := buildChannelAffinitySetting(candidate)
 	if err != nil {
+		return err
+	}
+	groupRouting, err := buildGroupRoutingSetting(candidate)
+	if err != nil {
+		return err
+	}
+	registrationGroupPolicy, err := buildRegistrationGroupPolicy(candidate)
+	if err != nil {
+		return err
+	}
+	checkin, err := buildCheckinSetting(candidate)
+	if err != nil {
+		return err
+	}
+	modelPolicy, err := buildModelPolicySetting(candidate)
+	if err != nil {
+		return err
+	}
+	usageRatio, err := buildUsageRatioSetting(candidate)
+	if err != nil {
+		return err
+	}
+	authentication, err := buildAuthenticationSetting(candidate)
+	if err != nil {
+		return err
+	}
+	modelRequestRateLimit, err := buildModelRequestRateLimitSetting(candidate)
+	if err != nil {
+		return err
+	}
+	grok, err := buildGrokSetting(candidate)
+	if err != nil {
+		return err
+	}
+	operations, err := buildOperationsSetting(candidate)
+	if err != nil {
+		return err
+	}
+	channelReliability, err := buildChannelReliabilitySetting(candidate)
+	if err != nil {
+		return err
+	}
+	toolPrices, err := parseToolPriceState(optionValueOrDefault(candidate, ToolPriceOption, "{}"))
+	if err != nil {
+		return err
+	}
+	if err := validatePricingConfiguration(candidate); err != nil {
 		return err
 	}
 	if err := model.DB.Transaction(func(tx *gorm.DB) error {
@@ -217,7 +458,26 @@ func UpdateOptions(updates map[string]string) error {
 	}
 	optionMapMu.Unlock()
 	channelAffinityConfig.Store(&affinityConfig)
+	groupRoutingConfig.Store(&groupRouting)
+	publishRegistrationGroupPolicy(registrationGroupPolicy)
+	checkinConfig.Store(&checkin)
+	consoleContentConfig.Store(&consoleContent)
+	modelPolicyConfig.Store(&modelPolicy)
+	usageRatioConfig.Store(&usageRatio)
+	authenticationConfig.Store(&authentication)
+	modelRequestRateLimitConfig.Store(&modelRequestRateLimit)
+	grokConfig.Store(&grok)
+	operationsConfig.Store(&operations)
+	storeChannelReliabilitySetting(channelReliability)
+	publishToolPriceState(toolPrices)
 	return nil
+}
+
+func optionValueOrDefault(options map[string]string, key, fallback string) string {
+	if value, present := options[key]; present {
+		return value
+	}
+	return fallback
 }
 
 // GetSiteName returns the configured site name, defaulting to the product name.
@@ -225,14 +485,12 @@ func GetSiteName() string {
 	return GetOptionOrDefault(SystemNameOption, common.ProductName)
 }
 
-// GetMaxTokenAutoGroups returns the per-token auto-groups limit
-// (MaxTokenAutoGroups option, default 5 — reference default).
-func GetMaxTokenAutoGroups() int {
-	return GetOptionIntOrDefault(MaxTokenAutoGroupsOption, 5)
-}
-
 // GetMaxUserTokens returns the per-user token count limit
 // (MaxUserTokens option, default 1000 — reference default).
 func GetMaxUserTokens() int {
-	return GetOptionIntOrDefault(MaxUserTokensOption, 1000)
+	limit := GetOptionIntOrDefault(MaxUserTokensOption, DefaultMaxUserTokens)
+	if limit < 1 || limit > MaxMaxUserTokens {
+		return DefaultMaxUserTokens
+	}
+	return limit
 }

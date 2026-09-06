@@ -12,18 +12,18 @@ const (
 
 // Common HTTP content types.
 const (
-	ContentTypeJSON          = "application/json"
-	ContentTypeStream        = "text/event-stream"
-	ContentTypeEventStream   = "text/event-stream"
+	ContentTypeJSON        = "application/json"
+	ContentTypeStream      = "text/event-stream"
+	ContentTypeEventStream = "text/event-stream"
 )
 
 // Common relay error messages (stable, user-facing).
 const (
-	ErrorCodeInsufficientQuota = "insufficient_quota"
-	ErrorCodeInvalidRequest    = "invalid_request_error"
+	ErrorCodeInsufficientQuota   = "insufficient_quota"
+	ErrorCodeInvalidRequest      = "invalid_request_error"
 	ErrorCodeChannelNotAvailable = "channel_not_available"
-	ErrorCodeRateLimitExceeded = "rate_limit_exceeded"
-	ErrorCodeUnauthorized      = "unauthorized"
+	ErrorCodeRateLimitExceeded   = "rate_limit_exceeded"
+	ErrorCodeUnauthorized        = "unauthorized"
 )
 
 // Finish reasons.

@@ -193,8 +193,11 @@ func TestCustomOAuthDiscoveryContract(t *testing.T) {
 	assert.Equal(t, "请先填写 Discovery URL 或 Issuer URL", decodeBody(t, rec)["message"])
 	rec = do(http.MethodPost, "/api/custom-oauth-provider/discovery", `{"well_known_url":"ftp://x/y"}`)
 	assert.Equal(t, "Discovery URL 无效，仅支持 http/https", decodeBody(t, rec)["message"])
+	rec = do(http.MethodPost, "/api/custom-oauth-provider/discovery",
+		fmt.Sprintf(`{"well_known_url":%q,"issuer_url":%q}`, upstream.URL, upstream.URL))
+	assert.Equal(t, "Discovery URL 无效，仅支持 http/https", decodeBody(t, rec)["message"])
 
-	// Non-200 upstream surfaces the body.
+	// Non-200 upstream responses expose only the status code, never the body.
 	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		_, _ = w.Write([]byte("boom"))
@@ -204,18 +207,81 @@ func TestCustomOAuthDiscoveryContract(t *testing.T) {
 		fmt.Sprintf(`{"well_known_url":%q}`, bad.URL))
 	body = decodeBody(t, rec)
 	assert.Equal(t, false, body["success"])
-	assert.Equal(t, "获取 Discovery 配置失败: boom", body["message"])
+	assert.Equal(t, "获取 Discovery 配置失败（状态码 500）", body["message"])
+	assert.NotContains(t, rec.Body.String(), "boom")
+
+	// A successful response is still untrusted input and cannot be buffered
+	// without a hard ceiling.
+	oversized := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"padding":"` + strings.Repeat("x", (1<<20)+1) + `"}`))
+	}))
+	defer oversized.Close()
+	rec = do(http.MethodPost, "/api/custom-oauth-provider/discovery",
+		fmt.Sprintf(`{"well_known_url":%q}`, oversized.URL))
+	body = decodeBody(t, rec)
+	assert.Equal(t, false, body["success"])
+	assert.Equal(t, "Discovery 配置过大", body["message"])
+
+	// Error bodies are never read or reflected, regardless of size.
+	oversizedError := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(strings.Repeat("sensitive", 100)))
+	}))
+	defer oversizedError.Close()
+	rec = do(http.MethodPost, "/api/custom-oauth-provider/discovery",
+		fmt.Sprintf(`{"well_known_url":%q}`, oversizedError.URL))
+	body = decodeBody(t, rec)
+	assert.Equal(t, false, body["success"])
+	assert.Equal(t, "获取 Discovery 配置失败（状态码 500）", body["message"])
+	assert.NotContains(t, rec.Body.String(), "sensitive")
+
+	// Redirects are terminal responses. The discovery client must never follow
+	// an operator-supplied URL into a second destination.
+	destinationCalls := 0
+	destination := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		destinationCalls++
+		_, _ = w.Write([]byte(`{"issuer":"https://internal.example"}`))
+	}))
+	defer destination.Close()
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, destination.URL, http.StatusTemporaryRedirect)
+	}))
+	defer redirector.Close()
+	rec = do(http.MethodPost, "/api/custom-oauth-provider/discovery",
+		fmt.Sprintf(`{"well_known_url":%q}`, redirector.URL))
+	body = decodeBody(t, rec)
+	assert.Equal(t, false, body["success"])
+	assert.Equal(t, "获取 Discovery 配置失败（状态码 307）", body["message"])
+	assert.Zero(t, destinationCalls)
+
+	// Duplicate JSON keys make an otherwise successful discovery response
+	// ambiguous and are rejected instead of silently choosing one value.
+	duplicate := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"issuer":"https://first.example","issuer":"https://second.example"}`))
+	}))
+	defer duplicate.Close()
+	rec = do(http.MethodPost, "/api/custom-oauth-provider/discovery",
+		fmt.Sprintf(`{"well_known_url":%q}`, duplicate.URL))
+	body = decodeBody(t, rec)
+	assert.Equal(t, false, body["success"])
+	assert.Equal(t, "解析 Discovery 配置失败", body["message"])
+	assert.NotContains(t, rec.Body.String(), "first.example")
+	assert.NotContains(t, rec.Body.String(), "second.example")
 }
 
 func TestAdminUserOAuthBindingsContract(t *testing.T) {
 	handler, doRoot, uid := setupCustomOAuthTest(t)
 
-	// A provider plus one binding for the root user.
+	// A provider plus one binding for a lower-role target user.
 	rec := doRoot(http.MethodPost, "/api/custom-oauth-provider/", customOAuthPayload)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	providerId := int(decodeBody(t, rec)["data"].(map[string]any)["id"].(float64))
+	target := model.User{Username: "oauth-target", Password: "password8", Role: constant.RoleCommonUser,
+		Status: model.UserStatusEnabled, Quota: 1000, AuthVersion: 1}
+	require.NoError(t, model.DB.Create(&target).Error)
 	require.NoError(t, model.DB.Create(&model.UserOAuthBinding{
-		UserId: uid, ProviderId: providerId, ProviderUserId: "ext-42",
+		UserId: target.Id, ProviderId: providerId, ProviderUserId: "ext-42",
 	}).Error)
 
 	// An admin-role session (cannot manage the root target).
@@ -227,7 +293,7 @@ func TestAdminUserOAuthBindingsContract(t *testing.T) {
 	doAdmin := doAsUser(t, handler, sid, access, refresh)
 
 	// Root lists the target's bindings with provider metadata.
-	rec = doRoot(http.MethodGet, fmt.Sprintf("/api/user/%d/oauth/bindings", uid), "")
+	rec = doRoot(http.MethodGet, fmt.Sprintf("/api/user/%d/oauth/bindings", target.Id), "")
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	body := decodeBody(t, rec)
 	assert.Equal(t, true, body["success"])
@@ -246,18 +312,18 @@ func TestAdminUserOAuthBindingsContract(t *testing.T) {
 	assert.Equal(t, "no permission", decodeBody(t, rec)["message"])
 
 	// Root unbinds; the reference success message.
-	rec = doRoot(http.MethodDelete, fmt.Sprintf("/api/user/%d/oauth/bindings/%d", uid, providerId), "")
+	rec = doRoot(http.MethodDelete, fmt.Sprintf("/api/user/%d/oauth/bindings/%d", target.Id, providerId), "")
 	body = decodeBody(t, rec)
 	assert.Equal(t, true, body["success"])
 	assert.Equal(t, "success", body["message"])
 	var count int64
-	model.DB.Model(&model.UserOAuthBinding{}).Where("user_id = ?", uid).Count(&count)
+	model.DB.Model(&model.UserOAuthBinding{}).Where("user_id = ?", target.Id).Count(&count)
 	assert.Zero(t, count)
 
 	// Invalid ids.
 	rec = doRoot(http.MethodGet, "/api/user/abc/oauth/bindings", "")
 	assert.Equal(t, "invalid user id", decodeBody(t, rec)["message"])
-	rec = doRoot(http.MethodDelete, fmt.Sprintf("/api/user/%d/oauth/bindings/abc", uid), "")
+	rec = doRoot(http.MethodDelete, fmt.Sprintf("/api/user/%d/oauth/bindings/abc", target.Id), "")
 	assert.Equal(t, "invalid provider id", decodeBody(t, rec)["message"])
 }
 

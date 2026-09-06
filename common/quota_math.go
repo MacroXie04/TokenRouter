@@ -19,6 +19,24 @@ const (
 	MinQuota = int64(math.MinInt32)
 )
 
+// QuotaWithinBounds reports whether a persisted or calculated quota value is
+// inside the non-negative accounting domain.
+func QuotaWithinBounds(value int) bool {
+	return value >= 0 && int64(value) <= MaxQuota
+}
+
+// AddQuotaWithinBounds adds two non-negative quota values without allowing a
+// machine-int overflow or a result outside the persisted accounting domain.
+func AddQuotaWithinBounds(current, delta int) (int, bool) {
+	if !QuotaWithinBounds(current) || !QuotaWithinBounds(delta) {
+		return 0, false
+	}
+	if int64(current) > MaxQuota-int64(delta) {
+		return 0, false
+	}
+	return current + delta, true
+}
+
 // QuotaClamp records that a conversion saturated, for audit purposes.
 type QuotaClamp struct {
 	// Reason is a short machine-readable cause, e.g. "overflow" or "nan".

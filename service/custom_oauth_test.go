@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 
 	"github.com/glebarez/sqlite"
@@ -21,13 +22,22 @@ func initCustomOAuthDB(t *testing.T) {
 	t.Helper()
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
-	require.NoError(t, db.AutoMigrate(&model.User{}, &model.CustomOAuthProvider{}, &model.UserOAuthBinding{}))
+	require.NoError(t, db.AutoMigrate(&model.User{}, &model.CustomOAuthProvider{}, &model.UserOAuthBinding{}, &model.Option{}))
 	model.DB = db
 	model.LOG_DB = db
 	// The custom OAuth clients dial through the SSRF guard; allow loopback
 	// httptest upstreams.
+	t.Cleanup(common.InitSSRF)
 	t.Setenv("SSRF_DISABLE", "true")
 	common.InitSSRF()
+}
+
+func TestCustomOAuthClientCannotBypassSSRFGuardThroughEnvironmentProxy(t *testing.T) {
+	transport, ok := customOAuthHTTPClient.Transport.(*http.Transport)
+	require.True(t, ok)
+	assert.Nil(t, transport.Proxy, "untrusted OAuth destinations must be dialed directly through SafeDialContext")
+	assert.NotNil(t, transport.DialContext)
+	assert.NotNil(t, customOAuthHTTPClient.CheckRedirect)
 }
 
 const policyTestBody = `{
@@ -140,13 +150,13 @@ func TestCustomExchangeCodeAuthStyles(t *testing.T) {
 				ClientID: "cid", ClientSecret: "sec", TokenURL: srv.URL,
 				Custom: &model.CustomOAuthProvider{AuthStyle: tc.style},
 			}
-			token, err := customExchangeCode(cfg, "the-code", "http://cb")
+			token, err := customExchangeCode(cfg, "the-code", "http://localhost/callback")
 			require.NoError(t, err)
 			assert.Equal(t, "tok-x", token.AccessToken)
 			assert.Equal(t, "bearer", token.TokenType)
 			assert.Equal(t, "authorization_code", gotForm.Get("grant_type"))
 			assert.Equal(t, "the-code", gotForm.Get("code"))
-			assert.Equal(t, "http://cb", gotForm.Get("redirect_uri"))
+			assert.Equal(t, "http://localhost/callback", gotForm.Get("redirect_uri"))
 			if tc.wantHeader {
 				expected := "Basic " + base64.StdEncoding.EncodeToString([]byte("cid:sec"))
 				assert.Equal(t, expected, gotAuth)
@@ -173,18 +183,42 @@ func TestCustomExchangeCodeResponses(t *testing.T) {
 	}
 
 	// GitHub-style urlencoded token response.
-	token, err := customExchangeCode(serve("access_token=tok-q&token_type=mac"), "c", "r")
+	token, err := customExchangeCode(serve("access_token=tok-q&token_type=mac"), "c", "http://localhost/callback")
 	require.NoError(t, err)
 	assert.Equal(t, "tok-q", token.AccessToken)
 	assert.Equal(t, "mac", token.TokenType)
 
 	// error field fails with both codes.
-	_, err = customExchangeCode(serve(`{"error":"invalid_grant","error_description":"expired"}`), "c", "r")
-	require.EqualError(t, err, "token exchange failed: invalid_grant expired")
+	_, err = customExchangeCode(serve(`{"error":"invalid_grant","error_description":"expired"}`), "c", "http://localhost/callback")
+	require.EqualError(t, err, "OAuth token exchange was rejected")
 
 	// Empty access_token fails.
-	_, err = customExchangeCode(serve(`{"token_type":"bearer"}`), "c", "r")
+	_, err = customExchangeCode(serve(`{"token_type":"bearer"}`), "c", "http://localhost/callback")
 	require.EqualError(t, err, "token exchange returned no access_token")
+
+	// Form responses are parsed under the same duplicate/cardinality rules as
+	// JSON so an upstream cannot smuggle a second credential.
+	_, err = customExchangeCode(serve(`access_token=first&access_token=second`), "c", "http://localhost/callback")
+	require.EqualError(t, err, "OAuth token response is ambiguous")
+}
+
+func TestCustomOAuthResponsesAreBounded(t *testing.T) {
+	initCustomOAuthDB(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(strings.Repeat("x", int(maxOAuthResponseBytes)+1)))
+	}))
+	defer srv.Close()
+	cfg := &OAuthConfig{
+		ClientID: "cid", ClientSecret: "secret", TokenURL: srv.URL, UserInfoURL: srv.URL,
+		Custom: &model.CustomOAuthProvider{UserIdField: "id"},
+	}
+
+	_, err := customExchangeCode(cfg, "code", "http://localhost/callback")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, common.ErrBodyTooLarge)
+	_, err = customFetchUserInfo(cfg, &OAuthToken{AccessToken: "token"})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, common.ErrBodyTooLarge)
 }
 
 func TestCustomFetchUserInfoMapping(t *testing.T) {
@@ -259,6 +293,28 @@ func TestCustomFetchUserInfoPolicy(t *testing.T) {
 	assert.Equal(t, "u-1", pu.ProviderID)
 }
 
+func TestCustomFetchUserInfoRejectsAmbiguousOrOversizedFields(t *testing.T) {
+	initCustomOAuthDB(t)
+	for _, body := range []string{
+		`{"sub":"first","sub":"second"}`,
+		`{"sub":"subject","profile":{"name":"first","name":"second"}}`,
+		`{"sub":"` + strings.Repeat("s", maxOAuthCustomSubjectBytes+1) + `"}`,
+	} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(body))
+		}))
+		provider := &model.CustomOAuthProvider{
+			Id: 1, UserInfoEndpoint: srv.URL, UserIdField: "sub",
+			UsernameField: "username", DisplayNameField: "name", EmailField: "email",
+		}
+		_, err := customFetchUserInfo(&OAuthConfig{UserInfoURL: srv.URL, Custom: provider}, &OAuthToken{AccessToken: "token"})
+		srv.Close()
+		require.Error(t, err, body)
+		assert.NotContains(t, err.Error(), "first")
+		assert.NotContains(t, err.Error(), "second")
+	}
+}
+
 // newCustomIdP builds a mock identity provider plus its DB row and returns the
 // provider row (token endpoint /token, userinfo /user).
 func newCustomIdP(t *testing.T, userinfo string) *model.CustomOAuthProvider {
@@ -308,7 +364,7 @@ func TestCustomOAuthFullLoginFlow(t *testing.T) {
 	assert.False(t, notFound.Known)
 
 	// Code exchange + userinfo through the custom path.
-	token, err := ExchangeCode(cfg, "code-1", "http://cb")
+	token, err := ExchangeCode(cfg, "code-1", "http://localhost/callback")
 	require.NoError(t, err)
 	pu, err := FetchUserInfo(cfg, "corp-sso", token)
 	require.NoError(t, err)
@@ -350,7 +406,7 @@ func TestCustomOAuthLoginWithoutUsername(t *testing.T) {
 
 	cfg := GetOAuthConfig("corp-sso")
 	require.NotNil(t, cfg.Custom)
-	token, err := ExchangeCode(cfg, "code", "http://cb")
+	token, err := ExchangeCode(cfg, "code", "http://localhost/callback")
 	require.NoError(t, err)
 	pu, err := FetchUserInfo(cfg, "corp-sso", token)
 	require.NoError(t, err)

@@ -3,9 +3,9 @@ package service
 import (
 	"strings"
 
-	"github.com/tokenrouter/tokenrouter/model"
 	casbinmodel "github.com/casbin/casbin/v2/model"
 	"github.com/casbin/casbin/v2/persist"
+	"github.com/tokenrouter/tokenrouter/model"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )

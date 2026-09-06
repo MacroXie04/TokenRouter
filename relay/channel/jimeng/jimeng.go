@@ -18,20 +18,28 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/tokenrouter/tokenrouter/common"
 	relaycommon "github.com/tokenrouter/tokenrouter/relay/common"
 )
 
 const (
-	SubmitAction        = "CVSync2AsyncSubmitTask"
-	FetchAction         = "CVSync2AsyncGetResult"
-	APIVersion          = "2022-08-31"
-	DefaultFrames       = 121
-	LongVideoFrames     = 241
-	MaxImageBytes       = 4*1024*1024 + 700*1024
-	maxResponseBytes    = 1 << 20
-	providerSuccessCode = 10000
+	SubmitAction    = "CVSync2AsyncSubmitTask"
+	FetchAction     = "CVSync2AsyncGetResult"
+	APIVersion      = "2022-08-31"
+	DefaultFrames   = 121
+	LongVideoFrames = 241
+	MaxImageBytes   = 4*1024*1024 + 700*1024
+	// Task.Data is TEXT on every supported primary database. Stay below
+	// MySQL's 65,535-byte TEXT ceiling so a response accepted by this client is
+	// always durably writable by the recovery state machine.
+	MaxDurableResponseBytes = 60 * 1024
+	// Provider task ids are copied into encrypted TEXT metadata and the
+	// emergency journal. A small explicit ceiling prevents a successful submit
+	// from returning an identifier that none of those durable paths can store.
+	MaxProviderTaskIDBytes = 4 * 1024
+	providerSuccessCode    = 10000
 )
 
 type Request struct {
@@ -43,7 +51,10 @@ type Request struct {
 	AspectRatio      string   `json:"aspect_ratio"`
 	Frames           int      `json:"frames,omitempty"`
 	TaskID           string   `json:"task_id,omitempty"`
-	RecoveryToken    string   `json:"recovery_token,omitempty"`
+	// RecoveryToken is accepted only when reading pre-database-recovery tasks
+	// created by an older node during a rolling upgrade. PrepareSubmitRequest
+	// always strips it before a provider request is built.
+	RecoveryToken string `json:"recovery_token,omitempty"`
 }
 
 type SubmitResult struct {
@@ -73,6 +84,23 @@ type TaskResult struct {
 type ProviderError struct {
 	Code    int
 	Message string
+}
+
+// DurableResponseError means the upstream response cannot fit the portable
+// primary-database representation used by the recovery state machine. It is a
+// deterministic response outcome: retrying the same fetch cannot make the
+// payload writable, so callers should persist a bounded terminal failure.
+type DurableResponseError struct {
+	Reason string
+}
+
+func (e *DurableResponseError) Error() string {
+	return "Jimeng response exceeds durable storage limit: " + e.Reason
+}
+
+func IsDurableResponseError(err error) bool {
+	var durable *DurableResponseError
+	return errors.As(err, &durable)
 }
 
 func (e *ProviderError) Error() string {
@@ -219,10 +247,16 @@ func (c *Client) Submit(ctx context.Context, baseURL, apiKey string, payload Req
 	if strings.TrimSpace(result.Data.TaskID) == "" {
 		return nil, raw, submitError(errors.New("Jimeng submit response is missing task_id"), true, true)
 	}
+	if len(result.Data.TaskID) > MaxProviderTaskIDBytes {
+		return nil, raw, submitError(errors.New("Jimeng submit response task_id exceeds durable storage limit"), true, true)
+	}
 	return &result, raw, nil
 }
 
 func (c *Client) Fetch(ctx context.Context, baseURL, apiKey, modelName, upstreamTaskID string) (*TaskResult, []byte, error) {
+	if len(upstreamTaskID) > MaxProviderTaskIDBytes {
+		return nil, nil, errors.New("Jimeng task_id exceeds durable storage limit")
+	}
 	payload := struct {
 		ReqKey string `json:"req_key"`
 		TaskID string `json:"task_id"`
@@ -260,8 +294,14 @@ func (c *Client) newRequest(ctx context.Context, baseURL, apiKey, action string,
 		endpoint = baseURL + "/jimeng/"
 	}
 	parsed, err := url.Parse(endpoint)
-	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+	if err != nil || parsed.Hostname() == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
 		return nil, errors.New("invalid Jimeng channel base URL")
+	}
+	if parsed.Scheme != "https" && !(common.SSRFDisabled() && parsed.Scheme == "http") {
+		return nil, errors.New("Jimeng channel base URL must use HTTPS")
+	}
+	if parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || parsed.Opaque != "" {
+		return nil, errors.New("Jimeng channel base URL must not contain credentials, query, or fragment")
 	}
 	query := parsed.Query()
 	query.Set("Action", action)
@@ -305,20 +345,38 @@ func (c *Client) do(request *http.Request) ([]byte, bool, bool, error) {
 	response, err := client.Do(request)
 	if err != nil {
 		if response != nil && response.Body != nil {
-			_ = response.Body.Close()
+			if closeErr := response.Body.Close(); closeErr != nil {
+				err = errors.Join(err, fmt.Errorf("close Jimeng error response: %w", closeErr))
+			}
 		}
 		return nil, requestWritten.Load(), response != nil, err
 	}
-	defer response.Body.Close()
-	raw, err := io.ReadAll(io.LimitReader(response.Body, maxResponseBytes+1))
+	// Once a bounded body has been fully read, Close is cleanup only. Turning a
+	// valid accepted response into an error here would discard its task id and
+	// unnecessarily degrade billing to an UNKNOWN outcome.
+	defer func() { _ = response.Body.Close() }()
+	raw, err := io.ReadAll(io.LimitReader(response.Body, MaxDurableResponseBytes+1))
 	if err != nil {
-		return nil, requestWritten.Load(), true, err
+		return raw, requestWritten.Load(), true, err
 	}
-	if len(raw) > maxResponseBytes {
-		return nil, requestWritten.Load(), true, errors.New("Jimeng response exceeds 1 MiB")
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		// HTTP status is authoritative even when an error body itself is too large
+		// or malformed. In particular, a 5xx fetch must remain retryable rather
+		// than being converted into a terminal durable-payload failure.
+		boundedRaw := raw
+		if len(boundedRaw) > MaxDurableResponseBytes || !utf8.Valid(boundedRaw) {
+			boundedRaw = nil
+		}
+		return boundedRaw, requestWritten.Load(), true, &relaycommon.UpstreamError{
+			StatusCode: response.StatusCode,
+			Body:       "Jimeng provider returned a non-success status",
+		}
 	}
-	if response.StatusCode != http.StatusOK {
-		return raw, requestWritten.Load(), true, &relaycommon.UpstreamError{StatusCode: response.StatusCode, Body: string(raw)}
+	if len(raw) > MaxDurableResponseBytes {
+		return nil, requestWritten.Load(), true, &DurableResponseError{Reason: "response exceeds size limit"}
+	}
+	if !utf8.Valid(raw) {
+		return nil, requestWritten.Load(), true, &DurableResponseError{Reason: "response is not valid UTF-8"}
 	}
 	return raw, requestWritten.Load(), true, nil
 }

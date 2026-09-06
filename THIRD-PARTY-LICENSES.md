@@ -1,8 +1,11 @@
 # Third-Party Licenses
 
-This file summarizes direct third-party dependencies used by distributed builds
-of TokenRouter. Keep it with Docker images, standalone binaries, and frontend
-bundles.
+This is a partial notice list, not a release-complete dependency inventory,
+SBOM, or attribution bundle. It omits current direct backend packages and all
+frontend/transitive dependencies. Reconcile it mechanically against `go.mod`,
+`go.sum`, `web/package-lock.json`, and the actual release artifact before
+distribution; keep the completed notices with Docker images, standalone
+binaries, and frontend bundles.
 
 ## Backend (Go)
 
@@ -36,4 +39,5 @@ bundles.
 | golang.org/x/net | BSD-3-Clause |
 | gopkg.in/yaml.v3 | MIT |
 
-Transitive dependencies should be audited before a final external release.
+Direct omissions, frontend packages, transitive dependencies, embedded assets,
+and generated bundles must be license-audited before a final external release.

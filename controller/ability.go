@@ -1,9 +1,12 @@
 package controller
 
 import (
+	"errors"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	"github.com/tokenrouter/tokenrouter/dto"
 	"github.com/tokenrouter/tokenrouter/model"
@@ -13,13 +16,13 @@ import (
 // AddAbility upserts a channel-model routing ability.
 func AddAbility(c *gin.Context) {
 	var req struct {
-		Group     string `json:"group" binding:"required"`
-		Model     string `json:"model" binding:"required"`
-		ChannelId int    `json:"channel_id" binding:"required"`
-		Enabled   *bool  `json:"enabled"`
-		Priority  *int64 `json:"priority"`
-		Weight    *uint  `json:"weight"`
-		Tag       string `json:"tag"`
+		Group     string  `json:"group" binding:"required"`
+		Model     string  `json:"model" binding:"required"`
+		ChannelId int     `json:"channel_id" binding:"required"`
+		Enabled   *bool   `json:"enabled"`
+		Priority  *int64  `json:"priority"`
+		Weight    *uint   `json:"weight"`
+		Tag       *string `json:"tag"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, dto.Fail("参数错误: "+err.Error()))
@@ -42,8 +45,10 @@ func AddAbility(c *gin.Context) {
 	}
 	// Upsert on composite primary key.
 	var existing model.Ability
-	res := model.DB.Where("`group` = ? AND model = ? AND channel_id = ?", req.Group, req.Model, req.ChannelId).First(&existing)
-	if res.Error == nil {
+	identity := map[string]any{"group": req.Group, "model": req.Model, "channel_id": req.ChannelId}
+	res := model.DB.Where(identity).First(&existing)
+	switch {
+	case res.Error == nil:
 		if err := model.DB.Model(&existing).Updates(map[string]any{
 			"enabled": ability.Enabled, "priority": ability.Priority,
 			"weight": ability.Weight, "tag": ability.Tag,
@@ -51,20 +56,32 @@ func AddAbility(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, dto.Fail("更新失败"))
 			return
 		}
-	} else {
+	case errors.Is(res.Error, gorm.ErrRecordNotFound):
 		if err := model.DB.Create(&ability).Error; err != nil {
 			c.JSON(http.StatusInternalServerError, dto.Fail("创建失败: "+err.Error()))
 			return
 		}
+	default:
+		c.JSON(http.StatusInternalServerError, dto.Fail("查询能力失败"))
+		return
 	}
-	_ = service.SyncAbilityCache()
+	if err := service.SyncAbilityCache(); err != nil {
+		c.JSON(http.StatusInternalServerError, dto.Fail("路由缓存刷新失败: "+err.Error()))
+		return
+	}
 	c.JSON(http.StatusOK, dto.OkMessage("保存成功"))
 }
 
 // GetAbilities lists abilities.
 func GetAbilities(c *gin.Context) {
 	var abilities []model.Ability
-	model.DB.Order("`group` asc, model asc").Find(&abilities)
+	if err := model.DB.
+		Order(clause.OrderByColumn{Column: clause.Column{Name: "group"}}).
+		Order(clause.OrderByColumn{Column: clause.Column{Name: "model"}}).
+		Find(&abilities).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, dto.Fail("查询能力失败"))
+		return
+	}
 	c.JSON(http.StatusOK, dto.Ok(abilities))
 }
 
@@ -79,10 +96,14 @@ func DeleteAbility(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, dto.Fail("参数错误"))
 		return
 	}
-	if err := model.DB.Where("`group` = ? AND model = ? AND channel_id = ?", req.Group, req.Model, req.ChannelId).Delete(&model.Ability{}).Error; err != nil {
+	identity := map[string]any{"group": req.Group, "model": req.Model, "channel_id": req.ChannelId}
+	if err := model.DB.Where(identity).Delete(&model.Ability{}).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, dto.Fail("删除失败"))
 		return
 	}
-	_ = service.SyncAbilityCache()
+	if err := service.SyncAbilityCache(); err != nil {
+		c.JSON(http.StatusInternalServerError, dto.Fail("路由缓存刷新失败: "+err.Error()))
+		return
+	}
 	c.JSON(http.StatusOK, dto.OkMessage("删除成功"))
 }

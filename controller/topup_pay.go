@@ -3,16 +3,16 @@ package controller
 import (
 	"crypto/sha1"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
 	epay "github.com/Calcium-Ion/go-epay/epay"
 	"github.com/gin-gonic/gin"
-	"github.com/stripe/stripe-go/v81"
-	"github.com/stripe/stripe-go/v81/checkout/session"
 
 	"github.com/tokenrouter/tokenrouter/common"
 	"github.com/tokenrouter/tokenrouter/model"
@@ -24,7 +24,14 @@ import (
 // contract for payment return/cancel links).
 func paymentReturnPath(suffix string) string {
 	base := strings.TrimRight(setting.GetOption(setting.ServerAddressOption), "/")
-	return base + suffix
+	if !validAbsoluteEpayURL(base) {
+		return ""
+	}
+	result := base + suffix
+	if !validAbsoluteEpayURLWithQuery(result, true) {
+		return ""
+	}
+	return result
 }
 
 // GetTopUpInfo returns the top-up page configuration: payment-method catalog
@@ -36,8 +43,23 @@ func GetTopUpInfo(c *gin.Context) {
 	if !complianceConfirmed {
 		payMethods = []map[string]string{}
 	}
-	stripeEnabled := complianceConfirmed && setting.StripeConfigured()
-	if stripeEnabled {
+	stripeCurrency, stripeCurrencyErr := setting.GetStripeCurrencyChecked()
+	stripeEnabled := complianceConfirmed && setting.StripeConfigured() &&
+		stripeCurrencyErr == nil && service.StripeCurrencySupported(stripeCurrency) &&
+		!setting.GetStripePromotionCodesEnabled() && paymentReturnPath("/usage-logs") != "" &&
+		paymentReturnPath("/wallet") != ""
+	if !stripeEnabled {
+		// A configured catalog entry is still an advertisement. Remove Stripe
+		// whenever the endpoint would reject it (missing compliance/credentials,
+		// unsupported currency, or amount-changing promotion codes).
+		filtered := make([]map[string]string, 0, len(payMethods))
+		for _, method := range payMethods {
+			if method["type"] != "stripe" {
+				filtered = append(filtered, method)
+			}
+		}
+		payMethods = filtered
+	} else {
 		hasStripe := false
 		for _, method := range payMethods {
 			if method["type"] == "stripe" {
@@ -54,30 +76,95 @@ func GetTopUpInfo(c *gin.Context) {
 			})
 		}
 	}
-	epayEnabled := complianceConfirmed && setting.EpayConfigured() && len(setting.GetPayMethods()) > 0
-	ps := setting.GetPaymentSetting()
+	_, epayCallbackErr := subscriptionEpayCallbackURL("/api/user/epay/notify")
+	epayEnabled := complianceConfirmed && getEpayClient() != nil && len(setting.GetPayMethods()) > 0 &&
+		epayCallbackErr == nil && paymentReturnPath("/usage-logs") != ""
+	ps, creemEnabled, creemProducts := creemTopUpInfo(complianceConfirmed)
+	waffoConfig, waffoConfigErr := setting.GetWaffoConfigChecked()
+	_, _, waffoURLsOK := effectiveWaffoURLs(waffoConfig)
+	waffoEnabled := complianceConfirmed && waffoConfigErr == nil && waffoConfig.Enabled &&
+		waffoConfig.APIKey != "" && waffoConfig.PrivateKey != "" && waffoConfig.PublicKey != "" && waffoURLsOK
+	waffoPancakeConfig, waffoPancakeConfigErr := setting.GetWaffoPancakeConfigChecked()
+	waffoPancakeConfigured := waffoPancakeConfigErr == nil && waffoPancakeConfig.MerchantID != "" &&
+		waffoPancakeConfig.PrivateKey != "" && waffoPancakeConfig.StoreID != "" && waffoPancakeConfig.ProductID != ""
+	waffoPancakeEnabled := complianceConfirmed && waffoPancakeConfigured
+	filteredPayMethods := make([]map[string]string, 0, len(payMethods)+2)
+	var configuredWaffo map[string]string
+	var configuredWaffoPancake map[string]string
+	for _, method := range payMethods {
+		switch method["type"] {
+		case service.PaymentMethodWaffoPancake:
+			if waffoPancakeEnabled {
+				configuredWaffoPancake = method
+			}
+			continue
+		case service.PaymentMethodWaffo:
+			if waffoEnabled {
+				configuredWaffo = method
+			}
+			continue
+		}
+		filteredPayMethods = append(filteredPayMethods, method)
+	}
+	payMethods = filteredPayMethods
+	if waffoPancakeEnabled {
+		if configuredWaffoPancake == nil {
+			configuredWaffoPancake = map[string]string{
+				"name": "Waffo Pancake", "type": service.PaymentMethodWaffoPancake,
+				"color": "#F97316", "min_topup": strconv.FormatInt(waffoPancakeConfig.MinTopUp, 10),
+			}
+		}
+		payMethods = append(payMethods, configuredWaffoPancake)
+	}
+	if waffoEnabled {
+		if configuredWaffo == nil {
+			configuredWaffo = map[string]string{
+				"name": "Waffo (Global Payment)", "type": service.PaymentMethodWaffo,
+				"color": "#3B82F6", "min_topup": strconv.FormatInt(waffoConfig.MinTopUp, 10),
+			}
+		}
+		payMethods = append(payMethods, configuredWaffo)
+	}
+	var waffoPayMethods any
+	waffoMinTopUp := int64(0)
+	if waffoConfigErr == nil {
+		waffoMinTopUp = waffoConfig.MinTopUp
+		if waffoEnabled {
+			waffoPayMethods = waffoConfig.PayMethods
+		}
+	}
+	waffoPancakeMinTopUp := int64(0)
+	if waffoPancakeConfigErr == nil {
+		waffoPancakeMinTopUp = waffoPancakeConfig.MinTopUp
+	}
+	currencyDisplay := setting.GetCurrencyDisplaySetting()
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
 		"data": gin.H{
 			"enable_online_topup":              epayEnabled,
 			"enable_stripe_topup":              stripeEnabled,
-			"enable_creem_topup":               false,
-			"enable_waffo_topup":               false,
-			"enable_waffo_pancake_topup":       false,
+			"enable_creem_topup":               creemEnabled,
+			"enable_waffo_topup":               waffoEnabled,
+			"enable_waffo_pancake_topup":       waffoPancakeEnabled,
 			"enable_redemption":                complianceConfirmed,
 			"payment_compliance_confirmed":     complianceConfirmed,
 			"payment_compliance_terms_version": "v1",
-			"waffo_pay_methods":                nil,
-			"creem_products":                   nil,
+			"waffo_pay_methods":                waffoPayMethods,
+			"creem_products":                   creemProducts,
 			"pay_methods":                      payMethods,
 			"min_topup":                        setting.GetMinTopUp(),
 			"stripe_min_topup":                 setting.GetStripeMinTopUp(),
-			"waffo_min_topup":                  0,
-			"waffo_pancake_min_topup":          0,
+			"waffo_min_topup":                  waffoMinTopUp,
+			"waffo_pancake_min_topup":          waffoPancakeMinTopUp,
 			"amount_options":                   ps.AmountOptions,
 			"discount":                         ps.AmountDiscount,
-			"topup_link":                       paymentReturnPath("/topup"),
+			"topup_link":                       setting.GetTopUpLink(),
+			"quota_display_type":               currencyDisplay.Type,
+			"quota_per_unit":                   common.QuotaPerUnit,
+			"usd_exchange_rate":                currencyDisplay.USDExchangeRate,
+			"currency_symbol":                  currencyDisplay.Symbol,
+			"currency_exchange_rate":           currencyDisplay.CurrencyExchangeRate(),
 		},
 	})
 }
@@ -88,14 +175,26 @@ func getEpayClient() *epay.Client {
 	if !setting.EpayConfigured() {
 		return nil
 	}
+	partnerID := setting.GetOption(setting.EpayIdOption)
+	key := setting.GetOption(setting.EpayKeyOption)
+	baseURL := setting.GetOption(setting.PayAddressOption)
+	if !validEpayCredential(partnerID, 255) || !validEpayCredential(key, 4096) ||
+		!validAbsoluteEpayURL(baseURL) {
+		return nil
+	}
 	client, err := epay.NewClient(&epay.Config{
-		PartnerID: setting.GetOption(setting.EpayIdOption),
-		Key:       setting.GetOption(setting.EpayKeyOption),
-	}, setting.GetOption(setting.PayAddressOption))
+		PartnerID: partnerID,
+		Key:       key,
+	}, baseURL)
 	if err != nil {
 		return nil
 	}
 	return client
+}
+
+func validEpayCredential(value string, maximumBytes int) bool {
+	return value != "" && value == strings.TrimSpace(value) &&
+		boundedPublicStatusText(value, maximumBytes, "") != ""
 }
 
 // RequestAmount converts a top-up amount into the payable money (reference
@@ -108,8 +207,21 @@ func RequestAmount(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "参数错误"})
 		return
 	}
-	if req.Amount < setting.GetMinTopUp() {
-		c.JSON(http.StatusOK, gin.H{"message": "error", "data": fmt.Sprintf("充值数量不能小于 %d", setting.GetMinTopUp())})
+	if req.Amount > common.MaxQuota {
+		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "充值数量超出安全范围"})
+		return
+	}
+	minimum, err := setting.GetMinTopUpChecked()
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "充值配置无效"})
+		return
+	}
+	if req.Amount < minimum {
+		c.JSON(http.StatusOK, gin.H{"message": "error", "data": fmt.Sprintf("充值数量不能小于 %d", minimum)})
+		return
+	}
+	if _, err := service.NormalizeTopUpOrderAmount(req.Amount); err != nil {
+		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "充值数量超出安全范围或无法精确兑换"})
 		return
 	}
 	user, err := service.GetUserByID(common.GetUserId(c))
@@ -117,7 +229,11 @@ func RequestAmount(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "获取用户分组失败"})
 		return
 	}
-	payMoney := service.GetTopupMoney(req.Amount, user.Group)
+	payMoney, err := service.GetTopupMoney(req.Amount, user.Group)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "充值配置无效"})
+		return
+	}
 	if payMoney <= 0.01 {
 		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "充值金额过低"})
 		return
@@ -128,6 +244,9 @@ func RequestAmount(c *gin.Context) {
 // RequestEpay starts an Epay payment: validates the request, builds the
 // signed payment URL, and records the pending order (reference contract).
 func RequestEpay(c *gin.Context) {
+	if !requirePaymentCompliance(c) {
+		return
+	}
 	var req struct {
 		Amount        int64  `json:"amount"`
 		PaymentMethod string `json:"payment_method"`
@@ -136,8 +255,22 @@ func RequestEpay(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "参数错误"})
 		return
 	}
-	if req.Amount < setting.GetMinTopUp() {
-		c.JSON(http.StatusOK, gin.H{"message": "error", "data": fmt.Sprintf("充值数量不能小于 %d", setting.GetMinTopUp())})
+	if req.Amount > common.MaxQuota {
+		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "充值数量超出安全范围"})
+		return
+	}
+	minimum, err := setting.GetMinTopUpChecked()
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "充值配置无效"})
+		return
+	}
+	if req.Amount < minimum {
+		c.JSON(http.StatusOK, gin.H{"message": "error", "data": fmt.Sprintf("充值数量不能小于 %d", minimum)})
+		return
+	}
+	orderAmount, err := service.NormalizeTopUpOrderAmount(req.Amount)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "充值数量超出安全范围或无法精确兑换"})
 		return
 	}
 	id := common.GetUserId(c)
@@ -146,7 +279,11 @@ func RequestEpay(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "获取用户分组失败"})
 		return
 	}
-	payMoney := service.GetTopupMoney(req.Amount, user.Group)
+	payMoney, err := service.GetTopupMoney(req.Amount, user.Group)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "充值配置无效"})
+		return
+	}
 	if payMoney < 0.01 {
 		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "充值金额过低"})
 		return
@@ -155,33 +292,39 @@ func RequestEpay(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "支付方式不存在"})
 		return
 	}
-	callBackAddress := setting.GetCallbackAddress()
-	returnURL, _ := url.Parse(paymentReturnPath("/usage-logs"))
-	notifyURL, _ := url.Parse(callBackAddress + "/api/user/epay/notify")
-	tradeNo := fmt.Sprintf("USR%dNO%s%d", id, common.RandomAlphanumeric(6), time.Now().Unix())
+	orderMoney, wireMoney, err := service.NormalizePayMoney(payMoney)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "充值配置无效"})
+		return
+	}
 	client := getEpayClient()
-	if client == nil {
+	returnURLRaw := paymentReturnPath("/usage-logs")
+	returnURL, returnURLErr := url.Parse(returnURLRaw)
+	notifyURL, notifyURLErr := subscriptionEpayCallbackURL("/api/user/epay/notify")
+	if client == nil || returnURLRaw == "" || returnURLErr != nil || notifyURLErr != nil {
 		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "当前管理员未配置支付信息"})
 		return
 	}
+	tradeSuffix, err := common.SecureRandomAlphanumeric(6)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "创建订单失败"})
+		return
+	}
+	tradeNo := fmt.Sprintf("USR%dNO%s%d", id, tradeSuffix, time.Now().Unix())
 	uri, params, err := client.Purchase(&epay.PurchaseArgs{
 		Type:           req.PaymentMethod,
 		ServiceTradeNo: tradeNo,
 		Name:           fmt.Sprintf("TUC%d", req.Amount),
-		Money:          service.FormatPayMoney(payMoney),
+		Money:          wireMoney,
 		Device:         epay.PC,
 		NotifyUrl:      notifyURL,
 		ReturnUrl:      returnURL,
 	})
-	if err != nil {
+	if err != nil || !validAbsoluteEpayURL(uri) {
 		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "拉起支付失败"})
 		return
 	}
-	amount := req.Amount
-	if setting.GetQuotaDisplayType() == setting.QuotaDisplayTypeTokens {
-		amount = int64(float64(amount) / common.QuotaPerUnit)
-	}
-	if _, err := service.CreateTopUpWithTradeNo(id, amount, payMoney, req.PaymentMethod, service.PaymentProviderEpay, tradeNo); err != nil {
+	if _, err := service.CreateTopUpWithTradeNo(id, orderAmount, orderMoney, req.PaymentMethod, service.PaymentProviderEpay, tradeNo); err != nil {
 		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "创建订单失败"})
 		return
 	}
@@ -192,31 +335,21 @@ func RequestEpay(c *gin.Context) {
 // verifies the signature and settles a successful payment idempotently
 // (reference contract: the gateway expects a bare "success"/"fail" body).
 func EpayNotify(c *gin.Context) {
-	params := map[string]string{}
-	if c.Request.Method == http.MethodPost {
-		if err := c.Request.ParseForm(); err != nil {
-			_, _ = c.Writer.Write([]byte("fail"))
-			return
-		}
-		for key := range c.Request.PostForm {
-			params[key] = c.Request.PostForm.Get(key)
-		}
-	} else {
-		for key := range c.Request.URL.Query() {
-			params[key] = c.Request.URL.Query().Get(key)
-		}
-	}
-	if len(params) == 0 {
+	// Compliance and the payment-method catalog gate new checkout creation, not
+	// settlement. A pending order that was already issued must remain recoverable
+	// after an operator disables the storefront. Signature verification, current
+	// gateway credentials, and the immutable local order binding still apply.
+	if getEpayClient() == nil {
 		_, _ = c.Writer.Write([]byte("fail"))
 		return
 	}
-	client := getEpayClient()
-	if client == nil {
+	params, ok := boundedEpayCallbackParams(c)
+	if !ok {
 		_, _ = c.Writer.Write([]byte("fail"))
 		return
 	}
-	verifyInfo, err := client.Verify(params)
-	if err != nil || !verifyInfo.VerifyStatus {
+	verifyInfo, ok := verifyEpayCallback(params)
+	if !ok {
 		_, _ = c.Writer.Write([]byte("fail"))
 		return
 	}
@@ -226,7 +359,11 @@ func EpayNotify(c *gin.Context) {
 			_, _ = c.Writer.Write([]byte("fail"))
 			return
 		}
-		if order.PaymentMethod != verifyInfo.Type {
+		if order.PaymentProvider != service.PaymentProviderEpay || order.PaymentMethod != verifyInfo.Type {
+			_, _ = c.Writer.Write([]byte("fail"))
+			return
+		}
+		if !service.TopUpMoneyMatches(order.Money, verifyInfo.Money) {
 			_, _ = c.Writer.Write([]byte("fail"))
 			return
 		}
@@ -249,22 +386,8 @@ type StripePayRequest struct {
 
 // getStripePayMoney converts a Stripe top-up amount into the payable money
 // (display-type aware, group ratio and preset discount applied).
-func getStripePayMoney(amount float64, group string) float64 {
-	originalAmount := amount
-	if setting.GetQuotaDisplayType() == setting.QuotaDisplayTypeTokens {
-		amount = amount / common.QuotaPerUnit
-	}
-	ratio := service.GroupRatio(group)
-	if ratio == 0 {
-		ratio = 1
-	}
-	discount := 1.0
-	if ds, ok := setting.GetPaymentSetting().AmountDiscount[int(originalAmount)]; ok {
-		if ds > 0 {
-			discount = ds
-		}
-	}
-	return amount * setting.GetStripeUnitPrice() * ratio * discount
+func getStripePayMoney(amount int64, group string) (float64, error) {
+	return service.GetStripeTopupMoney(amount, group)
 }
 
 // RequestStripeAmount converts a Stripe top-up amount into the payable money
@@ -275,8 +398,21 @@ func RequestStripeAmount(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "参数错误"})
 		return
 	}
-	if req.Amount < setting.GetStripeMinTopUp() {
-		c.JSON(http.StatusOK, gin.H{"message": "error", "data": fmt.Sprintf("充值数量不能小于 %d", setting.GetStripeMinTopUp())})
+	if req.Amount > common.MaxQuota {
+		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "充值数量超出安全范围"})
+		return
+	}
+	minimum, err := setting.GetStripeMinTopUpChecked()
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "充值配置无效"})
+		return
+	}
+	if req.Amount < minimum {
+		c.JSON(http.StatusOK, gin.H{"message": "error", "data": fmt.Sprintf("充值数量不能小于 %d", minimum)})
+		return
+	}
+	if _, err := service.NormalizeTopUpOrderAmount(req.Amount); err != nil {
+		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "充值数量超出安全范围或无法精确兑换"})
 		return
 	}
 	user, err := service.GetUserByID(common.GetUserId(c))
@@ -284,7 +420,11 @@ func RequestStripeAmount(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "获取用户分组失败"})
 		return
 	}
-	payMoney := getStripePayMoney(float64(req.Amount), user.Group)
+	payMoney, err := getStripePayMoney(req.Amount, user.Group)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "充值配置无效"})
+		return
+	}
 	if payMoney <= 0.01 {
 		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "充值金额过低"})
 		return
@@ -296,6 +436,9 @@ func RequestStripeAmount(c *gin.Context) {
 // order (reference contract). The checkout session carries the metadata the
 // Stripe webhook needs to settle the order.
 func RequestStripePay(c *gin.Context) {
+	if !requirePaymentCompliance(c) {
+		return
+	}
 	var req StripePayRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "参数错误"})
@@ -305,12 +448,26 @@ func RequestStripePay(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "不支持的支付渠道"})
 		return
 	}
-	if req.Amount < setting.GetStripeMinTopUp() {
-		c.JSON(http.StatusOK, gin.H{"message": fmt.Sprintf("充值数量不能小于 %d", setting.GetStripeMinTopUp()), "data": 10})
+	if req.Amount > common.MaxQuota {
+		c.JSON(http.StatusOK, gin.H{"message": "充值数量超出安全范围", "data": 10})
 		return
 	}
-	if req.Amount > 10000 {
+	minimum, err := setting.GetStripeMinTopUpChecked()
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"message": "充值配置无效", "data": 10})
+		return
+	}
+	if req.Amount < minimum {
+		c.JSON(http.StatusOK, gin.H{"message": fmt.Sprintf("充值数量不能小于 %d", minimum), "data": 10})
+		return
+	}
+	if setting.GetQuotaDisplayType() != setting.QuotaDisplayTypeTokens && req.Amount > 10000 {
 		c.JSON(http.StatusOK, gin.H{"message": "充值数量不能大于 10000", "data": 10})
+		return
+	}
+	orderAmount, err := service.NormalizeTopUpOrderAmount(req.Amount)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"message": "充值数量超出安全范围或无法精确兑换", "data": 10})
 		return
 	}
 	if req.SuccessURL != "" && common.ValidateRedirectURL(req.SuccessURL) != nil {
@@ -321,24 +478,73 @@ func RequestStripePay(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"message": "支付取消重定向URL不在可信任域名列表中", "data": ""})
 		return
 	}
+	successURL := req.SuccessURL
+	if successURL == "" {
+		successURL = paymentReturnPath("/usage-logs")
+	}
+	cancelURL := req.CancelURL
+	if cancelURL == "" {
+		cancelURL = paymentReturnPath("/wallet")
+	}
+	if successURL == "" || cancelURL == "" {
+		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "Stripe 回调地址配置无效"})
+		return
+	}
 	user, err := service.GetUserByID(common.GetUserId(c))
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "获取用户信息失败"})
 		return
 	}
-	chargedMoney := float64(req.Amount) * service.GroupRatio(user.Group)
-	if chargedMoney <= 0 {
-		chargedMoney = float64(req.Amount)
-	}
-	reference := fmt.Sprintf("tokenrouter-ref-%d-%d-%s", user.Id, time.Now().UnixMilli(), common.RandomAlphanumeric(4))
-	referenceID := "ref_" + sha1Hex(reference)
-	payLink, err := genStripeLink(referenceID, user, req.Amount, req.SuccessURL, req.CancelURL)
+	// Snapshot the exact amount and currency before creating any external
+	// resource. Promotion codes are incompatible with exact amount binding,
+	// because their final discount is not known until after Checkout starts.
+	payMoney, err := getStripePayMoney(req.Amount, user.Group)
 	if err != nil {
-		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "拉起支付失败"})
+		c.JSON(http.StatusOK, gin.H{"message": "充值配置无效", "data": 10})
 		return
 	}
-	if _, err := service.CreateTopUpWithTradeNo(user.Id, req.Amount, chargedMoney, "stripe", service.PaymentProviderStripe, referenceID); err != nil {
+	if payMoney <= 0.01 || setting.GetStripePromotionCodesEnabled() {
+		c.JSON(http.StatusOK, gin.H{"message": "充值配置无效", "data": 10})
+		return
+	}
+	providerCurrency, err := setting.GetStripeCurrencyChecked()
+	if err != nil || !service.StripeCurrencySupported(providerCurrency) {
+		c.JSON(http.StatusOK, gin.H{"message": "充值配置无效", "data": 10})
+		return
+	}
+	stripeSecret := common.GetEnv("STRIPE_SECRET_KEY", "")
+	if !validStripeSecret(stripeSecret) || strings.TrimSpace(common.GetEnv("STRIPE_WEBHOOK_SECRET", "")) == "" {
+		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "Stripe 未配置或回调不可用"})
+		return
+	}
+	referenceSuffix, err := common.SecureRandomAlphanumeric(4)
+	if err != nil {
 		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "创建订单失败"})
+		return
+	}
+	reference := fmt.Sprintf("tokenrouter-ref-%d-%d-%s", user.Id, time.Now().UnixMilli(), referenceSuffix)
+	referenceID := "ref_" + sha1Hex(reference)
+	order, err := service.CreateBoundStripeTopUpWithTradeNo(user.Id, orderAmount, payMoney, providerCurrency, referenceID)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "创建订单失败"})
+		return
+	}
+	payLink, err := genStripeLink(stripeSecret, order, user, successURL, cancelURL)
+	if err != nil {
+		if stripeRequestDefinitelyRejected(err) {
+			if statusErr := service.UpdatePendingTopUpStatus(referenceID, service.PaymentProviderStripe, service.TopUpStatusFailed); statusErr != nil {
+				common.SysError(fmt.Sprintf("Stripe checkout rejection status update failed trade_no=%s: %v", referenceID, statusErr))
+			}
+		} else if errors.Is(err, service.ErrStripeCheckoutBindingMismatch) {
+			if flagErr := service.FlagStripeTopUpReconciliation(referenceID, service.StripeReconciliationBindingMismatch); flagErr != nil {
+				common.SysError(fmt.Sprintf("Stripe reconciliation update failed trade_no=%s: %v", referenceID, flagErr))
+			}
+		} else {
+			if flagErr := service.FlagStripeTopUpReconciliation(referenceID, service.StripeReconciliationCreationUnknown); flagErr != nil {
+				common.SysError(fmt.Sprintf("Stripe reconciliation update failed trade_no=%s: %v", referenceID, flagErr))
+			}
+		}
+		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "拉起支付失败"})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"message": "success", "data": gin.H{"pay_link": payLink}})
@@ -352,46 +558,43 @@ func sha1Hex(s string) string {
 // genStripeLink creates the Stripe checkout session. The session metadata
 // carries user_id/trade_no/quota so TokenRouter's Stripe webhook can settle
 // the order.
-func genStripeLink(referenceID string, user *model.User, amount int64, successURL, cancelURL string) (string, error) {
-	apiKey := common.GetEnv("STRIPE_SECRET_KEY", "")
-	if !strings.HasPrefix(apiKey, "sk_") && !strings.HasPrefix(apiKey, "rk_") {
+func genStripeLink(apiKey string, order *model.TopUp, user *model.User, successURL, cancelURL string) (string, error) {
+	if !validStripeSecret(apiKey) || order == nil || user == nil || order.ProviderAmountMinor <= 0 {
 		return "", fmt.Errorf("无效的Stripe API密钥")
 	}
-	stripe.Key = apiKey
+	referenceID := order.TradeNo
 	if successURL == "" {
 		successURL = paymentReturnPath("/usage-logs")
 	}
 	if cancelURL == "" {
 		cancelURL = paymentReturnPath("/wallet")
 	}
-	params := &stripe.CheckoutSessionParams{
-		ClientReferenceID: stripe.String(referenceID),
-		SuccessURL:        stripe.String(successURL),
-		CancelURL:         stripe.String(cancelURL),
-		LineItems: []*stripe.CheckoutSessionLineItemParams{
-			{
-				Price:    stripe.String(setting.GetOption(setting.StripePriceIdOption)),
-				Quantity: stripe.Int64(amount),
-			},
-		},
-		Mode:                stripe.String(string(stripe.CheckoutSessionModePayment)),
-		AllowPromotionCodes: stripe.Bool(setting.GetStripePromotionCodesEnabled()),
-		Metadata: map[string]string{
-			"user_id":  fmt.Sprintf("%d", user.Id),
-			"trade_no": referenceID,
-			"quota":    fmt.Sprintf("%d", amount),
-		},
-	}
+	customerEmail := ""
 	if user.StripeCustomer == "" {
-		if user.Email != "" {
-			params.CustomerEmail = stripe.String(user.Email)
-		}
-		params.CustomerCreation = stripe.String(string(stripe.CheckoutSessionCustomerCreationAlways))
-	} else {
-		params.Customer = stripe.String(user.StripeCustomer)
+		customerEmail = user.Email
 	}
-	result, err := session.New(params)
+	snapshot := service.StripeCheckoutRequestSnapshot{
+		Version: service.StripeCheckoutRequestSnapshotVersion,
+		TradeNo: referenceID, OrderType: service.StripeOrderTypeWallet, Mode: service.StripeCheckoutModePayment,
+		AmountMinor: order.ProviderAmountMinor, Currency: order.ProviderCurrency,
+		SuccessURL: successURL, CancelURL: cancelURL,
+		CustomerID: user.StripeCustomer, CustomerEmail: customerEmail,
+		ProductName: "TokenRouter wallet top-up", UserID: user.Id, WalletAmount: order.Amount,
+		IdempotencyKey: "wallet-checkout-" + referenceID,
+	}
+	if err := service.ConfigureStripeTopUpCheckoutRequest(referenceID, snapshot); err != nil {
+		return "", err
+	}
+	params := stripeCheckoutParamsFromSnapshot(snapshot)
+	result, err := createStripeCheckoutSession(apiKey, params)
 	if err != nil {
+		return "", err
+	}
+	if err := validateCreatedStripeCheckoutSession(result, referenceID, service.StripeCheckoutModePayment,
+		service.StripeOrderTypeWallet, order.ProviderAmountMinor, order.ProviderCurrency, ""); err != nil {
+		return "", err
+	}
+	if err := service.BindStripeTopUpSessionWithExpiry(referenceID, result.ID, result.ExpiresAt); err != nil {
 		return "", err
 	}
 	return result.URL, nil

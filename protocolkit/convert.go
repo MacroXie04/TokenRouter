@@ -16,21 +16,69 @@ func ClaudeUsageToOpenAIUsage(u *ClaudeUsage) *Usage {
 	if u == nil {
 		return &Usage{}
 	}
-	prompt := u.InputTokens + u.CacheCreationInputTokens + u.CacheReadInputTokens
+	cacheCreation5m, cacheCreation1h, cacheCreationTotal, valid := normalizeClaudeCacheCreation(u)
+	prompt, promptOK := checkedUsageSum(u.InputTokens, cacheCreationTotal, u.CacheReadInputTokens)
 	completion := u.OutputTokens
+	total, totalOK := checkedUsageSum(prompt, completion)
+	if !valid || !promptOK || !totalOK {
+		// Preserve a fail-closed sentinel for the settlement validator. Returning
+		// a wrapped value is not possible because this conversion is also used by
+		// wire-format adapters with a long-standing non-error signature.
+		prompt = -1
+		total = -1
+	}
 	return &Usage{
-		PromptTokens:           prompt,
-		CompletionTokens:       completion,
-		TotalTokens:            prompt + completion,
-		PromptCacheHitTokens:   u.CacheReadInputTokens,
-		PromptCacheMissTokens:  u.CacheCreationInputTokens,
-		PromptCacheWriteTokens: u.CacheCreationInputTokens,
+		PromptTokens:                prompt,
+		CompletionTokens:            completion,
+		TotalTokens:                 total,
+		BillingSemantic:             "anthropic",
+		PromptCacheHitTokens:        u.CacheReadInputTokens,
+		PromptCacheMissTokens:       cacheCreationTotal,
+		PromptCacheWriteTokens:      cacheCreationTotal,
+		PromptCacheCreationTokens:   cacheCreationTotal,
+		PromptCacheCreation5mTokens: cacheCreation5m,
+		PromptCacheCreation1hTokens: cacheCreation1h,
 		PromptTokensDetails: &InputTokenDetails{
-			CachedTokens:         u.CacheReadInputTokens,
-			CachedCreationTokens: u.CacheCreationInputTokens,
-			CacheWriteTokens:     u.CacheCreationInputTokens,
+			CachedTokens:          u.CacheReadInputTokens,
+			CachedCreationTokens:  cacheCreationTotal,
+			CacheWriteTokens:      cacheCreationTotal,
+			CacheCreation5mTokens: cacheCreation5m,
+			CacheCreation1hTokens: cacheCreation1h,
 		},
 	}
+}
+
+func normalizeClaudeCacheCreation(u *ClaudeUsage) (fiveMinute, oneHour, total int, valid bool) {
+	if u == nil {
+		return 0, 0, 0, true
+	}
+	if u.CacheCreation != nil {
+		fiveMinute = u.CacheCreation.Ephemeral5mInputTokens
+		oneHour = u.CacheCreation.Ephemeral1hInputTokens
+	}
+	splitTotal, ok := checkedUsageSum(fiveMinute, oneHour)
+	if !ok || u.CacheCreationInputTokens < 0 {
+		return fiveMinute, oneHour, u.CacheCreationInputTokens, false
+	}
+	total = u.CacheCreationInputTokens
+	if splitTotal > total {
+		total = splitTotal
+	} else {
+		fiveMinute += total - splitTotal
+	}
+	return fiveMinute, oneHour, total, true
+}
+
+func checkedUsageSum(values ...int) (int, bool) {
+	maxInt := int(^uint(0) >> 1)
+	total := 0
+	for _, value := range values {
+		if value < 0 || value > maxInt-total {
+			return 0, false
+		}
+		total += value
+	}
+	return total, true
 }
 
 // GeminiUsageToOpenAIUsage normalizes Gemini usage into OpenAI usage.
@@ -38,36 +86,92 @@ func GeminiUsageToOpenAIUsage(meta *GeminiUsageMetadata) *Usage {
 	if meta == nil {
 		return &Usage{}
 	}
+	prompt, promptOK := checkedUsageSum(meta.PromptTokenCount, meta.ToolUsePromptTokenCount)
+	completion, completionOK := checkedUsageSum(meta.CandidatesTokenCount, meta.ThoughtsTokenCount)
+	total := meta.TotalTokenCount
+	totalOK := total >= 0
+	if total == 0 {
+		total, totalOK = checkedUsageSum(prompt, completion)
+	}
 	u := &Usage{
-		PromptTokens:     meta.PromptTokenCount,
-		CompletionTokens: meta.CandidatesTokenCount,
-		TotalTokens:      meta.TotalTokenCount,
+		PromptTokens:     prompt,
+		CompletionTokens: completion,
+		TotalTokens:      total,
+		ReasoningTokens:  meta.ThoughtsTokenCount,
 	}
-	if u.TotalTokens == 0 {
-		u.TotalTokens = meta.PromptTokenCount + meta.CandidatesTokenCount
-	}
-	in := &InputTokenDetails{}
-	out := &OutputTokenDetails{}
-	for _, d := range meta.PromptTokensDetails {
-		switch d.Modality {
-		case "AUDIO":
-			in.AudioTokens += d.TokenCount
-			u.AudioTokens += d.TokenCount
-		case "IMAGE":
-			in.ImageTokens += d.TokenCount
+	in := &InputTokenDetails{CachedTokens: meta.CachedContentTokenCount}
+	out := &OutputTokenDetails{ReasoningTokens: meta.ThoughtsTokenCount}
+	detailsOK := true
+	for _, details := range [][]GeminiPromptTokensDetails{
+		meta.PromptTokensDetails,
+		meta.ToolUsePromptTokensDetails,
+	} {
+		for _, d := range details {
+			if !addGeminiInputTokenDetail(in, d) {
+				detailsOK = false
+			}
 		}
 	}
 	for _, d := range meta.CandidatesTokensDetails {
-		switch d.Modality {
-		case "AUDIO":
-			out.AudioTokens += d.TokenCount
-		case "IMAGE":
-			out.ImageTokens += d.TokenCount
+		if !addGeminiOutputTokenDetail(out, d) {
+			detailsOK = false
 		}
 	}
+	u.AudioTokens = in.AudioTokens
 	u.PromptTokensDetails = in
 	u.CompletionTokensDetails = out
+	if !promptOK {
+		u.PromptTokens = -1
+	}
+	if !completionOK {
+		u.CompletionTokens = -1
+	}
+	if !promptOK || !completionOK || !totalOK || !detailsOK {
+		u.TotalTokens = -1
+	}
 	return u
+}
+
+func addGeminiInputTokenDetail(details *InputTokenDetails, d GeminiPromptTokensDetails) bool {
+	var target *int
+	switch strings.ToUpper(strings.TrimSpace(d.Modality)) {
+	case "AUDIO":
+		target = &details.AudioTokens
+	case "IMAGE":
+		target = &details.ImageTokens
+	case "TEXT":
+		target = &details.TextTokens
+	default:
+		return d.TokenCount >= 0
+	}
+	next, ok := checkedUsageSum(*target, d.TokenCount)
+	if !ok {
+		*target = -1
+		return false
+	}
+	*target = next
+	return true
+}
+
+func addGeminiOutputTokenDetail(details *OutputTokenDetails, d GeminiCandidatesTokensDetails) bool {
+	var target *int
+	switch strings.ToUpper(strings.TrimSpace(d.Modality)) {
+	case "AUDIO":
+		target = &details.AudioTokens
+	case "IMAGE":
+		target = &details.ImageTokens
+	case "TEXT":
+		target = &details.TextTokens
+	default:
+		return d.TokenCount >= 0
+	}
+	next, ok := checkedUsageSum(*target, d.TokenCount)
+	if !ok {
+		*target = -1
+		return false
+	}
+	*target = next
+	return true
 }
 
 // ClaudeRequestToOpenAIRequest converts a Claude Messages request into an
@@ -101,7 +205,7 @@ func ClaudeRequestToOpenAIRequest(req *ClaudeRequest) *GeneralOpenAIRequest {
 	}
 
 	for _, m := range req.Messages {
-		out.Messages = append(out.Messages, claudeMessageToOpenAI(m))
+		out.Messages = append(out.Messages, claudeMessageToOpenAI(m)...)
 	}
 
 	// Tools.
@@ -114,13 +218,14 @@ func ClaudeRequestToOpenAIRequest(req *ClaudeRequest) *GeneralOpenAIRequest {
 	return out
 }
 
-func claudeMessageToOpenAI(m ClaudeMessage) Message {
+func claudeMessageToOpenAI(m ClaudeMessage) []Message {
 	switch content := m.Content.(type) {
 	case string:
-		return Message{Role: m.Role, Content: content}
+		return []Message{{Role: m.Role, Content: content}}
 	case []any:
 		var texts []MediaContent
 		var toolCalls []ToolCallRequest
+		var toolResults []Message
 		for _, raw := range content {
 			obj, ok := raw.(map[string]any)
 			if !ok {
@@ -144,6 +249,12 @@ func claudeMessageToOpenAI(m ClaudeMessage) Message {
 				name := strOr(obj["name"])
 				tc.Function = &FunctionRequest{Name: name, Arguments: args}
 				toolCalls = append(toolCalls, tc)
+			case "tool_result":
+				toolResults = append(toolResults, Message{
+					Role:       "tool",
+					ToolCallId: strOr(obj["tool_use_id"]),
+					Content:    claudeToolResultContent(obj["content"]),
+				})
 			}
 		}
 		msg := Message{Role: m.Role}
@@ -164,16 +275,57 @@ func claudeMessageToOpenAI(m ClaudeMessage) Message {
 			msg.Role = "assistant"
 			msg.ToolCalls = toolCalls
 		}
-		return msg
+		out := make([]Message, 0, len(toolResults)+1)
+		out = append(out, toolResults...)
+		if len(texts) > 0 || len(toolCalls) > 0 {
+			out = append(out, msg)
+		}
+		if len(out) == 0 {
+			out = append(out, Message{Role: m.Role, Content: content})
+		}
+		return out
 	default:
-		return Message{Role: m.Role, Content: content}
+		return []Message{{Role: m.Role, Content: content}}
 	}
 }
 
+func claudeToolResultContent(content any) any {
+	if content == nil {
+		return ""
+	}
+	if text, ok := content.(string); ok {
+		return text
+	}
+	if parts, ok := content.([]any); ok {
+		var text strings.Builder
+		for _, raw := range parts {
+			if part, ok := raw.(map[string]any); ok && part["type"] == "text" {
+				text.WriteString(strOr(part["text"]))
+			}
+		}
+		if text.Len() > 0 {
+			return text.String()
+		}
+	}
+	return content
+}
+
 func claudeToolToOpenAI(t Tool) ToolCallRequest {
+	parameters := map[string]any{"type": "object"}
+	if t.InputSchema != nil {
+		if t.InputSchema.Type != "" {
+			parameters["type"] = t.InputSchema.Type
+		}
+		if t.InputSchema.Properties != nil {
+			parameters["properties"] = t.InputSchema.Properties
+		}
+		if len(t.InputSchema.Required) > 0 {
+			parameters["required"] = append([]string(nil), t.InputSchema.Required...)
+		}
+	}
 	return ToolCallRequest{
 		Type:     "function",
-		Function: &FunctionRequest{Name: t.Name, Description: t.Description, Parameters: t.InputSchema.Properties},
+		Function: &FunctionRequest{Name: t.Name, Description: t.Description, Parameters: parameters},
 	}
 }
 
@@ -191,9 +343,9 @@ func ClaudeResponseToOpenAIResponse(resp *ClaudeResponse) *ChatCompletionsRespon
 			content.WriteString(part.Text)
 		case "tool_use":
 			toolCalls = append(toolCalls, ToolCallResponse{
-				Id:       strOr(part.Source),
+				Id:       part.ID,
 				Type:     "function",
-				Function: &FunctionResponse{Name: part.Model, Arguments: ToJSONString(part.Usage)},
+				Function: &FunctionResponse{Name: part.Name, Arguments: ToJSONString(part.Input)},
 			})
 		}
 	}
@@ -203,7 +355,9 @@ func ClaudeResponseToOpenAIResponse(resp *ClaudeResponse) *ChatCompletionsRespon
 	}
 	if len(toolCalls) > 0 {
 		msg.ToolCalls = toolCalls
-		msg.Content = nil
+		if content.Len() == 0 {
+			msg.Content = nil
+		}
 	}
 	finishReason := mapClaudeStopReason(resp.StopReason)
 	return &ChatCompletionsResponse{
@@ -252,7 +406,7 @@ func GeminiRequestToOpenAIRequest(req *GeminiChatRequest) *GeneralOpenAIRequest 
 		}
 	}
 	for _, c := range req.Contents {
-		out.Messages = append(out.Messages, geminiContentToOpenAI(c))
+		out.Messages = append(out.Messages, geminiContentToOpenAI(c)...)
 	}
 	for _, t := range req.Tools {
 		for _, f := range t.FunctionDeclarations {
@@ -265,10 +419,10 @@ func GeminiRequestToOpenAIRequest(req *GeminiChatRequest) *GeneralOpenAIRequest 
 	return out
 }
 
-func geminiContentToOpenAI(c GeminiChatContent) Message {
+func geminiContentToOpenAI(c GeminiChatContent) []Message {
 	var texts []MediaContent
 	var toolCalls []ToolCallRequest
-	var funcResponse *FunctionRequest
+	var toolResults []Message
 	for _, p := range c.Parts {
 		if p.Text != "" {
 			texts = append(texts, MediaContent{Type: ContentTypeText, Text: p.Text})
@@ -287,13 +441,18 @@ func geminiContentToOpenAI(c GeminiChatContent) Message {
 		}
 		if p.FunctionCall != nil {
 			toolCalls = append(toolCalls, ToolCallRequest{
-				Id:       "",
+				Id:       geminiToolCallID(p.FunctionCall.Name),
 				Type:     "function",
 				Function: &FunctionRequest{Name: p.FunctionCall.Name, Arguments: ToJSONString(p.FunctionCall.Args)},
 			})
 		}
 		if p.FunctionResponse != nil {
-			funcResponse = &FunctionRequest{Name: p.FunctionResponse.Name, Arguments: ToJSONString(p.FunctionResponse.Response)}
+			toolResults = append(toolResults, Message{
+				Role:       "tool",
+				Name:       p.FunctionResponse.Name,
+				ToolCallId: geminiToolCallID(p.FunctionResponse.Name),
+				Content:    ToJSONString(p.FunctionResponse.Response),
+			})
 		}
 	}
 	role := c.Role
@@ -318,11 +477,33 @@ func geminiContentToOpenAI(c GeminiChatContent) Message {
 	if len(toolCalls) > 0 {
 		msg.ToolCalls = toolCalls
 	}
-	if funcResponse != nil {
-		msg.FunctionCall = funcResponse
-		msg.ToolCallId = ""
+	out := make([]Message, 0, len(toolResults)+1)
+	out = append(out, toolResults...)
+	if len(texts) > 0 || len(toolCalls) > 0 {
+		out = append(out, msg)
 	}
-	return msg
+	if len(out) == 0 {
+		out = append(out, msg)
+	}
+	return out
+}
+
+func geminiToolCallID(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "call_gemini"
+	}
+	var id strings.Builder
+	id.WriteString("call_")
+	for _, r := range name {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') ||
+			(r >= '0' && r <= '9') || r == '_' || r == '-' {
+			id.WriteRune(r)
+		} else {
+			id.WriteByte('_')
+		}
+	}
+	return id.String()
 }
 
 // GeminiResponseToOpenAIResponse converts a non-stream Gemini response into an
@@ -343,6 +524,7 @@ func GeminiResponseToOpenAIResponse(resp *GeminiChatResponse) *ChatCompletionsRe
 				}
 				if p.FunctionCall != nil {
 					toolCalls = append(toolCalls, ToolCallResponse{
+						Id:       geminiToolCallID(p.FunctionCall.Name),
 						Type:     "function",
 						Function: &FunctionResponse{Name: p.FunctionCall.Name, Arguments: ToJSONString(p.FunctionCall.Args)},
 					})
@@ -352,12 +534,18 @@ func GeminiResponseToOpenAIResponse(resp *GeminiChatResponse) *ChatCompletionsRe
 		msg := ChatResponseMessage{Role: "assistant", Content: content}
 		if len(toolCalls) > 0 {
 			msg.ToolCalls = toolCalls
-			msg.Content = nil
+			if content == "" {
+				msg.Content = nil
+			}
+		}
+		finishReason := mapGeminiFinishReason(cand.FinishReason)
+		if len(toolCalls) > 0 {
+			finishReason = "tool_calls"
 		}
 		out.Choices = append(out.Choices, ChatCompletionsChoice{
 			Index:        0,
 			Message:      &msg,
-			FinishReason: mapGeminiFinishReason(cand.FinishReason),
+			FinishReason: finishReason,
 		})
 	}
 	out.Usage = GeminiUsageToOpenAIUsage(resp.UsageMetadata)
@@ -431,10 +619,7 @@ func OpenAIRequestToClaudeRequest(req *GeneralOpenAIRequest) *ClaudeRequest {
 		if t.Function == nil {
 			continue
 		}
-		schema := &InputSchema{Type: "object"}
-		if t.Function.Parameters != nil {
-			schema.Properties = t.Function.Parameters
-		}
+		schema := openAIToolSchemaToClaude(t.Function.Parameters)
 		out.Tools = append(out.Tools, Tool{Name: t.Function.Name, Description: t.Function.Description, InputSchema: schema})
 	}
 	if req.ToolChoice != nil {
@@ -443,19 +628,95 @@ func OpenAIRequestToClaudeRequest(req *GeneralOpenAIRequest) *ClaudeRequest {
 	return out
 }
 
-func openAIMessageToClaude(m Message) ClaudeMessage {
-	cm := ClaudeMessage{Role: m.Role}
-	switch content := m.Content.(type) {
-	case string:
-		cm.Content = content
+func openAIToolSchemaToClaude(parameters map[string]any) *InputSchema {
+	schema := &InputSchema{Type: "object"}
+	if len(parameters) == 0 {
+		return schema
+	}
+	if schemaType, ok := parameters["type"].(string); ok && schemaType != "" {
+		schema.Type = schemaType
+	}
+	if properties, ok := parameters["properties"].(map[string]any); ok {
+		schema.Properties = properties
+	} else {
+		// Older TokenRouter callers supplied a property map directly. Retain
+		// compatibility while emitting the canonical Anthropic schema shape.
+		schema.Properties = make(map[string]any)
+		for key, value := range parameters {
+			if key != "type" && key != "required" {
+				schema.Properties[key] = value
+			}
+		}
+	}
+	switch required := parameters["required"].(type) {
+	case []string:
+		schema.Required = append([]string(nil), required...)
 	case []any:
-		var parts []ClaudeMediaMessage
-		for _, raw := range content {
+		for _, item := range required {
+			if name, ok := item.(string); ok {
+				schema.Required = append(schema.Required, name)
+			}
+		}
+	}
+	return schema
+}
+
+func openAIMessageToClaude(m Message) ClaudeMessage {
+	if m.Role == "tool" {
+		content := m.Content
+		if content == nil {
+			content = ""
+		}
+		return ClaudeMessage{Role: "user", Content: []any{ClaudeMediaMessage{
+			Type: "tool_result", ToolUseID: m.ToolCallId, Content: content,
+		}}}
+	}
+
+	cm := ClaudeMessage{Role: m.Role}
+	parts := openAIContentToClaudeParts(m.Content)
+	for _, call := range m.ToolCalls {
+		if call.Function == nil {
+			continue
+		}
+		parts = append(parts, ClaudeMediaMessage{
+			Type: "tool_use", ID: call.Id, Name: call.Function.Name,
+			Input: decodeFunctionArguments(call.Function.Arguments),
+		})
+	}
+	if m.FunctionCall != nil {
+		parts = append(parts, ClaudeMediaMessage{
+			Type: "tool_use", Name: m.FunctionCall.Name,
+			Input: decodeFunctionArguments(m.FunctionCall.Arguments),
+		})
+	}
+	if len(parts) == 1 && parts[0].Type == "text" {
+		cm.Content = parts[0].Text
+	} else if len(parts) > 0 {
+		content := make([]any, len(parts))
+		for i := range parts {
+			content[i] = parts[i]
+		}
+		cm.Content = content
+	} else if m.Content != nil {
+		cm.Content = m.Content
+	}
+	return cm
+}
+
+func openAIContentToClaudeParts(content any) []ClaudeMediaMessage {
+	switch value := content.(type) {
+	case string:
+		if value == "" {
+			return nil
+		}
+		return []ClaudeMediaMessage{{Type: "text", Text: value}}
+	case []any:
+		parts := make([]ClaudeMediaMessage, 0, len(value))
+		for _, raw := range value {
 			part, ok := raw.(MediaContent)
 			if !ok {
-				if pm, ok := raw.(map[string]any); ok {
-					part = MediaContent{Type: strOr(pm["type"]), Text: strOr(pm["text"])}
-				} else {
+				encoded, err := MarshalJSON(raw)
+				if err != nil || UnmarshalJSON(encoded, &part) != nil {
 					continue
 				}
 			}
@@ -463,27 +724,33 @@ func openAIMessageToClaude(m Message) ClaudeMessage {
 			case ContentTypeText:
 				parts = append(parts, ClaudeMediaMessage{Type: "text", Text: part.Text})
 			case ContentTypeImageURL:
-				if part.ImageURL != nil {
-					src := &ClaudeMessageSource{Type: "url", Url: part.ImageURL.Url}
-					if strings.HasPrefix(part.ImageURL.Url, "data:") {
-						src = dataURLToSource(part.ImageURL.Url)
-					}
-					parts = append(parts, ClaudeMediaMessage{Type: "image", Source: src})
+				if part.ImageURL == nil {
+					continue
 				}
+				source := &ClaudeMessageSource{Type: "url", Url: part.ImageURL.Url}
+				if strings.HasPrefix(part.ImageURL.Url, "data:") {
+					source = dataURLToSource(part.ImageURL.Url)
+				}
+				parts = append(parts, ClaudeMediaMessage{Type: "image", Source: source})
 			}
 		}
-		// Collapse single text part to a string for Claude compatibility.
-		if len(parts) == 1 && parts[0].Type == "text" {
-			cm.Content = parts[0].Text
-		} else {
-			anyParts := make([]any, len(parts))
-			for i := range parts {
-				anyParts[i] = parts[i]
-			}
-			cm.Content = anyParts
-		}
+		return parts
+	default:
+		return nil
 	}
-	return cm
+}
+
+func decodeFunctionArguments(arguments string) any {
+	if strings.TrimSpace(arguments) == "" {
+		return map[string]any{}
+	}
+	var decoded any
+	if err := UnmarshalJSON([]byte(arguments), &decoded); err != nil {
+		// Preserve malformed input rather than silently changing its meaning;
+		// Anthropic will reject a non-object input as an invalid request.
+		return arguments
+	}
+	return decoded
 }
 
 func dataURLToSource(dataURL string) *ClaudeMessageSource {
@@ -550,6 +817,7 @@ func OpenAIRequestToGeminiRequest(req *GeneralOpenAIRequest) *GeminiChatRequest 
 		StopSequences:   stopToStrings(req.Stop),
 	}
 	out.GenerationConfig = genCfg
+	toolNames := make(map[string]string)
 	for _, m := range req.Messages {
 		if m.Role == "system" {
 			out.SystemInstruction = &GeminiChatContent{Role: "system", Parts: []GeminiPart{{Text: contentToText(m.Content)}}}
@@ -558,9 +826,49 @@ func OpenAIRequestToGeminiRequest(req *GeneralOpenAIRequest) *GeminiChatRequest 
 		role := m.Role
 		if role == "assistant" {
 			role = "model"
+		} else if role == "tool" {
+			role = "user"
 		}
 		content := GeminiChatContent{Role: role}
 		content.Parts = openAIContentToGeminiParts(m.Content)
+		for _, call := range m.ToolCalls {
+			if call.Function == nil {
+				continue
+			}
+			toolNames[call.Id] = call.Function.Name
+			args := decodeFunctionArguments(call.Function.Arguments)
+			arguments, ok := args.(map[string]any)
+			if !ok {
+				arguments = map[string]any{"raw": args}
+			}
+			content.Parts = append(content.Parts, GeminiPart{
+				FunctionCall:     &FunctionCall{Name: call.Function.Name, Args: arguments},
+				ThoughtSignature: GeminiThoughtSignatureBypass,
+			})
+		}
+		if m.FunctionCall != nil {
+			args := decodeFunctionArguments(m.FunctionCall.Arguments)
+			arguments, ok := args.(map[string]any)
+			if !ok {
+				arguments = map[string]any{"raw": args}
+			}
+			content.Parts = append(content.Parts, GeminiPart{
+				FunctionCall:     &FunctionCall{Name: m.FunctionCall.Name, Args: arguments},
+				ThoughtSignature: GeminiThoughtSignatureBypass,
+			})
+		}
+		if m.Role == "tool" {
+			name := strings.TrimSpace(m.Name)
+			if name == "" {
+				name = toolNames[m.ToolCallId]
+			}
+			if name == "" {
+				name = strings.TrimPrefix(m.ToolCallId, "call_")
+			}
+			content.Parts = []GeminiPart{{FunctionResponse: &GeminiFunctionResponse{
+				Name: name, Response: geminiFunctionResponseValue(m.Content),
+			}}}
+		}
 		out.Contents = append(out.Contents, content)
 	}
 	for _, t := range req.Tools {
@@ -576,6 +884,20 @@ func OpenAIRequestToGeminiRequest(req *GeneralOpenAIRequest) *GeminiChatRequest 
 		})
 	}
 	return out
+}
+
+func geminiFunctionResponseValue(content any) any {
+	if text, ok := content.(string); ok {
+		var decoded any
+		if strings.TrimSpace(text) != "" && UnmarshalJSON([]byte(text), &decoded) == nil {
+			return decoded
+		}
+		return map[string]any{"result": text}
+	}
+	if content == nil {
+		return map[string]any{}
+	}
+	return content
 }
 
 func contentToText(content any) string {
@@ -686,6 +1008,15 @@ func OpenAIResponseToClaudeResponse(resp *ChatCompletionsResponse) *ClaudeRespon
 			case nil:
 			default:
 				out.Content = append(out.Content, ClaudeMediaMessage{Type: "text", Text: contentString(content)})
+			}
+			for _, call := range ch.Message.ToolCalls {
+				if call.Function == nil {
+					continue
+				}
+				out.Content = append(out.Content, ClaudeMediaMessage{
+					Type: "tool_use", ID: call.Id, Name: call.Function.Name,
+					Input: decodeFunctionArguments(call.Function.Arguments),
+				})
 			}
 		}
 		out.StopReason = OpenAIFinishReasonToClaudeStopReason(ch.FinishReason)

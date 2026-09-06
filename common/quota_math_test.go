@@ -42,6 +42,25 @@ func TestQuotaFromFloatSaturation(t *testing.T) {
 	require.NotNil(t, clamp2)
 }
 
+func TestAddQuotaWithinBoundsRejectsMachineAndDomainOverflow(t *testing.T) {
+	value, ok := AddQuotaWithinBounds(int(MaxQuota)-10, 10)
+	require.True(t, ok)
+	assert.Equal(t, int(MaxQuota), value)
+
+	for _, test := range []struct {
+		current int
+		delta   int
+	}{
+		{current: int(MaxQuota), delta: 1},
+		{current: math.MaxInt - 10, delta: 20},
+		{current: -1, delta: 1},
+		{current: 1, delta: -1},
+	} {
+		_, ok := AddQuotaWithinBounds(test.current, test.delta)
+		assert.False(t, ok)
+	}
+}
+
 func TestQuotaFromFloatNaNInf(t *testing.T) {
 	q, clamp := QuotaFromFloatChecked(math.NaN())
 	assert.Equal(t, 0, q)

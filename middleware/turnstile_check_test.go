@@ -8,6 +8,8 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/tokenrouter/tokenrouter/common"
 )
 
 func buildTurnstileRouter() *gin.Engine {
@@ -31,6 +33,9 @@ func postTurnstile(t *testing.T, r *gin.Engine, query string) *httptest.Response
 // submitted token is "good-token" and the secret matches.
 func newTurnstileMock(t *testing.T) *httptest.Server {
 	t.Helper()
+	t.Cleanup(common.InitSSRF)
+	t.Setenv("SSRF_DISABLE", "true")
+	common.InitSSRF()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.NoError(t, r.ParseForm())
 		if r.Form.Get("secret") == "" || r.Form.Get("response") == "" {

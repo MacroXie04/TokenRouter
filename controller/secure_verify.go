@@ -43,7 +43,12 @@ func UniversalVerify(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, dto.Fail("验证码不能为空"))
 		return
 	}
-	if !service.TwoFAStatus(identity.UserID) {
+	twoFAEnabled, err := service.TwoFAStatusChecked(identity.UserID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, dto.Fail("验证失败"))
+		return
+	}
+	if !twoFAEnabled {
 		c.JSON(http.StatusBadRequest, dto.Fail("用户未启用2FA"))
 		return
 	}
@@ -74,7 +79,9 @@ func IsAllowedSecurityProofScope(scope string) bool {
 	switch scope {
 	case service.SecurityProofScopeChannelKeyRead,
 		service.SecurityProofScopePasskeyRegister,
-		service.SecurityProofScopePasskeyDelete:
+		service.SecurityProofScopePasskeyDelete,
+		service.SecurityProofScopeTwoFAReset,
+		service.SecurityProofScopeBackupCodeReset:
 		return true
 	default:
 		return false

@@ -2,10 +2,21 @@ package billingexpr
 
 import (
 	"fmt"
+	"math"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/expr-lang/expr"
+)
+
+var billingClock = time.Now
+
+const (
+	maxBillingMatchedTierBytes = 128
+	maxBillingParamPathBytes   = 256
+	maxBillingParamPathParts   = 32
+	maxBillingTimezoneBytes    = 64
 )
 
 // evalState captures the matched tier during a single evaluation.
@@ -25,6 +36,9 @@ func (c *compiled) Run(params TokenParams, req RequestInput) (EvalResult, error)
 	cost, ok := out.(float64)
 	if !ok {
 		cost = toFloat(out)
+	}
+	if math.IsNaN(cost) || math.IsInf(cost, 0) || cost < 0 {
+		return EvalResult{}, fmt.Errorf("billing expression returned an invalid cost")
 	}
 	return EvalResult{Cost: cost, MatchedTier: state.matchedTier}, nil
 }
@@ -47,7 +61,10 @@ func BuildTokenParams(u Usage, used map[string]bool) TokenParams {
 	if u.IsClaudeSemantic {
 		// Claude input_tokens is text-only; cache is separate and never
 		// subtracted from the base prompt variable.
-		p.Len = float64(u.PromptTokens + u.CacheReadTokens + u.CacheCreationTokens + u.CacheCreation1hTokens)
+		// Convert before addition so hostile machine-width counters cannot wrap
+		// while constructing the expression's context-length variable.
+		p.Len = float64(u.PromptTokens) + float64(u.CacheReadTokens) +
+			float64(u.CacheCreationTokens) + float64(u.CacheCreation1hTokens)
 		p.P = float64(u.PromptTokens)
 		p.Cr = float64(u.CacheReadTokens)
 		p.Cc = float64(u.CacheCreationTokens)
@@ -87,16 +104,38 @@ func BuildTokenParams(u Usage, used map[string]bool) TokenParams {
 		p.ImgO = float64(u.ImageOutputTokens)
 		p.C -= p.ImgO
 	}
+	// Provider detail counters can be inconsistent with their aggregate totals
+	// (OpenAI cache-write prefixes are a known example). Never let separately
+	// priced buckets turn the base variables negative and offset a charge.
+	if p.P < 0 {
+		p.P = 0
+	}
+	if p.C < 0 {
+		p.C = 0
+	}
 	return p
 }
 
 // lookupPath resolves a dotted path over a decoded JSON body.
 func lookupPath(body map[string]any, path string) any {
-	if path == "" {
+	if path == "" || len(path) > maxBillingParamPathBytes || !utf8.ValidString(path) ||
+		strings.HasPrefix(path, ".") || strings.HasSuffix(path, ".") {
 		return nil
 	}
 	var cur any = body
-	for _, part := range strings.Split(path, ".") {
+	parts := 0
+	for start := 0; start < len(path); {
+		end := strings.IndexByte(path[start:], '.')
+		if end < 0 {
+			end = len(path)
+		} else {
+			end += start
+		}
+		part := path[start:end]
+		parts++
+		if part == "" || parts > maxBillingParamPathParts {
+			return nil
+		}
 		m, ok := cur.(map[string]any)
 		if !ok {
 			return nil
@@ -105,6 +144,7 @@ func lookupPath(body map[string]any, path string) any {
 		if !ok {
 			return nil
 		}
+		start = end + 1
 	}
 	return cur
 }
@@ -128,12 +168,30 @@ func toFloat(v any) float64 {
 }
 
 func nowInTZ(tz string) time.Time {
+	now := billingClock()
 	if tz == "" {
-		return time.Now()
+		return now
+	}
+	if len(tz) > maxBillingTimezoneBytes || !utf8.ValidString(tz) ||
+		strings.TrimSpace(tz) != tz || strings.Contains(tz, "..") || strings.HasPrefix(tz, "/") {
+		return now
 	}
 	loc, err := time.LoadLocation(tz)
 	if err != nil {
-		return time.Now()
+		return now
 	}
-	return time.Now().In(loc)
+	return now.In(loc)
+}
+
+func boundedMatchedTier(name string) string {
+	if name == "" || len(name) > maxBillingMatchedTierBytes || !utf8.ValidString(name) ||
+		strings.TrimSpace(name) != name {
+		return ""
+	}
+	for _, character := range name {
+		if character < 0x20 || character == 0x7f || character >= 0x80 && character <= 0x9f {
+			return ""
+		}
+	}
+	return name
 }

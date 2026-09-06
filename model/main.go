@@ -4,7 +4,10 @@
 package model
 
 import (
+	"errors"
+	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -24,6 +27,20 @@ var DB *gorm.DB
 // LOG_DB is the log database handle; it equals DB when no LOG_SQL_DSN is set.
 var LOG_DB *gorm.DB
 
+const (
+	defaultSQLMaxIdleConns       = 100
+	defaultSQLMaxOpenConns       = 1000
+	defaultSQLMaxLifetimeSeconds = 60
+	maxSQLPoolConnections        = 10_000
+	maxSQLMaxLifetimeSeconds     = 30 * 24 * 60 * 60
+)
+
+type sqlPoolConfig struct {
+	maxIdleConns       int
+	maxOpenConns       int
+	maxLifetimeSeconds int
+}
+
 // AllModels is the ordered list of entities passed to AutoMigrate.
 var AllModels = []any{
 	&User{},
@@ -33,10 +50,13 @@ var AllModels = []any{
 	&Option{},
 	&Redemption{},
 	&Log{},
+	&AuditLogOutbox{},
 	&Midjourney{},
 	&TopUp{},
 	&QuotaData{},
 	&Task{},
+	&JimengTaskOperation{},
+	&TaskOperation{},
 	&Model{},
 	&Vendor{},
 	&PrefillGroup{},
@@ -48,6 +68,8 @@ var AllModels = []any{
 	&SubscriptionOrder{},
 	&UserSubscription{},
 	&SubscriptionPreConsumeRecord{},
+	&RelayQuotaReservationRecord{},
+	&RelayQuotaReservationReviewEvent{},
 	&CustomOAuthProvider{},
 	&UserOAuthBinding{},
 	&PerfMetric{},
@@ -64,6 +86,10 @@ var AllModels = []any{
 
 // InitDB connects to the primary (and optional log) database and migrates.
 func InitDB() (err error) {
+	poolConfig, err := loadSQLPoolConfig()
+	if err != nil {
+		return err
+	}
 	gormConfig := &gorm.Config{
 		Logger: logger.Default.LogMode(logger.Silent),
 		NowFunc: func() time.Time {
@@ -78,7 +104,10 @@ func InitDB() (err error) {
 		}
 		DB, err = gorm.Open(sqlite.Open(sqlitePath), gormConfig)
 	} else if strings.HasPrefix(dsn, "postgres://") || strings.HasPrefix(dsn, "postgresql://") {
-		DB, err = gorm.Open(postgres.Open(dsn), gormConfig)
+		DB, err = gorm.Open(postgres.New(postgres.Config{
+			DSN:                  dsn,
+			PreferSimpleProtocol: true,
+		}), gormConfig)
 	} else {
 		DB, err = gorm.Open(mysql.Open(dsn), gormConfig)
 	}
@@ -96,41 +125,196 @@ func InitDB() (err error) {
 		LOG_DB = DB
 	}
 
-	sqlDB, err := DB.DB()
-	if err == nil {
-		sqlDB.SetMaxIdleConns(common.GetEnvInt("SQL_MAX_IDLE_CONNS", 100))
-		sqlDB.SetMaxOpenConns(common.GetEnvInt("SQL_MAX_OPEN_CONNS", 1000))
-		sqlDB.SetConnMaxLifetime(time.Duration(common.GetEnvInt("SQL_MAX_LIFETIME", 60)) * time.Second)
+	if err := applySQLPoolConfig(DB, poolConfig); err != nil {
+		return fmt.Errorf("configure primary database pool: %w", err)
+	}
+	if LOG_DB != DB {
+		if err := applySQLPoolConfig(LOG_DB, poolConfig); err != nil {
+			return fmt.Errorf("configure log database pool: %w", err)
+		}
 	}
 
 	return migrateDB()
+}
+
+func loadSQLPoolConfig() (sqlPoolConfig, error) {
+	maxIdle, err := boundedSQLPoolEnv("SQL_MAX_IDLE_CONNS", defaultSQLMaxIdleConns, 0, maxSQLPoolConnections)
+	if err != nil {
+		return sqlPoolConfig{}, err
+	}
+	maxOpen, err := boundedSQLPoolEnv("SQL_MAX_OPEN_CONNS", defaultSQLMaxOpenConns, 1, maxSQLPoolConnections)
+	if err != nil {
+		return sqlPoolConfig{}, err
+	}
+	maxLifetime, err := boundedSQLPoolEnv("SQL_MAX_LIFETIME", defaultSQLMaxLifetimeSeconds, 0, maxSQLMaxLifetimeSeconds)
+	if err != nil {
+		return sqlPoolConfig{}, err
+	}
+	if maxIdle > maxOpen {
+		return sqlPoolConfig{}, errors.New("SQL_MAX_IDLE_CONNS must not exceed SQL_MAX_OPEN_CONNS")
+	}
+	return sqlPoolConfig{
+		maxIdleConns: maxIdle, maxOpenConns: maxOpen, maxLifetimeSeconds: maxLifetime,
+	}, nil
+}
+
+func boundedSQLPoolEnv(name string, fallback, minimum, maximum int) (int, error) {
+	raw, configured := os.LookupEnv(name)
+	if !configured || raw == "" {
+		return fallback, nil
+	}
+	if raw != strings.TrimSpace(raw) {
+		return 0, fmt.Errorf("%s must be an integer from %d to %d", name, minimum, maximum)
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value < minimum || value > maximum {
+		return 0, fmt.Errorf("%s must be an integer from %d to %d", name, minimum, maximum)
+	}
+	return value, nil
+}
+
+func applySQLPoolConfig(db *gorm.DB, config sqlPoolConfig) error {
+	if db == nil {
+		return errors.New("database is nil")
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		return err
+	}
+	sqlDB.SetMaxOpenConns(config.maxOpenConns)
+	sqlDB.SetMaxIdleConns(config.maxIdleConns)
+	sqlDB.SetConnMaxLifetime(time.Duration(config.maxLifetimeSeconds) * time.Second)
+	return nil
 }
 
 // openLogDB opens a secondary database; ClickHouse log storage is handled by a
 // dedicated path that builds MergeTree DDL instead of GORM AutoMigrate.
 func openLogDB(dsn string, cfg *gorm.Config) (*gorm.DB, error) {
 	if strings.HasPrefix(dsn, "clickhouse://") {
-		return openClickHouseLog(dsn)
+		return openClickHouseLog(dsn, cfg)
 	}
 	return gorm.Open(pgOrMySQL(dsn), cfg)
 }
 
 func pgOrMySQL(dsn string) gorm.Dialector {
 	if strings.HasPrefix(dsn, "postgres://") || strings.HasPrefix(dsn, "postgresql://") {
-		return postgres.Open(dsn)
+		return postgres.New(postgres.Config{
+			DSN:                  dsn,
+			PreferSimpleProtocol: true,
+		})
 	}
 	return mysql.Open(dsn)
 }
 
 // migrateDB runs AutoMigrate for every entity on the primary DB.
 func migrateDB() error {
+	if err := prepareReferenceSchemaMigration(); err != nil {
+		return err
+	}
+	if err := ensureReferenceTokenModelLimitsText(); err != nil {
+		return err
+	}
+	if err := ensureExternalIdentityClaimStorage(); err != nil {
+		return err
+	}
+	if err := prepareSecuritySchemaMigration(); err != nil {
+		return err
+	}
+	// First discard sessions whose existing identity/lifecycle core is already
+	// unusable. Any surviving NULL or missing reference lifecycle state remains
+	// ambiguous and must fail closed without being guessed or rewritten.
+	if err := prepareReferenceUserSessionSchemaMigration(); err != nil {
+		return err
+	}
+	if err := installExternalIdentityClaimSubjectIndex(); err != nil {
+		return err
+	}
+	// Install the named username constraint before AutoMigrate can replace the
+	// legacy unique index, so no supported dialect observes a uniqueness gap.
+	if err := ensureReferenceUserIndexes(); err != nil {
+		return err
+	}
+	// Preserve top-up trade-number uniqueness before AutoMigrate replaces the
+	// legacy named unique index with the reference's ordinary lookup index.
+	if err := ensureReferenceTopUpIndexes(); err != nil {
+		return err
+	}
+	// Preserve subscription-order fulfillment uniqueness before AutoMigrate
+	// replaces the legacy named unique index with the reference lookup index.
+	if err := ensureReferenceSubscriptionOrderIndexes(); err != nil {
+		return err
+	}
 	if err := DB.AutoMigrate(AllModels...); err != nil {
+		return err
+	}
+	if err := ensureReferenceSubscriptionPlanIntegerTypes(); err != nil {
+		return err
+	}
+	if err := ensureReferenceUserSessionConstraints(); err != nil {
+		return err
+	}
+	if err := ensureReferenceSubscriptionPlanConstraints(); err != nil {
+		return err
+	}
+	if err := ensureReferenceLogIndexes(DB); err != nil {
+		return err
+	}
+	if err := ensureReferenceUserIndexes(); err != nil {
+		return err
+	}
+	if err := ensureReferenceTwoFAIndexes(); err != nil {
+		return err
+	}
+	if err := ensureReferenceTopUpIndexes(); err != nil {
+		return err
+	}
+	if err := ensureReferenceSubscriptionOrderIndexes(); err != nil {
+		return err
+	}
+	if err := ensureReferenceSubscriptionPlanSQLiteDefaults(); err != nil {
+		return err
+	}
+	if err := ensureReferenceSchemaDefaults(); err != nil {
+		return err
+	}
+	if err := ensureChannelTypeCatalog(); err != nil {
+		return err
+	}
+	if err := migrateLogDB(); err != nil {
+		return err
+	}
+	if err := initializeVerifiedEmailKeys(); err != nil {
 		return err
 	}
 	if err := ensureRegistryActiveNames(); err != nil {
 		return err
 	}
+	if err := finalizeExternalIdentityClaimIndexes(); err != nil {
+		return err
+	}
 	return ensurePrefillGroupPartialIndex()
+}
+
+// migrateLogDB evolves a separately configured relational log sink. The
+// primary database is already migrated through AllModels, while ClickHouse is
+// evolved by openClickHouseLog's explicit DDL path.
+func migrateLogDB() error {
+	if LOG_DB == nil {
+		return errors.New("log database is nil")
+	}
+	if LOG_DB == DB || UsingClickHouseLog() {
+		return nil
+	}
+	if err := prepareReferenceLogSchemaMigration(LOG_DB); err != nil {
+		return err
+	}
+	if err := LOG_DB.AutoMigrate(&Log{}); err != nil {
+		return err
+	}
+	if err := ensureReferenceLogIndexes(LOG_DB); err != nil {
+		return err
+	}
+	return ensureReferenceLogSchemaDefaults(LOG_DB)
 }
 
 func ensureRegistryActiveNames() error {
@@ -253,7 +437,7 @@ func ensurePrefillGroupPartialIndex() error {
 	if definition == "" || strings.Contains(strings.ToUpper(definition), "WHERE") {
 		return nil
 	}
-	if err := DB.Migrator().DropIndex(&PrefillGroup{}, "uk_prefill_name"); err != nil {
+	if err := dropIndexPortable(DB, &PrefillGroup{}, "uk_prefill_name"); err != nil {
 		return err
 	}
 	return DB.Migrator().CreateIndex(&PrefillGroup{}, "uk_prefill_name")
@@ -261,16 +445,25 @@ func ensurePrefillGroupPartialIndex() error {
 
 // UsingPostgreSQL reports whether the primary DB is PostgreSQL.
 func UsingPostgreSQL() bool {
+	if DB != nil && DB.Dialector != nil {
+		return DB.Dialector.Name() == "postgres"
+	}
 	return common.UsingPostgreSQL()
 }
 
 // UsingMySQL reports whether the primary DB is MySQL.
 func UsingMySQL() bool {
+	if DB != nil && DB.Dialector != nil {
+		return DB.Dialector.Name() == "mysql"
+	}
 	return common.UsingMySQL()
 }
 
 // UsingSQLite reports whether the primary DB is SQLite.
 func UsingSQLite() bool {
+	if DB != nil && DB.Dialector != nil {
+		return DB.Dialector.Name() == "sqlite"
+	}
 	return common.UsingSQLite()
 }
 

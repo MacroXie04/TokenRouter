@@ -30,6 +30,7 @@ func setupChannelRead(t *testing.T, role int) (http.Handler, func(method, path, 
 	gin.SetMode(gin.TestMode)
 	t.Setenv("CRITICAL_RATE_LIMIT", "1000000")
 	t.Setenv("GLOBAL_API_RATE_LIMIT", "1000000")
+	t.Cleanup(common.InitSSRF)
 	t.Setenv("SSRF_DISABLE", "true")
 	common.InitSSRF()
 	dsn := "file:" + filepath.Join(t.TempDir(), "channelread.db") + "?_pragma=busy_timeout(5000)"
@@ -40,9 +41,11 @@ func setupChannelRead(t *testing.T, role int) (http.Handler, func(method, path, 
 		&model.Option{}, &model.Model{}, &model.SystemTask{}, &model.SystemTaskLock{}, &model.Ability{},
 		&model.Redemption{}, &model.AuthzRole{}, &model.CasbinRule{}, &model.TopUp{}, &model.QuotaData{},
 		&model.CustomOAuthProvider{}, &model.UserOAuthBinding{}, &model.SystemInstance{}, &model.PerfMetric{},
-		&model.PrefillGroup{}))
+		&model.PrefillGroup{}, &model.AuditLogOutbox{}))
 	model.DB = db
 	model.LOG_DB = db
+	require.NoError(t, service.InitCasbin())
+	require.NoError(t, service.InitPermissionAuthz())
 	service.ResetQuotaDataCache()
 	require.NoError(t, setting.UpdateOption(setting.QuotaPerUnitOption, "500000"))
 
@@ -206,6 +209,52 @@ func TestChannelSearchRequiresAdmin(t *testing.T) {
 	_, do, _ := setupChannelRead(t, constant.RoleCommonUser)
 	rec := do(http.MethodGet, "/api/channel/search", "")
 	assert.NotEqual(t, http.StatusOK, rec.Code)
+}
+
+func TestChannelReadResponseRedactsSensitiveFieldsByCapability(t *testing.T) {
+	_, doAdmin, _ := setupChannelRead(t, constant.RoleAdminUser)
+	priority := int64(1)
+	weight := uint(1)
+	channel := model.Channel{
+		Name: "sensitive-wire", Type: int(constant.ChannelTypeOpenAI), Key: "sk-wire-secret",
+		Status: constant.ChannelStatusEnabled, Models: "gpt-4o", Group: "default",
+		Priority: &priority, Weight: &weight, BaseURL: "https://internal.example.test",
+		OpenAIOrganization: "org-secret", Other: "provider-secret",
+		Setting:       `{"balance_url":"https://balance.example.test"}`,
+		OtherSettings: `{"advanced_custom":{"auth":"secret"}}`,
+		ParamOverride: `{"prompt":"secret"}`, HeaderOverride: `{"Authorization":"secret"}`,
+	}
+	require.NoError(t, model.DB.Create(&channel).Error)
+
+	rec := doAdmin(http.MethodGet, "/api/channel/"+common.Int2Str(channel.Id), "")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	data := decodeBody(t, rec)["data"].(map[string]any)
+	for _, field := range []string{
+		"key", "base_url", "openai_organization", "other", "setting", "settings", "param_override", "header_override",
+	} {
+		assert.Equal(t, "", data[field], field)
+	}
+	assert.NotContains(t, rec.Body.String(), "wire-secret")
+	assert.NotContains(t, rec.Body.String(), "internal.example.test")
+
+	for _, path := range []string{"/api/channel", "/api/channel/search?keyword=sensitive-wire"} {
+		rec = doAdmin(http.MethodGet, path, "")
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		assert.NotContains(t, rec.Body.String(), "wire-secret", path)
+		assert.NotContains(t, rec.Body.String(), "internal.example.test", path)
+		assert.NotContains(t, rec.Body.String(), "Authorization", path)
+	}
+
+	_, doRoot, _ := setupChannelRead(t, constant.RoleRootUser)
+	rootChannel := channel
+	rootChannel.Id = 0
+	require.NoError(t, model.DB.Create(&rootChannel).Error)
+	rec = doRoot(http.MethodGet, "/api/channel/"+common.Int2Str(rootChannel.Id), "")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	rootData := decodeBody(t, rec)["data"].(map[string]any)
+	assert.Equal(t, "", rootData["key"], "even root detail uses the dedicated key-reveal endpoint")
+	assert.Equal(t, "https://internal.example.test", rootData["base_url"])
+	assert.Equal(t, `{"Authorization":"secret"}`, rootData["header_override"])
 }
 
 func TestChannelListModelsAndEnabledModels(t *testing.T) {

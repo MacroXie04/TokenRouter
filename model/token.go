@@ -13,18 +13,18 @@ type Token struct {
 	Id                 int            `json:"id" gorm:"primaryKey"`
 	UserId             int            `json:"user_id" gorm:"index"`
 	Key                string         `json:"key" gorm:"type:varchar(128);uniqueIndex"`
-	Status             int            `json:"status"`
-	Name               string         `json:"name" gorm:"index;type:varchar(64)"`
-	CreatedTime        int64          `json:"created_time"`
-	AccessedTime       int64          `json:"accessed_time"`
-	ExpiredTime        int64          `json:"expired_time"`
-	RemainQuota        int            `json:"remain_quota"`
+	Status             int            `json:"status" gorm:"default:1"`
+	Name               string         `json:"name" gorm:"index"`
+	CreatedTime        int64          `json:"created_time" gorm:"bigint"`
+	AccessedTime       int64          `json:"accessed_time" gorm:"bigint"`
+	ExpiredTime        int64          `json:"expired_time" gorm:"bigint;default:-1"`
+	RemainQuota        int            `json:"remain_quota" gorm:"default:0"`
 	UnlimitedQuota     bool           `json:"unlimited_quota"`
 	ModelLimitsEnabled bool           `json:"model_limits_enabled"`
 	ModelLimits        string         `json:"model_limits" gorm:"type:text"`
-	AllowIps           string         `json:"allow_ips" gorm:"type:varchar(128)"`
-	UsedQuota          int            `json:"used_quota"`
-	Group              string         `json:"group" gorm:"type:varchar(64)"`
+	AllowIps           *string        `json:"allow_ips" gorm:"default:''"`
+	UsedQuota          int            `json:"used_quota" gorm:"default:0"`
+	Group              string         `json:"group" gorm:"default:''"`
 	CrossGroupRetry    bool           `json:"cross_group_retry"`
 	AutoGroups         string         `json:"auto_groups" gorm:"type:text"`
 	DeletedAt          gorm.DeletedAt `json:"-" gorm:"index"`
@@ -73,6 +73,23 @@ func (token *Token) GetAutoGroups() ([]string, error) {
 		if g = strings.TrimSpace(g); g != "" {
 			groups = append(groups, g)
 		}
+	}
+	return groups, nil
+}
+
+// GetAutoGroupsStrict parses only the current JSON-array encoding. Relay
+// authentication uses this method so corrupted or attacker-written database
+// values cannot be reinterpreted as a permissive legacy CSV list.
+func (token *Token) GetAutoGroupsStrict() ([]string, error) {
+	if token == nil || token.AutoGroups == "" {
+		return nil, nil
+	}
+	var groups []string
+	if err := common.UnmarshalJsonStr(token.AutoGroups, &groups); err != nil {
+		return nil, err
+	}
+	if groups == nil {
+		return nil, nil
 	}
 	return groups, nil
 }

@@ -2,7 +2,7 @@ package controller
 
 import (
 	"bytes"
-	"io"
+	"errors"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -11,39 +11,71 @@ import (
 	"github.com/tokenrouter/tokenrouter/common"
 	"github.com/tokenrouter/tokenrouter/dto"
 	"github.com/tokenrouter/tokenrouter/middleware"
+	"github.com/tokenrouter/tokenrouter/model"
 	"github.com/tokenrouter/tokenrouter/service"
+	"github.com/tokenrouter/tokenrouter/setting"
 )
 
+const maxPasskeyRequestBodyBytes int64 = 1 << 20
+
 // readPasskeyBody reads the raw request body once and extracts the flow token.
-func readPasskeyBody(c *gin.Context) ([]byte, string, bool) {
-	body, err := io.ReadAll(c.Request.Body)
+func readPasskeyBody(c *gin.Context) ([]byte, string, error) {
+	body, err := common.ReadAllLimited(c.Request.Body, maxPasskeyRequestBodyBytes)
 	if err != nil {
-		return nil, "", false
+		return nil, "", err
 	}
 	var req struct {
 		FlowToken string `json:"flow_token"`
 	}
 	if err := common.Unmarshal(body, &req); err != nil || req.FlowToken == "" {
-		return nil, "", false
+		return nil, "", errors.New("invalid passkey request body")
 	}
-	return body, req.FlowToken, true
+	return body, req.FlowToken, nil
+}
+
+func rejectPasskeyBody(c *gin.Context, err error) {
+	if errors.Is(err, common.ErrBodyTooLarge) {
+		c.JSON(http.StatusRequestEntityTooLarge, dto.Fail("请求体过大"))
+		return
+	}
+	c.JSON(http.StatusBadRequest, dto.Fail("参数错误"))
 }
 
 // PasskeyStatus reports whether the user has a registered passkey.
 func PasskeyStatus(c *gin.Context) {
-	c.JSON(http.StatusOK, dto.Ok(gin.H{"enabled": service.PasskeyEnabled(common.GetUserId(c))}))
+	enabled, err := service.PasskeyEnabledChecked(common.GetUserId(c))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, dto.Fail("查询 Passkey 状态失败"))
+		return
+	}
+	c.JSON(http.StatusOK, dto.Ok(gin.H{"enabled": enabled}))
 }
 
 // PasskeyRegisterBegin starts a passkey registration. When the user has 2FA
 // enabled, a 2FA security proof for the passkey.register scope is required
 // (matching the reference's step-up gate).
 func PasskeyRegisterBegin(c *gin.Context) {
-	userId := common.GetUserId(c)
-	if service.TwoFAStatus(userId) && !middleware.RequireSecurityProof(c,
+	// Registration mutates browser-bound authentication state. Resolve the live
+	// login session before checking feature configuration so a management PAT
+	// cannot use the endpoint or distinguish whether Passkey is enabled.
+	identity, ok := requireLoginSession(c)
+	if !ok {
+		return
+	}
+	twoFAEnabled, err := service.TwoFAStatusChecked(identity.UserID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, dto.Fail("查询 2FA 状态失败"))
+		return
+	}
+	if twoFAEnabled && !middleware.RequireSecurityProof(c,
 		service.SecurityProofScopePasskeyRegister, []string{service.SecurityProofMethod2FA}) {
 		return
 	}
-	options, flowToken, err := service.BeginPasskeyRegistration(userId)
+	if !setting.GetAuthenticationSetting().Passkey.Enabled {
+		c.JSON(http.StatusOK, dto.Fail("管理员未启用 Passkey 登录"))
+		return
+	}
+	options, flowToken, err := service.BeginPasskeyRegistration(identity.UserID, identity.SessionID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, dto.Fail(err.Error()))
 		return
@@ -75,11 +107,16 @@ func PasskeyVerifyBegin(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, dto.Fail("不支持的安全验证范围"))
 		return
 	}
-	if !service.PasskeyEnabled(userId) {
+	passkeyEnabled, err := service.PasskeyEnabledChecked(userId)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, dto.Fail("查询 Passkey 状态失败"))
+		return
+	}
+	if !passkeyEnabled {
 		c.JSON(http.StatusOK, gin.H{"success": false, "message": "该用户尚未绑定 Passkey"})
 		return
 	}
-	options, flowToken, err := service.BeginPasskeyVerify(userId, identity.SessionID, req.Scope)
+	options, flowToken, expiresAt, err := service.BeginPasskeyVerifyWithExpiry(userId, identity.SessionID, req.Scope)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, dto.Fail(err.Error()))
 		return
@@ -90,7 +127,7 @@ func PasskeyVerifyBegin(c *gin.Context) {
 		"data": gin.H{
 			"options":    options,
 			"flow_token": flowToken,
-			"expires_at": common.NowTimestamp() + 5*60,
+			"expires_at": expiresAt,
 		},
 	})
 }
@@ -108,9 +145,9 @@ func PasskeyVerifyFinish(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"success": false, "message": "当前认证方式不支持安全验证"})
 		return
 	}
-	body, flowToken, ok := readPasskeyBody(c)
-	if !ok {
-		c.JSON(http.StatusBadRequest, dto.Fail("参数错误"))
+	body, flowToken, err := readPasskeyBody(c)
+	if err != nil {
+		rejectPasskeyBody(c, err)
 		return
 	}
 	response, err := protocol.ParseCredentialRequestResponseBody(bytes.NewReader(body))
@@ -142,9 +179,17 @@ func PasskeyVerifyFinish(c *gin.Context) {
 
 // PasskeyRegisterFinish completes a passkey registration.
 func PasskeyRegisterFinish(c *gin.Context) {
-	body, flowToken, ok := readPasskeyBody(c)
+	identity, ok := requireLoginSession(c)
 	if !ok {
-		c.JSON(http.StatusBadRequest, dto.Fail("参数错误"))
+		return
+	}
+	if !setting.GetAuthenticationSetting().Passkey.Enabled {
+		c.JSON(http.StatusOK, dto.Fail("管理员未启用 Passkey 登录"))
+		return
+	}
+	body, flowToken, err := readPasskeyBody(c)
+	if err != nil {
+		rejectPasskeyBody(c, err)
 		return
 	}
 	response, err := protocol.ParseCredentialCreationResponseBody(bytes.NewReader(body))
@@ -152,7 +197,7 @@ func PasskeyRegisterFinish(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, dto.Fail("无效的凭据响应"))
 		return
 	}
-	if err := service.FinishPasskeyRegistration(common.GetUserId(c), flowToken, response); err != nil {
+	if err := service.FinishPasskeyRegistration(identity.UserID, identity.SessionID, flowToken, response); err != nil {
 		c.JSON(http.StatusBadRequest, dto.Fail("注册失败: "+err.Error()))
 		return
 	}
@@ -161,19 +206,34 @@ func PasskeyRegisterFinish(c *gin.Context) {
 
 // PasskeyLoginBegin starts a discoverable passkey login.
 func PasskeyLoginBegin(c *gin.Context) {
-	options, flowToken, err := service.BeginPasskeyLogin()
+	if !setting.GetAuthenticationSetting().Passkey.Enabled {
+		c.JSON(http.StatusOK, dto.Fail("管理员未启用 Passkey 登录"))
+		return
+	}
+	options, flowToken, expiresAt, err := service.BeginPasskeyLoginWithExpiry()
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, dto.Fail(err.Error()))
 		return
 	}
-	c.JSON(http.StatusOK, dto.Ok(gin.H{"options": options, "flow_token": flowToken}))
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "",
+		"data": gin.H{
+			"options": options, "flow_token": flowToken,
+			"expires_at": expiresAt,
+		},
+	})
 }
 
 // PasskeyLoginFinish completes a passkey login.
 func PasskeyLoginFinish(c *gin.Context) {
-	body, flowToken, ok := readPasskeyBody(c)
-	if !ok {
-		c.JSON(http.StatusBadRequest, dto.Fail("参数错误"))
+	if !setting.GetAuthenticationSetting().Passkey.Enabled {
+		c.JSON(http.StatusOK, dto.Fail("管理员未启用 Passkey 登录"))
+		return
+	}
+	body, flowToken, err := readPasskeyBody(c)
+	if err != nil {
+		rejectPasskeyBody(c, err)
 		return
 	}
 	response, err := protocol.ParseCredentialRequestResponseBody(bytes.NewReader(body))
@@ -186,11 +246,15 @@ func PasskeyLoginFinish(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, dto.Fail("登录失败"))
 		return
 	}
+	if user.Status != model.UserStatusEnabled {
+		c.JSON(http.StatusUnauthorized, dto.Fail("该用户已被禁用"))
+		return
+	}
 	sid, access, refresh, err := service.CompleteLogin(user, c.ClientIP(), c.GetHeader("User-Agent"), "passkey")
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, dto.Fail("登录失败"))
+		writeAuthSessionError(c, err)
 		return
 	}
 	setAuthCookies(c, sid, access, refresh)
-	c.JSON(http.StatusOK, dto.Ok(userResponse(user)))
+	c.JSON(http.StatusOK, gin.H{"success": true, "message": "", "data": userResponse(user)})
 }

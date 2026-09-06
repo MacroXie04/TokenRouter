@@ -86,31 +86,77 @@ func ValidateURL(raw string) error {
 	return nil
 }
 
-// SafeDialContext is a net.Dialer.DialContext replacement that rejects unsafe
-// resolved addresses immediately before connecting (prevents DNS rebinding).
+type ssrfResolver interface {
+	LookupIPAddr(context.Context, string) ([]net.IPAddr, error)
+}
+
+type ssrfDialContext func(context.Context, string, string) (net.Conn, error)
+
+// SafeDialContext is a net.Dialer.DialContext replacement that resolves a
+// hostname once, validates every answer, and connects to one of those exact IP
+// addresses. It never hands a validated hostname back to net.Dialer for a
+// second DNS lookup.
 func SafeDialContext(ctx context.Context, network, addr string) (net.Conn, error) {
 	dialer := &net.Dialer{Timeout: 30 * time.Second}
 	if ssrfDisabled {
 		return dialer.DialContext(ctx, network, addr)
 	}
-	host, _, err := net.SplitHostPort(addr)
-	if err != nil {
-		host = addr
+	return safeDialContext(ctx, network, addr, net.DefaultResolver, dialer.DialContext)
+}
+
+func safeDialContext(
+	ctx context.Context,
+	network string,
+	addr string,
+	resolver ssrfResolver,
+	dial ssrfDialContext,
+) (net.Conn, error) {
+	if network != "tcp" && network != "tcp4" && network != "tcp6" {
+		return nil, fmt.Errorf("ssrf: unsupported network %q", network)
 	}
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, fmt.Errorf("ssrf: invalid address %q: %w", addr, err)
+	}
+	if host == "" || port == "" {
+		return nil, fmt.Errorf("ssrf: invalid address %q", addr)
+	}
+
 	if ip := net.ParseIP(host); ip != nil {
 		if IsUnsafeIP(ip) {
 			return nil, fmt.Errorf("ssrf: blocked address %s", ip.String())
 		}
-	} else {
-		addrs, err := net.DefaultResolver.LookupIPAddr(ctx, host)
-		if err != nil {
-			return nil, err
-		}
-		for _, a := range addrs {
-			if IsUnsafeIP(a.IP) {
-				return nil, fmt.Errorf("ssrf: blocked address %s", a.IP.String())
-			}
+		return dial(ctx, network, net.JoinHostPort(ip.String(), port))
+	}
+
+	addrs, err := resolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return nil, fmt.Errorf("ssrf: cannot resolve host %s: %w", host, err)
+	}
+	if len(addrs) == 0 {
+		return nil, fmt.Errorf("ssrf: host %s resolves to no addresses", host)
+	}
+	for _, resolved := range addrs {
+		if IsUnsafeIP(resolved.IP) {
+			return nil, fmt.Errorf("ssrf: blocked address %s", resolved.IP.String())
 		}
 	}
-	return dialer.DialContext(ctx, network, addr)
+
+	var dialErrors []error
+	for _, resolved := range addrs {
+		ipAddr := resolved.IP.String()
+		if resolved.Zone != "" {
+			ipAddr += "%" + resolved.Zone
+		}
+		pinnedAddr := net.JoinHostPort(ipAddr, port)
+		conn, dialErr := dial(ctx, network, pinnedAddr)
+		if dialErr == nil {
+			return conn, nil
+		}
+		dialErrors = append(dialErrors, dialErr)
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+	}
+	return nil, fmt.Errorf("ssrf: failed to connect to validated host %s: %w", host, errors.Join(dialErrors...))
 }

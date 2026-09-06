@@ -2,9 +2,9 @@ package controller
 
 import (
 	"errors"
-	"io"
 	"mime"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -14,7 +14,10 @@ import (
 	"github.com/tokenrouter/tokenrouter/service"
 )
 
-const maxMidjourneyImageBytes int64 = 32 << 20
+const (
+	maxMidjourneyImageBytes int64 = 32 << 20
+	maxMidjourneyErrorBytes int64 = 16 << 10
+)
 
 var midjourneyImageHTTPClient = &http.Client{
 	Transport: &http.Transport{
@@ -26,7 +29,8 @@ var midjourneyImageHTTPClient = &http.Client{
 		TLSHandshakeTimeout:   10 * time.Second,
 		ResponseHeaderTimeout: 20 * time.Second,
 	},
-	Timeout: 30 * time.Second,
+	CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	Timeout:       30 * time.Second,
 }
 
 func safeMidjourneyImageContentType(value string) (string, bool) {
@@ -78,22 +82,42 @@ func RelayMidjourneyImage(c *gin.Context) {
 		return
 	}
 	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		if response.ContentLength > maxMidjourneyErrorBytes {
+			c.JSON(http.StatusBadGateway, gin.H{"error": "upstream_error_response_too_large"})
+			return
+		}
+		body, readErr := common.ReadAllLimited(response.Body, maxMidjourneyErrorBytes)
+		if readErr != nil {
+			if errors.Is(readErr, common.ErrBodyTooLarge) {
+				c.JSON(http.StatusBadGateway, gin.H{"error": "upstream_error_response_too_large"})
+				return
+			}
+			c.JSON(http.StatusBadGateway, gin.H{"error": "http_read_image_failed"})
+			return
+		}
+		status := response.StatusCode
+		if status < http.StatusBadRequest || status > 599 {
+			status = http.StatusBadGateway
+		}
+		message := strings.TrimSpace(string(body))
+		if message == "" {
+			message = "upstream_image_request_failed"
+		}
+		c.JSON(status, gin.H{"error": message})
+		return
+	}
 	if response.ContentLength > maxMidjourneyImageBytes {
 		c.JSON(http.StatusBadGateway, gin.H{"error": "image_response_too_large"})
 		return
 	}
-
-	body, err := io.ReadAll(io.LimitReader(response.Body, maxMidjourneyImageBytes+1))
+	body, err := common.ReadAllLimited(response.Body, maxMidjourneyImageBytes)
 	if err != nil {
+		if errors.Is(err, common.ErrBodyTooLarge) {
+			c.JSON(http.StatusBadGateway, gin.H{"error": "image_response_too_large"})
+			return
+		}
 		c.JSON(http.StatusBadGateway, gin.H{"error": "http_read_image_failed"})
-		return
-	}
-	if int64(len(body)) > maxMidjourneyImageBytes {
-		c.JSON(http.StatusBadGateway, gin.H{"error": "image_response_too_large"})
-		return
-	}
-	if response.StatusCode != http.StatusOK {
-		c.JSON(response.StatusCode, gin.H{"error": string(body)})
 		return
 	}
 

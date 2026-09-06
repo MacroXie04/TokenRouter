@@ -1,6 +1,8 @@
 package service
 
 import (
+	"context"
+	"errors"
 	"fmt"
 
 	"gorm.io/gorm"
@@ -8,6 +10,54 @@ import (
 	"github.com/tokenrouter/tokenrouter/constant"
 	"github.com/tokenrouter/tokenrouter/model"
 )
+
+const (
+	// DashboardDataMaxRangeSeconds bounds every dashboard histogram query to
+	// the same inclusive 30-day window accepted by the frontend.
+	DashboardDataMaxRangeSeconds int64 = 30 * 24 * 60 * 60
+	// DashboardDataMaxRows caps materialized aggregate rows. Queries fetch one
+	// sentinel row beyond the cap so oversized results fail closed rather than
+	// returning a silently truncated dashboard.
+	DashboardDataMaxRows = 20_000
+)
+
+var (
+	ErrInvalidDashboardDataRange  = errors.New("invalid dashboard data range")
+	ErrDashboardDataRangeTooLarge = errors.New("dashboard data range exceeds 30 days")
+	ErrDashboardDataTooLarge      = errors.New("dashboard data exceeds safe limits")
+)
+
+// ValidateDashboardDataRange provides defense in depth for callers outside
+// the HTTP controllers.
+func ValidateDashboardDataRange(startTime, endTime int64) error {
+	if startTime <= 0 || endTime <= 0 || endTime < startTime {
+		return ErrInvalidDashboardDataRange
+	}
+	if endTime-startTime > DashboardDataMaxRangeSeconds {
+		return ErrDashboardDataRangeTooLarge
+	}
+	return nil
+}
+
+func dashboardDataContextError(ctx context.Context, startTime, endTime int64) error {
+	if err := ValidateDashboardDataRange(startTime, endTime); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func boundedDashboardRows[T any](ctx context.Context, rows []T) ([]T, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if len(rows) > DashboardDataMaxRows {
+		return nil, ErrDashboardDataTooLarge
+	}
+	return rows, nil
+}
 
 // FlowQuotaData is the reference flow-analytics row (token/channel names are
 // resolved after the aggregation and never stored).
@@ -30,90 +80,163 @@ type FlowQuotaData struct {
 // (model_name, created_at), or by (user_id, username, model_name, created_at)
 // when a username filter is given (reference semantics).
 func GetAllQuotaDates(startTime, endTime int64, username string) ([]*model.QuotaData, error) {
-	if username != "" {
-		return GetQuotaDataByUsername(username, startTime, endTime)
+	return GetAllQuotaDatesContext(context.Background(), startTime, endTime, username)
+}
+
+// GetAllQuotaDatesContext is the request-scoped form used by dashboard HTTP
+// handlers.
+func GetAllQuotaDatesContext(ctx context.Context, startTime, endTime int64, username string) ([]*model.QuotaData, error) {
+	if err := dashboardDataContextError(ctx, startTime, endTime); err != nil {
+		return nil, err
 	}
-	var rows []*model.QuotaData
-	err := model.DB.Table(model.QuotaData{}.TableName()).
+	if username != "" {
+		return GetQuotaDataByUsernameContext(ctx, username, startTime, endTime)
+	}
+	rows := make([]*model.QuotaData, 0)
+	err := model.DB.WithContext(ctx).Table(model.QuotaData{}.TableName()).
 		Select("model_name, sum(count) as count, sum(quota) as quota, sum(token_used) as token_used, created_at").
 		Where("created_at >= ? and created_at <= ?", startTime, endTime).
 		Group("model_name, created_at").
+		Order("created_at ASC").
+		Order("model_name ASC").
+		Limit(DashboardDataMaxRows + 1).
 		Find(&rows).Error
-	return rows, err
+	if err != nil {
+		return nil, err
+	}
+	return boundedDashboardRows(ctx, rows)
 }
 
 // GetQuotaDataByUsername returns one user's per-(model, hour) histogram.
 func GetQuotaDataByUsername(username string, startTime, endTime int64) ([]*model.QuotaData, error) {
-	var rows []*model.QuotaData
-	err := model.DB.Table(model.QuotaData{}.TableName()).
+	return GetQuotaDataByUsernameContext(context.Background(), username, startTime, endTime)
+}
+
+func GetQuotaDataByUsernameContext(ctx context.Context, username string, startTime, endTime int64) ([]*model.QuotaData, error) {
+	if err := dashboardDataContextError(ctx, startTime, endTime); err != nil {
+		return nil, err
+	}
+	rows := make([]*model.QuotaData, 0)
+	err := model.DB.WithContext(ctx).Table(model.QuotaData{}.TableName()).
 		Select("user_id, username, model_name, created_at, sum(count) as count, sum(quota) as quota, sum(token_used) as token_used").
 		Where("username = ? and created_at >= ? and created_at <= ?", username, startTime, endTime).
 		Group("user_id, username, model_name, created_at").
+		Order("created_at ASC").
+		Order("model_name ASC").
+		Order("user_id ASC").
+		Order("username ASC").
+		Limit(DashboardDataMaxRows + 1).
 		Find(&rows).Error
-	return rows, err
+	if err != nil {
+		return nil, err
+	}
+	return boundedDashboardRows(ctx, rows)
 }
 
 // GetQuotaDataByUserId returns the authenticated user's per-(model, hour)
 // histogram.
 func GetQuotaDataByUserId(userId int, startTime, endTime int64) ([]*model.QuotaData, error) {
-	var rows []*model.QuotaData
-	err := model.DB.Table(model.QuotaData{}.TableName()).
+	return GetQuotaDataByUserIDContext(context.Background(), userId, startTime, endTime)
+}
+
+func GetQuotaDataByUserIDContext(ctx context.Context, userId int, startTime, endTime int64) ([]*model.QuotaData, error) {
+	if err := dashboardDataContextError(ctx, startTime, endTime); err != nil {
+		return nil, err
+	}
+	rows := make([]*model.QuotaData, 0)
+	err := model.DB.WithContext(ctx).Table(model.QuotaData{}.TableName()).
 		Select("user_id, username, model_name, created_at, sum(count) as count, sum(quota) as quota, sum(token_used) as token_used").
 		Where("user_id = ? and created_at >= ? and created_at <= ?", userId, startTime, endTime).
 		Group("user_id, username, model_name, created_at").
+		Order("created_at ASC").
+		Order("model_name ASC").
+		Order("user_id ASC").
+		Order("username ASC").
+		Limit(DashboardDataMaxRows + 1).
 		Find(&rows).Error
-	return rows, err
+	if err != nil {
+		return nil, err
+	}
+	return boundedDashboardRows(ctx, rows)
 }
 
 // GetQuotaDataGroupByUser returns the admin per-(username, hour) histogram.
 func GetQuotaDataGroupByUser(startTime, endTime int64) ([]*model.QuotaData, error) {
-	var rows []*model.QuotaData
-	err := model.DB.Table(model.QuotaData{}.TableName()).
+	return GetQuotaDataGroupByUserContext(context.Background(), startTime, endTime)
+}
+
+func GetQuotaDataGroupByUserContext(ctx context.Context, startTime, endTime int64) ([]*model.QuotaData, error) {
+	if err := dashboardDataContextError(ctx, startTime, endTime); err != nil {
+		return nil, err
+	}
+	rows := make([]*model.QuotaData, 0)
+	err := model.DB.WithContext(ctx).Table(model.QuotaData{}.TableName()).
 		Select("username, created_at, sum(count) as count, sum(quota) as quota, sum(token_used) as token_used").
 		Where("created_at >= ? and created_at <= ?", startTime, endTime).
 		Group("username, created_at").
+		Order("created_at ASC").
+		Order("username ASC").
+		Limit(DashboardDataMaxRows + 1).
 		Find(&rows).Error
-	return rows, err
+	if err != nil {
+		return nil, err
+	}
+	return boundedDashboardRows(ctx, rows)
 }
 
 // GetFlowQuotaData returns the flow histogram for the calling role (reference
 // contract): root sees node/token dimensions, admin sees user/group/model/
 // channel, users see their own token/group/model rows. Only grouped usage
-// (use_group <> '') is counted.
+// (use_group <> ”) is counted.
 func GetFlowQuotaData(startTime, endTime int64, username string, userID, role int) ([]*FlowQuotaData, error) {
+	return GetFlowQuotaDataContext(context.Background(), startTime, endTime, username, userID, role)
+}
+
+func GetFlowQuotaDataContext(ctx context.Context, startTime, endTime int64, username string, userID, role int) ([]*FlowQuotaData, error) {
+	if err := dashboardDataContextError(ctx, startTime, endTime); err != nil {
+		return nil, err
+	}
 	switch {
 	case role >= constant.RoleRootUser:
-		return getRootFlowQuotaData(startTime, endTime, username)
+		return getRootFlowQuotaData(ctx, startTime, endTime, username)
 	case role >= constant.RoleAdminUser:
-		return getAdminFlowQuotaData(startTime, endTime, username)
+		return getAdminFlowQuotaData(ctx, startTime, endTime, username)
 	default:
-		return getSelfFlowQuotaData(startTime, endTime, userID)
+		return getSelfFlowQuotaData(ctx, startTime, endTime, userID)
 	}
 }
 
-func flowQuotaBaseQuery(startTime, endTime int64) *gorm.DB {
-	return model.DB.Table(model.QuotaData{}.TableName()).
+func flowQuotaBaseQuery(ctx context.Context, startTime, endTime int64) *gorm.DB {
+	return model.DB.WithContext(ctx).Table(model.QuotaData{}.TableName()).
 		Where("use_group <> ''").
 		Where("created_at >= ? and created_at <= ?", startTime, endTime)
 }
 
-func getSelfFlowQuotaData(startTime, endTime int64, userID int) ([]*FlowQuotaData, error) {
+func getSelfFlowQuotaData(ctx context.Context, startTime, endTime int64, userID int) ([]*FlowQuotaData, error) {
 	rows := make([]*FlowQuotaData, 0)
-	err := flowQuotaBaseQuery(startTime, endTime).
+	err := flowQuotaBaseQuery(ctx, startTime, endTime).
 		Select("token_id, use_group, model_name, sum(count) as count, sum(quota) as quota, sum(token_used) as token_used").
 		Where("user_id = ?", userID).
 		Group("token_id, use_group, model_name").
 		Order("quota DESC").
+		Order("token_id ASC").
+		Order("use_group ASC").
+		Order("model_name ASC").
+		Limit(DashboardDataMaxRows + 1).
 		Find(&rows).Error
 	if err != nil {
 		return nil, err
 	}
-	return rows, fillFlowTokenNames(rows)
+	rows, err = boundedDashboardRows(ctx, rows)
+	if err != nil {
+		return nil, err
+	}
+	return rows, fillFlowTokenNames(ctx, rows)
 }
 
-func getAdminFlowQuotaData(startTime, endTime int64, username string) ([]*FlowQuotaData, error) {
+func getAdminFlowQuotaData(ctx context.Context, startTime, endTime int64, username string) ([]*FlowQuotaData, error) {
 	rows := make([]*FlowQuotaData, 0)
-	query := flowQuotaBaseQuery(startTime, endTime).
+	query := flowQuotaBaseQuery(ctx, startTime, endTime).
 		Select("user_id, username, use_group, model_name, channel_id, sum(count) as count, sum(quota) as quota, sum(token_used) as token_used")
 	if username != "" {
 		query = query.Where("username = ?", username)
@@ -121,16 +244,26 @@ func getAdminFlowQuotaData(startTime, endTime int64, username string) ([]*FlowQu
 	err := query.
 		Group("user_id, username, use_group, model_name, channel_id").
 		Order("quota DESC").
+		Order("user_id ASC").
+		Order("username ASC").
+		Order("use_group ASC").
+		Order("model_name ASC").
+		Order("channel_id ASC").
+		Limit(DashboardDataMaxRows + 1).
 		Find(&rows).Error
 	if err != nil {
 		return nil, err
 	}
-	return rows, fillFlowChannelNames(rows)
+	rows, err = boundedDashboardRows(ctx, rows)
+	if err != nil {
+		return nil, err
+	}
+	return rows, fillFlowChannelNames(ctx, rows)
 }
 
-func getRootFlowQuotaData(startTime, endTime int64, username string) ([]*FlowQuotaData, error) {
+func getRootFlowQuotaData(ctx context.Context, startTime, endTime int64, username string) ([]*FlowQuotaData, error) {
 	rows := make([]*FlowQuotaData, 0)
-	query := flowQuotaBaseQuery(startTime, endTime).
+	query := flowQuotaBaseQuery(ctx, startTime, endTime).
 		Select("user_id, username, node_name, token_id, use_group, model_name, channel_id, sum(count) as count, sum(quota) as quota, sum(token_used) as token_used")
 	if username != "" {
 		query = query.Where("username = ?", username)
@@ -138,20 +271,35 @@ func getRootFlowQuotaData(startTime, endTime int64, username string) ([]*FlowQuo
 	err := query.
 		Group("user_id, username, node_name, token_id, use_group, model_name, channel_id").
 		Order("quota DESC").
+		Order("user_id ASC").
+		Order("username ASC").
+		Order("node_name ASC").
+		Order("token_id ASC").
+		Order("use_group ASC").
+		Order("model_name ASC").
+		Order("channel_id ASC").
+		Limit(DashboardDataMaxRows + 1).
 		Find(&rows).Error
 	if err != nil {
 		return nil, err
 	}
-	if err := fillFlowTokenNames(rows); err != nil {
+	rows, err = boundedDashboardRows(ctx, rows)
+	if err != nil {
+		return nil, err
+	}
+	if err := fillFlowTokenNames(ctx, rows); err != nil {
 		return rows, err
 	}
-	return rows, fillFlowChannelNames(rows)
+	return rows, fillFlowChannelNames(ctx, rows)
 }
 
 // fillFlowTokenNames resolves token names in one query. Deleted tokens are
 // intentionally left unresolved (empty name) so the frontend can render a
 // localized deleted label (reference semantics).
-func fillFlowTokenNames(rows []*FlowQuotaData) error {
+func fillFlowTokenNames(ctx context.Context, rows []*FlowQuotaData) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	ids := make([]int, 0)
 	seen := make(map[int]struct{})
 	for _, row := range rows {
@@ -165,13 +313,13 @@ func fillFlowTokenNames(rows []*FlowQuotaData) error {
 		ids = append(ids, row.TokenID)
 	}
 	if len(ids) == 0 {
-		return nil
+		return ctx.Err()
 	}
 	var tokens []struct {
 		Id   int
 		Name string
 	}
-	if err := model.DB.Model(&model.Token{}).Select("id, name").Where("id IN ?", ids).Find(&tokens).Error; err != nil {
+	if err := model.DB.WithContext(ctx).Model(&model.Token{}).Select("id, name").Where("id IN ?", ids).Find(&tokens).Error; err != nil {
 		return err
 	}
 	names := make(map[int]string, len(tokens))
@@ -183,12 +331,15 @@ func fillFlowTokenNames(rows []*FlowQuotaData) error {
 			row.TokenName = name
 		}
 	}
-	return nil
+	return ctx.Err()
 }
 
 // fillFlowChannelNames resolves channel names in one query; unknown ids fall
 // back to "channel-<id>" (reference semantics).
-func fillFlowChannelNames(rows []*FlowQuotaData) error {
+func fillFlowChannelNames(ctx context.Context, rows []*FlowQuotaData) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	ids := make([]int, 0)
 	seen := make(map[int]struct{})
 	for _, row := range rows {
@@ -202,13 +353,13 @@ func fillFlowChannelNames(rows []*FlowQuotaData) error {
 		ids = append(ids, row.ChannelID)
 	}
 	if len(ids) == 0 {
-		return nil
+		return ctx.Err()
 	}
 	var channels []struct {
 		Id   int
 		Name string
 	}
-	if err := model.DB.Table(model.Channel{}.TableName()).Select("id, name").Where("id IN ?", ids).Find(&channels).Error; err != nil {
+	if err := model.DB.WithContext(ctx).Table(model.Channel{}.TableName()).Select("id, name").Where("id IN ?", ids).Find(&channels).Error; err != nil {
 		return err
 	}
 	names := make(map[int]string, len(channels))
@@ -224,5 +375,5 @@ func fillFlowChannelNames(rows []*FlowQuotaData) error {
 		}
 		row.ChannelName = fmt.Sprintf("channel-%d", row.ChannelID)
 	}
-	return nil
+	return ctx.Err()
 }

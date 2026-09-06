@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"crypto/hmac"
 	"errors"
 	"strconv"
@@ -10,6 +11,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 
 	"github.com/tokenrouter/tokenrouter/common"
+	"github.com/tokenrouter/tokenrouter/model"
 )
 
 // Security-proof tokens are short-lived JWTs bound to a specific dashboard
@@ -29,6 +31,8 @@ const (
 	SecurityProofScopeChannelKeyRead  = "channel.key.read"
 	SecurityProofScopePasskeyRegister = "passkey.register"
 	SecurityProofScopePasskeyDelete   = "passkey.delete"
+	SecurityProofScopeTwoFAReset      = "twofa.reset"
+	SecurityProofScopeBackupCodeReset = "twofa.backup_codes.regenerate"
 )
 
 // SessionIdentity identifies the authenticated dashboard session a proof is
@@ -71,8 +75,24 @@ func IssueSecurityProof(identity SessionIdentity, method string, scopes []string
 		identity.SessionVersion <= 0 || method == "" || len(scopes) == 0 {
 		return "", 0, ErrSecurityProofInvalid
 	}
-	now := time.Now()
+	nowUnix, err := model.PrimaryDatabaseUnixTimestamp(context.Background())
+	if err != nil {
+		return "", 0, err
+	}
+	return issueSecurityProofAt(identity, method, scopes, time.Unix(nowUnix, 0).UTC())
+}
+
+func issueSecurityProofAt(identity SessionIdentity, method string, scopes []string, now time.Time) (string, int64, error) {
+	method = strings.TrimSpace(method)
+	if identity.UserID <= 0 || identity.SessionID == "" || identity.UserAuthVersion <= 0 ||
+		identity.SessionVersion <= 0 || method == "" || len(scopes) == 0 || now.IsZero() {
+		return "", 0, ErrSecurityProofInvalid
+	}
 	expiresAt := now.Add(SecurityProofTTL)
+	proofID, err := common.SecureRandomAlphanumeric(16)
+	if err != nil {
+		return "", 0, err
+	}
 	claims := securityProofClaims{
 		SessionID:       identity.SessionID,
 		UserAuthVersion: identity.UserAuthVersion,
@@ -86,7 +106,7 @@ func IssueSecurityProof(identity SessionIdentity, method string, scopes []string
 			ExpiresAt: jwt.NewNumericDate(expiresAt),
 			NotBefore: jwt.NewNumericDate(now.Add(-5 * time.Second)),
 			IssuedAt:  jwt.NewNumericDate(now),
-			ID:        common.RandomAlphanumeric(16),
+			ID:        proofID,
 		},
 	}
 	signed, err := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString(securityProofSigningKey())
@@ -100,20 +120,56 @@ func IssueSecurityProof(identity SessionIdentity, method string, scopes []string
 // a required scope, and the allowed verification methods. It returns the
 // proof's method on success.
 func VerifySecurityProof(raw string, identity SessionIdentity, requiredScope string, allowedMethods []string) (string, error) {
+	claims, err := parseSignedSecurityProof(raw)
+	if err != nil {
+		return "", ErrSecurityProofInvalid
+	}
+	nowUnix, err := model.PrimaryDatabaseUnixTimestamp(context.Background())
+	if err != nil {
+		return "", err
+	}
+	return verifySecurityProofClaimsAt(claims, identity, requiredScope, allowedMethods, time.Unix(nowUnix, 0).UTC())
+}
+
+func verifySecurityProofAt(raw string, identity SessionIdentity, requiredScope string, allowedMethods []string, now time.Time) (string, error) {
+	claims, err := parseSignedSecurityProof(raw)
+	if err != nil {
+		return "", ErrSecurityProofInvalid
+	}
+	return verifySecurityProofClaimsAt(claims, identity, requiredScope, allowedMethods, now)
+}
+
+func parseSignedSecurityProof(raw string) (*securityProofClaims, error) {
 	claims := &securityProofClaims{}
 	token, err := jwt.ParseWithClaims(raw, claims, func(t *jwt.Token) (any, error) {
-		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+		if t.Method != jwt.SigningMethodHS256 {
 			return nil, ErrSecurityProofInvalid
 		}
 		return securityProofSigningKey(), nil
-	})
+	}, jwt.WithoutClaimsValidation(), jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Alg()}))
 	if err != nil {
+		return nil, err
+	}
+	if !token.Valid || claims.SessionID == "" {
+		return nil, ErrSecurityProofInvalid
+	}
+	return claims, nil
+}
+
+func verifySecurityProofClaimsAt(claims *securityProofClaims, identity SessionIdentity, requiredScope string, allowedMethods []string, now time.Time) (string, error) {
+	if claims == nil || now.IsZero() {
+		return "", ErrSecurityProofInvalid
+	}
+	validator := jwt.NewValidator(
+		jwt.WithIssuer("tokenrouter"),
+		jwt.WithAudience("tokenrouter-security-proof"),
+		jwt.WithExpirationRequired(),
+		jwt.WithTimeFunc(func() time.Time { return now }),
+	)
+	if err := validator.Validate(claims); err != nil {
 		if errors.Is(err, jwt.ErrTokenExpired) {
 			return "", ErrSecurityProofExpired
 		}
-		return "", ErrSecurityProofInvalid
-	}
-	if !token.Valid || claims.SessionID == "" {
 		return "", ErrSecurityProofInvalid
 	}
 	userID, err := strconv.Atoi(claims.Subject)

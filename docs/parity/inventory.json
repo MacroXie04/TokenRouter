@@ -1610,17 +1610,82 @@
       {
         "name": "GET /:mode/mj/image/:id",
         "detail": "RouteTag('relay') + SystemPerformanceCheck: relay.RelayMidjourneyImage (mode-prefixed MJ)",
-        "evidence": "router/relay-router.go:178-181"
+        "evidence": "router/relay-router.go:178-181,209"
       },
       {
-        "name": "POST /:mode/mj/submit/*",
-        "detail": "RouteTag('relay') + SystemPerformanceCheck + TokenAuth + Distribute: controller.RelayMidjourney (mode-prefixed submit routes, all actions)",
-        "evidence": "router/relay-router.go:178-181"
+        "name": "POST /:mode/mj/submit/action",
+        "detail": "RouteTag('relay') + SystemPerformanceCheck + TokenAuth + Distribute: controller.RelayMidjourney",
+        "evidence": "router/relay-router.go:178-181,212"
+      },
+      {
+        "name": "POST /:mode/mj/submit/shorten",
+        "detail": "RouteTag('relay') + SystemPerformanceCheck + TokenAuth + Distribute: controller.RelayMidjourney",
+        "evidence": "router/relay-router.go:178-181,213"
+      },
+      {
+        "name": "POST /:mode/mj/submit/modal",
+        "detail": "RouteTag('relay') + SystemPerformanceCheck + TokenAuth + Distribute: controller.RelayMidjourney",
+        "evidence": "router/relay-router.go:178-181,214"
+      },
+      {
+        "name": "POST /:mode/mj/submit/imagine",
+        "detail": "RouteTag('relay') + SystemPerformanceCheck + TokenAuth + Distribute: controller.RelayMidjourney",
+        "evidence": "router/relay-router.go:178-181,215"
+      },
+      {
+        "name": "POST /:mode/mj/submit/change",
+        "detail": "RouteTag('relay') + SystemPerformanceCheck + TokenAuth + Distribute: controller.RelayMidjourney",
+        "evidence": "router/relay-router.go:178-181,216"
+      },
+      {
+        "name": "POST /:mode/mj/submit/simple-change",
+        "detail": "RouteTag('relay') + SystemPerformanceCheck + TokenAuth + Distribute: controller.RelayMidjourney",
+        "evidence": "router/relay-router.go:178-181,217"
+      },
+      {
+        "name": "POST /:mode/mj/submit/describe",
+        "detail": "RouteTag('relay') + SystemPerformanceCheck + TokenAuth + Distribute: controller.RelayMidjourney",
+        "evidence": "router/relay-router.go:178-181,218"
+      },
+      {
+        "name": "POST /:mode/mj/submit/blend",
+        "detail": "RouteTag('relay') + SystemPerformanceCheck + TokenAuth + Distribute: controller.RelayMidjourney",
+        "evidence": "router/relay-router.go:178-181,219"
+      },
+      {
+        "name": "POST /:mode/mj/submit/edits",
+        "detail": "RouteTag('relay') + SystemPerformanceCheck + TokenAuth + Distribute: controller.RelayMidjourney",
+        "evidence": "router/relay-router.go:178-181,220"
+      },
+      {
+        "name": "POST /:mode/mj/submit/video",
+        "detail": "RouteTag('relay') + SystemPerformanceCheck + TokenAuth + Distribute: controller.RelayMidjourney",
+        "evidence": "router/relay-router.go:178-181,221"
       },
       {
         "name": "GET /:mode/mj/task/:id/fetch",
         "detail": "RouteTag('relay') + SystemPerformanceCheck + TokenAuth + Distribute: controller.RelayMidjourney",
-        "evidence": "router/relay-router.go:178-181"
+        "evidence": "router/relay-router.go:178-181,223"
+      },
+      {
+        "name": "GET /:mode/mj/task/:id/image-seed",
+        "detail": "RouteTag('relay') + SystemPerformanceCheck + TokenAuth + Distribute: controller.RelayMidjourney",
+        "evidence": "router/relay-router.go:178-181,224"
+      },
+      {
+        "name": "POST /:mode/mj/task/list-by-condition",
+        "detail": "RouteTag('relay') + SystemPerformanceCheck + TokenAuth + Distribute: controller.RelayMidjourney",
+        "evidence": "router/relay-router.go:178-181,225"
+      },
+      {
+        "name": "POST /:mode/mj/insight-face/swap",
+        "detail": "RouteTag('relay') + SystemPerformanceCheck + TokenAuth + Distribute: controller.RelayMidjourney",
+        "evidence": "router/relay-router.go:178-181,226"
+      },
+      {
+        "name": "POST /:mode/mj/submit/upload-discord-images",
+        "detail": "RouteTag('relay') + SystemPerformanceCheck + TokenAuth + Distribute: controller.RelayMidjourney",
+        "evidence": "router/relay-router.go:178-181,227"
       },
       {
         "name": "POST /suno/submit/:action",
@@ -1869,8 +1934,8 @@
       },
       {
         "name": "AuthFlow (auth_flows)",
-        "detail": "One-time short-lived auth ceremony state (OAuth/2FA/passkey/telegram). Fields: Id int64 primaryKey, TokenHash char(64) not null uniqueIndex (HMAC, never persists raw token), Purpose varchar(32) not null (idx_auth_flow_purpose_expiry), Provider varchar(64), Intent varchar(16), UserId (index), SessionId varchar(64) index, Payload text, CreatedAt time.Time, ExpiresAt time.Time not null (idx_auth_flow_purpose_expiry), ConsumedAt *time.Time index. Explicit TableName 'auth_flows'.",
-        "evidence": "model/auth_flow.go:39"
+        "detail": "One-time short-lived auth ceremony state (OAuth/2FA/passkey/telegram). Fields: Id int64 primaryKey, TokenHash char(64) not null uniqueIndex (HMAC, never persists raw token), Purpose varchar(32) not null (idx_auth_flow_purpose_expiry), Provider varchar(64), Intent varchar(128) (widened from varchar(16) so bounded 30-byte passkey backup-code scopes persist on MySQL/PostgreSQL), UserId (index), SessionId varchar(64) index, Payload text, CreatedAt time.Time, ExpiresAt time.Time not null (idx_auth_flow_purpose_expiry), ConsumedAt *time.Time index. Explicit TableName 'auth_flows'.",
+        "evidence": "model/user.go:119"
       },
       {
         "name": "ExternalIdentityClaim (external_identity_claims)",

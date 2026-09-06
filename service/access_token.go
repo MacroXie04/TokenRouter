@@ -1,12 +1,12 @@
 package service
 
 import (
-	crand "crypto/rand"
 	"encoding/base64"
 	"errors"
 
 	"gorm.io/gorm"
 
+	"github.com/tokenrouter/tokenrouter/common"
 	"github.com/tokenrouter/tokenrouter/model"
 )
 
@@ -18,9 +18,13 @@ func GenerateUserAccessToken(userId int) (string, error) {
 		return "", errors.New("id 为空！")
 	}
 	for i := 0; i < 3; i++ {
-		length := 29 + randomInt4()
-		buf := make([]byte, length*3/4)
-		if _, err := crand.Read(buf); err != nil {
+		lengthOffset, err := randomInt4()
+		if err != nil {
+			return "", err
+		}
+		length := 29 + lengthOffset
+		buf, err := common.SecureRandomBytes(length * 3 / 4)
+		if err != nil {
 			return "", err
 		}
 		key := base64.StdEncoding.EncodeToString(buf)
@@ -55,11 +59,12 @@ func UserByAccessToken(token string) (*model.User, error) {
 	return &user, nil
 }
 
-// randomInt4 returns a random integer in [0, 4).
-func randomInt4() int {
-	var b [1]byte
-	if _, err := crand.Read(b[:]); err != nil {
-		return 0
+// randomInt4 returns a random integer in [0, 4). Four divides 256, so this
+// single-byte mapping is uniform.
+func randomInt4() (int, error) {
+	b, err := common.SecureRandomBytes(1)
+	if err != nil {
+		return 0, err
 	}
-	return int(b[0] % 4)
+	return int(b[0] % 4), nil
 }

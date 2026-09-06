@@ -132,6 +132,17 @@ func TestPermissionEnforcementOnChannelRoutes(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	assert.Equal(t, true, decodeBody(t, rec)["success"])
 
+	// Exact credential search is a sensitive operation. A baseline channel
+	// reader gets no match, while the root's sensitive-write grant retains the
+	// operator compatibility workflow. Neither response includes the key.
+	rec = admin.do(http.MethodGet, "/api/channel/search?keyword=sk-secret-perm-tagged", "")
+	items, _ := searchItems(t, rec)
+	assert.Empty(t, items)
+	rec = root.do(http.MethodGet, "/api/channel/search?keyword=sk-secret-perm-tagged", "")
+	items, _ = searchItems(t, rec)
+	require.Len(t, items, 1)
+	assert.NotContains(t, rec.Body.String(), "sk-secret-perm-tagged")
+
 	// Sensitive routes are denied with the reference forbidden shape.
 	rec = admin.do(http.MethodPost, "/api/channel", `{"name":"ch","type":1,"key":"sk-x","models":"gpt-4o"}`)
 	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
@@ -140,7 +151,7 @@ func TestPermissionEnforcementOnChannelRoutes(t *testing.T) {
 	rec = admin.do(http.MethodDelete, "/api/channel/disabled", "")
 	assert.Equal(t, http.StatusForbidden, rec.Code)
 
-	rec = admin.do(http.MethodDelete, "/api/channel/batch", `{"ids":[1]}`)
+	rec = admin.do(http.MethodPost, "/api/channel/batch", `{"ids":[1]}`)
 	assert.Equal(t, http.StatusForbidden, rec.Code)
 
 	// Write-baseline routes are allowed (tag edit without overrides).
@@ -166,7 +177,7 @@ func TestPermissionEnforcementOnChannelRoutes(t *testing.T) {
 	rec = root.do(http.MethodPost, "/api/channel", `{"name":"ch2","type":1,"key":"sk-y","models":"gpt-4o"}`)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	assert.Equal(t, true, decodeBody(t, rec)["success"])
-	rec = root.do(http.MethodDelete, "/api/channel/batch", `{"ids":[1]}`)
+	rec = root.do(http.MethodPost, "/api/channel/batch", `{"ids":[1]}`)
 	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 }
 
@@ -183,6 +194,14 @@ func TestPermissionUpdateChannelSensitiveGuard(t *testing.T) {
 	require.NoError(t, model.DB.First(&refreshed, ch.Id).Error)
 	assert.Equal(t, "renamed", refreshed.Name)
 	assert.Equal(t, "http://up1", refreshed.BaseURL, "untouched fields must survive")
+
+	// The dashboard sends an empty value for its masked key field. It is an
+	// unchanged sentinel, not permission to clear the stored credential.
+	rec = admin.do(http.MethodPut, "/api/channel", fmt.Sprintf(`{"id":%d,"name":"renamed-again","key":""}`, ch.Id))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.NoError(t, model.DB.First(&refreshed, ch.Id).Error)
+	assert.Equal(t, "renamed-again", refreshed.Name)
+	assert.Equal(t, "sk-orig", refreshed.Key)
 
 	// A sensitive field change is denied for a baseline admin.
 	rec = admin.do(http.MethodPut, "/api/channel", fmt.Sprintf(`{"id":%d,"base_url":"http://up2"}`, ch.Id))
@@ -203,6 +222,35 @@ func TestPermissionUpdateChannelSensitiveGuard(t *testing.T) {
 	// Missing id is rejected.
 	rec = root.do(http.MethodPut, "/api/channel", `{"name":"x"}`)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+func TestAbilityRoutesHonorChannelPermissions(t *testing.T) {
+	root, admin, _ := setupPermissionTest(t)
+
+	// Ability records are the channel routing table, so reads and mutations
+	// must follow the same fine-grained channel grants as the channel surface.
+	rec := root.do(http.MethodPost, "/api/ability",
+		`{"group":"default","model":"gpt-4o","channel_id":1}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	rec = root.do(http.MethodPut, "/api/user",
+		fmt.Sprintf(`{"id":%d,"admin_permissions":{"channel":{"write":false}}}`, admin.userID))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, true, decodeBody(t, rec)["success"])
+
+	rec = admin.do(http.MethodGet, "/api/ability", "")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	rec = admin.do(http.MethodPost, "/api/ability",
+		`{"group":"default","model":"gpt-4o-mini","channel_id":1}`)
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assert.Equal(t, "无权限", decodeBody(t, rec)["message"])
+	rec = admin.do(http.MethodDelete, "/api/ability",
+		`{"group":"default","model":"gpt-4o","channel_id":1}`)
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+
+	rec = root.do(http.MethodDelete, "/api/ability",
+		`{"group":"default","model":"gpt-4o","channel_id":1}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 }
 
 func TestPermissionOverridesViaUpdateUser(t *testing.T) {

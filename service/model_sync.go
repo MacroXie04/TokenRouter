@@ -3,11 +3,14 @@ package service
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -21,7 +24,17 @@ import (
 	"github.com/tokenrouter/tokenrouter/model"
 )
 
-const defaultModelSyncBase = "https://basellm.github.io/llm-metadata"
+const (
+	defaultModelSyncBase = "https://basellm.github.io/llm-metadata"
+
+	defaultModelSyncRetries              = 3
+	maxModelSyncRetries                  = 8
+	defaultModelSyncTimeoutSeconds       = 10
+	maxModelSyncTimeoutSeconds           = 60
+	defaultModelSyncMaxBytes       int64 = 10 << 20
+	maxModelSyncMaxBytes           int64 = 16 << 20
+	modelSyncHeaderLimit                 = 64 << 10
+)
 
 type ModelSyncOverwrite struct {
 	ModelName string   `json:"model_name"`
@@ -246,12 +259,21 @@ func createMissingModelFromUpstream(ctx context.Context, upstream upstreamModelM
 		if err := ValidateModelMetadata(&metadata, false); err != nil {
 			return err
 		}
+		status, syncOfficial := metadata.Status, metadata.SyncOfficial
 		result := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&metadata)
 		if result.Error != nil {
 			return result.Error
 		}
 		if result.RowsAffected == 0 {
 			return model.ErrModelNameExists
+		}
+		// Reference-compatible schema defaults make raw inserts enabled and
+		// official. An upstream sync can explicitly supply zero for both fields,
+		// so restore those values before this transaction becomes visible.
+		if err := tx.Model(&model.Model{}).Where("id = ?", metadata.Id).Updates(map[string]any{
+			"status": status, "sync_official": syncOfficial,
+		}).Error; err != nil {
+			return err
 		}
 		return nil
 	})
@@ -347,6 +369,7 @@ func ensureSyncVendor(tx *gorm.DB, name string, upstream upstreamVendorMetadata)
 	if len(vendor.Description) > 1<<20 || utf8.RuneCountInString(vendor.Icon) > 128 {
 		return 0, false, errors.New("供应商元数据无效")
 	}
+	intendedStatus := vendor.Status
 	result := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&vendor)
 	if result.Error != nil {
 		return 0, false, result.Error
@@ -356,6 +379,10 @@ func ensureSyncVendor(tx *gorm.DB, name string, upstream upstreamVendorMetadata)
 			return 0, false, err
 		}
 		return vendor.Id, false, nil
+	}
+	if err := tx.Model(&model.Vendor{}).Where("id = ?", vendor.Id).
+		Update("status", intendedStatus).Error; err != nil {
+		return 0, false, err
 	}
 	return vendor.Id, true, nil
 }
@@ -512,24 +539,11 @@ func fetchModelSyncJSON[T any](ctx context.Context, url string) ([]T, error) {
 }
 
 func fetchModelSyncBody(ctx context.Context, url string) ([]byte, error) {
-	retries := common.GetEnvInt("SYNC_HTTP_RETRY_COUNT", 3)
-	if retries < 1 {
-		retries = 1
+	if err := validateModelSyncURL(url); err != nil {
+		return nil, err
 	}
-	timeout := time.Duration(common.GetEnvInt("SYNC_HTTP_TIMEOUT_SECONDS", 10)) * time.Second
-	maxBytes := int64(common.GetEnvInt("SYNC_HTTP_MAX_BYTES", 10<<20))
-	if maxBytes < 1024 {
-		maxBytes = 1024
-	}
-	client := &http.Client{
-		Timeout: timeout,
-		Transport: &http.Transport{
-			DialContext:           common.SafeDialContext,
-			ResponseHeaderTimeout: timeout,
-			TLSHandshakeTimeout:   timeout,
-			IdleConnTimeout:       90 * time.Second,
-		},
-	}
+	retries, timeout, maxBytes := modelSyncHTTPPolicy()
+	client := newModelSyncHTTPClient(timeout)
 
 	var lastErr error
 	for attempt := 0; attempt < retries; attempt++ {
@@ -583,6 +597,82 @@ func fetchModelSyncBody(ctx context.Context, url string) ([]byte, error) {
 		}
 	}
 	return nil, lastErr
+}
+
+func modelSyncHTTPPolicy() (int, time.Duration, int64) {
+	retries := common.GetEnvInt("SYNC_HTTP_RETRY", defaultModelSyncRetries)
+	if strings.TrimSpace(os.Getenv("SYNC_HTTP_RETRY")) == "" {
+		// Keep the earlier TokenRouter alias working while giving the reference
+		// variable deterministic precedence when both are present.
+		retries = common.GetEnvInt("SYNC_HTTP_RETRY_COUNT", defaultModelSyncRetries)
+	}
+	if retries < 1 {
+		retries = 1
+	} else if retries > maxModelSyncRetries {
+		retries = maxModelSyncRetries
+	}
+
+	timeoutSeconds := common.GetEnvInt("SYNC_HTTP_TIMEOUT_SECONDS", defaultModelSyncTimeoutSeconds)
+	if timeoutSeconds < 1 {
+		timeoutSeconds = 1
+	} else if timeoutSeconds > maxModelSyncTimeoutSeconds {
+		timeoutSeconds = maxModelSyncTimeoutSeconds
+	}
+
+	maxBytes := defaultModelSyncMaxBytes
+	if strings.TrimSpace(os.Getenv("SYNC_HTTP_MAX_MB")) != "" {
+		maxMB := common.GetEnvInt("SYNC_HTTP_MAX_MB", int(defaultModelSyncMaxBytes>>20))
+		if maxMB < 1 {
+			maxMB = 1
+		} else if int64(maxMB) > maxModelSyncMaxBytes>>20 {
+			maxMB = int(maxModelSyncMaxBytes >> 20)
+		}
+		maxBytes = int64(maxMB) << 20
+	} else {
+		// Compatibility with the byte-valued alias used by earlier target builds.
+		configured := int64(common.GetEnvInt("SYNC_HTTP_MAX_BYTES", int(defaultModelSyncMaxBytes)))
+		if configured < 1024 {
+			configured = 1024
+		} else if configured > maxModelSyncMaxBytes {
+			configured = maxModelSyncMaxBytes
+		}
+		maxBytes = configured
+	}
+	return retries, time.Duration(timeoutSeconds) * time.Second, maxBytes
+}
+
+func newModelSyncHTTPClient(timeout time.Duration) *http.Client {
+	return &http.Client{
+		Timeout: timeout,
+		Transport: &http.Transport{
+			Proxy:                  nil,
+			DialContext:            common.SafeDialContext,
+			ForceAttemptHTTP2:      true,
+			MaxIdleConns:           20,
+			MaxIdleConnsPerHost:    4,
+			ResponseHeaderTimeout:  timeout,
+			TLSHandshakeTimeout:    timeout,
+			IdleConnTimeout:        90 * time.Second,
+			MaxResponseHeaderBytes: modelSyncHeaderLimit,
+			ExpectContinueTimeout:  time.Second,
+			TLSClientConfig:        &tls.Config{MinVersion: tls.VersionTLS12},
+		},
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+}
+
+func validateModelSyncURL(raw string) error {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("invalid model-sync URL: %w", err)
+	}
+	if (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" ||
+		parsed.User != nil || parsed.Opaque != "" || parsed.Fragment != "" {
+		return errors.New("invalid model-sync URL")
+	}
+	return nil
 }
 
 func readBoundedModelSyncBody(reader io.Reader, maxBytes int64) ([]byte, error) {

@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
@@ -91,7 +92,7 @@ func SearchUsers(c *gin.Context) {
 	}
 	page := getPageQuery(c)
 	users, total, err := service.SearchUsers(keyword, group, role, status,
-		(page.Page-1)*page.PageSize, page.PageSize, c.Query("sort_by"), c.Query("sort_order"))
+		page.Offset(), page.PageSize, c.Query("sort_by"), c.Query("sort_order"))
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, dto.Fail("搜索用户失败"))
 		return
@@ -207,8 +208,11 @@ func ManageUser(c *gin.Context) {
 			service.RecordSystemLog(common.GetUserId(c), service.LogTypeManage,
 				"user.quota_subtract id="+common.Int2Str(target.Id)+" quota="+common.Int2Str(req.Value))
 		case "override":
-			if err := model.DB.Model(&model.User{}).Where("id = ?", target.Id).
-				Update("quota", req.Value).Error; err != nil {
+			if req.Value < 0 || int64(req.Value) > common.MaxQuota {
+				c.JSON(http.StatusBadRequest, dto.Fail("配额值超出允许范围"))
+				return
+			}
+			if err := service.SetUserQuota(target.Id, req.Value); err != nil {
 				c.JSON(http.StatusInternalServerError, dto.Fail("配额变更失败"))
 				return
 			}
@@ -234,4 +238,65 @@ func ManageUser(c *gin.Context) {
 		"user.manage action="+req.Action+" username="+target.Username+" id="+common.Int2Str(target.Id))
 	c.JSON(http.StatusOK, gin.H{"success": true, "message": "",
 		"data": gin.H{"role": target.Role, "status": target.Status}})
+}
+
+// AdminClearUserBinding clears one built-in identity binding for a strictly
+// lower-role user (DELETE /api/user/:id/bindings/:binding_type).
+func AdminClearUserBinding(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil || id <= 0 {
+		c.JSON(http.StatusBadRequest, dto.Fail("无效的用户 ID"))
+		return
+	}
+	bindingType := strings.ToLower(strings.TrimSpace(c.Param("binding_type")))
+	if bindingType == "" {
+		c.JSON(http.StatusBadRequest, dto.Fail("无效的绑定类型"))
+		return
+	}
+	target, err := service.GetUserByID(id)
+	if err != nil {
+		c.JSON(http.StatusNotFound, dto.Fail("用户不存在"))
+		return
+	}
+	if !canManageTargetRole(common.GetRole(c), target.Role) {
+		c.JSON(http.StatusForbidden, dto.Fail("无权操作同级或更高级用户"))
+		return
+	}
+	if err := service.ClearUserIdentityBinding(id, bindingType); err != nil {
+		if errors.Is(err, service.ErrInvalidIdentityBindingType) {
+			c.JSON(http.StatusBadRequest, dto.Fail("无效的绑定类型"))
+			return
+		}
+		c.JSON(http.StatusInternalServerError, dto.Fail("解除绑定失败"))
+		return
+	}
+	service.RecordSystemLog(common.GetUserId(c), service.LogTypeManage,
+		"user.binding_clear id="+common.Int2Str(id)+" type="+bindingType)
+	c.JSON(http.StatusOK, gin.H{"success": true, "message": "success"})
+}
+
+// AdminDeleteUser exposes the reference DELETE route while preserving
+// TokenRouter's recoverable soft-delete and credential revocation semantics.
+func AdminDeleteUser(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil || id <= 0 {
+		c.JSON(http.StatusBadRequest, dto.Fail("无效的用户 ID"))
+		return
+	}
+	target, err := service.GetUserByID(id)
+	if err != nil {
+		c.JSON(http.StatusNotFound, dto.Fail("用户不存在"))
+		return
+	}
+	if !canManageTargetRole(common.GetRole(c), target.Role) {
+		c.JSON(http.StatusForbidden, dto.Fail("无权操作同级或更高级用户"))
+		return
+	}
+	if err := service.DeleteUser(id); err != nil {
+		c.JSON(http.StatusInternalServerError, dto.Fail("删除用户失败"))
+		return
+	}
+	service.RecordSystemLog(common.GetUserId(c), service.LogTypeManage,
+		"user.delete username="+target.Username+" id="+common.Int2Str(id))
+	c.JSON(http.StatusOK, gin.H{"success": true, "message": ""})
 }

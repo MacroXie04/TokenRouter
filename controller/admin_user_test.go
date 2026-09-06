@@ -137,7 +137,7 @@ func TestAdminManageUser(t *testing.T) {
 	// Demote revokes the target's sessions.
 	require.NoError(t, model.DB.Create(&model.UserSession{
 		SID: "manage-victim-sid", UserID: victim.Id, Version: 1, UserAuthVersion: 1,
-		Status: "active", RefreshHash: "h",
+		Status: "active", RefreshHash: "h", ExpiresAt: common.NowTimestamp() + 3600,
 	}).Error)
 	rec = do(http.MethodPost, "/api/user/manage", `{"id":`+common.Int2Str(victim.Id)+`,"action":"demote"}`)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
@@ -162,11 +162,18 @@ func TestAdminManageUserRoleGuards(t *testing.T) {
 	_, do, rootId, _ := setupAuthAdjacent(t, constant.RoleRootUser)
 	rec := do(http.MethodPost, "/api/user/manage", `{"id":`+common.Int2Str(rootId)+`,"action":"disable"}`)
 	assert.Equal(t, http.StatusForbidden, rec.Code)
-	assert.Contains(t, rec.Body.String(), "Root 用户")
+	assert.Contains(t, rec.Body.String(), "无权操作同级或更高级用户")
 	rec = do(http.MethodPost, "/api/user/manage", `{"id":`+common.Int2Str(rootId)+`,"action":"delete"}`)
 	assert.Equal(t, http.StatusForbidden, rec.Code)
 	rec = do(http.MethodPost, "/api/user/manage", `{"id":`+common.Int2Str(rootId)+`,"action":"demote"}`)
 	assert.Equal(t, http.StatusForbidden, rec.Code)
+	var rootBefore model.User
+	require.NoError(t, model.DB.First(&rootBefore, rootId).Error)
+	rec = do(http.MethodPost, "/api/user/manage", `{"id":`+common.Int2Str(rootId)+`,"action":"add_quota","mode":"add","value":1}`)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	var rootAfter model.User
+	require.NoError(t, model.DB.First(&rootAfter, rootId).Error)
+	assert.Equal(t, rootBefore.Quota, rootAfter.Quota, "root-on-root quota mutation must be rejected")
 
 	// A plain admin cannot manage a peer admin or promote anyone.
 	_, doAdmin, _, _ := setupAuthAdjacent(t, constant.RoleAdminUser)
@@ -185,12 +192,74 @@ func TestAdminManageUserRoleGuards(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 }
 
+func TestAdminUpdateUserProfileResetsPasswordAndRevokesSessionsAtomically(t *testing.T) {
+	root, _, _ := setupPermissionTest(t)
+	target := createManagedUser(t, "editable-user", constant.RoleCommonUser, model.UserStatusEnabled, "default")
+	oldHash, err := common.PasswordHash("old-password")
+	require.NoError(t, err)
+	require.NoError(t, model.DB.Model(&model.User{}).Where("id = ?", target.Id).Updates(map[string]any{
+		"password": oldHash,
+		"remark":   "clear me",
+	}).Error)
+	require.NoError(t, model.DB.Create(&model.UserSession{
+		SID: "admin-edit-session", UserID: target.Id, Version: 1, UserAuthVersion: 1,
+		Status: service.SessionStatusActive, RefreshHash: "admin-edit-refresh", ExpiresAt: common.NowTimestamp() + 3600,
+	}).Error)
+
+	body := `{"id":` + common.Int2Str(target.Id) + `,"display_name":"  Fresh Name  ","group":"vip","remark":"","password":"replacement8"}`
+	rec := root.do(http.MethodPut, "/api/user/", body)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, true, decodeBody(t, rec)["success"])
+	assert.NotContains(t, rec.Body.String(), "replacement8")
+
+	var updated model.User
+	require.NoError(t, model.DB.First(&updated, target.Id).Error)
+	assert.Equal(t, "Fresh Name", updated.DisplayName)
+	assert.Equal(t, "vip", updated.Group)
+	assert.Empty(t, updated.Remark)
+	assert.Equal(t, int64(2), updated.AuthVersion)
+	assert.True(t, common.PasswordVerify("replacement8", updated.Password))
+	assert.False(t, common.PasswordVerify("old-password", updated.Password))
+
+	var session model.UserSession
+	require.NoError(t, model.DB.Where("sid = ?", "admin-edit-session").First(&session).Error)
+	assert.Equal(t, service.SessionStatusRevoked, session.Status)
+	assert.Equal(t, "admin_user_update", session.RevokedReason)
+	assert.NotZero(t, session.RevokedAt)
+
+	var audit model.Log
+	require.NoError(t, model.LOG_DB.Where("user_id = ? AND type = ?", root.userID, service.LogTypeManage).
+		Order("id desc").First(&audit).Error)
+	assert.Contains(t, audit.Content, "user.update")
+	assert.Contains(t, audit.Content, "password_reset=true")
+	assert.NotContains(t, audit.Content, "replacement8")
+}
+
+func TestAdminUpdateUserRejectsInvalidPasswordWithoutMutation(t *testing.T) {
+	root, _, _ := setupPermissionTest(t)
+	target := createManagedUser(t, "invalid-edit-user", constant.RoleCommonUser, model.UserStatusEnabled, "default")
+	before := target
+	rec := root.do(http.MethodPut, "/api/user/", `{"id":`+common.Int2Str(target.Id)+`,"display_name":"Changed","password":"short"}`)
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	assert.Equal(t, false, decodeBody(t, rec)["success"])
+	var after model.User
+	require.NoError(t, model.DB.First(&after, target.Id).Error)
+	assert.Equal(t, before.DisplayName, after.DisplayName)
+	assert.Equal(t, before.Password, after.Password)
+	assert.Equal(t, before.AuthVersion, after.AuthVersion)
+}
+
 func TestAdminCreateUserContract(t *testing.T) {
 	root, _, _ := setupPermissionTest(t)
 	do, rootID := root.do, root.userID
-	previousInitialQuota := setting.GetOptionOrDefault(setting.InitialQuotaOption, "500000")
-	t.Cleanup(func() { _ = setting.UpdateOption(setting.InitialQuotaOption, previousInitialQuota) })
-	require.NoError(t, setting.UpdateOption(setting.InitialQuotaOption, "1234"))
+	t.Setenv(service.GenerateDefaultTokenEnvironment, "true")
+	require.NoError(t, setting.Init())
+	require.NoError(t, setting.UpdateOptions(map[string]string{
+		setting.InitialQuotaOption:        "1234",
+		setting.QuotaForNewUserOption:     "2345",
+		setting.DefaultUseAutoGroupOption: "true",
+		setting.DefaultGroupOption:        "admin-default",
+	}))
 
 	rec := do(http.MethodPost, "/api/user/", `{
 		"username":"  created-admin  ","password":"password8","role":10,
@@ -209,14 +278,19 @@ func TestAdminCreateUserContract(t *testing.T) {
 	assert.Equal(t, "created-admin", created.DisplayName)
 	assert.Equal(t, constant.RoleAdminUser, created.Role)
 	assert.Equal(t, model.UserStatusEnabled, created.Status)
-	assert.Equal(t, 1234, created.Quota)
-	assert.Equal(t, service.GroupDefault, created.Group)
+	assert.Equal(t, 2345, created.Quota, "canonical registration quota must win over the legacy fallback")
+	assert.Equal(t, "admin-default", created.Group)
 	assert.Empty(t, created.Email)
 	assert.Empty(t, created.Remark)
 	assert.Len(t, created.AffCode, 4)
 	assert.NotEqual(t, "password8", created.Password)
 	assert.True(t, common.PasswordVerify("password8", created.Password))
 	assert.Equal(t, int64(1), created.AuthVersion)
+	var defaultTokens []model.Token
+	require.NoError(t, model.DB.Where("user_id = ?", created.Id).Find(&defaultTokens).Error)
+	require.Len(t, defaultTokens, 1)
+	assert.Equal(t, service.GroupAuto, defaultTokens[0].Group)
+	assert.True(t, defaultTokens[0].UnlimitedQuota)
 
 	var userSettings map[string]any
 	require.NoError(t, common.UnmarshalJsonStr(created.Setting, &userSettings))
@@ -246,6 +320,8 @@ func TestAdminCreateUserContract(t *testing.T) {
 
 func TestAdminCreateUserValidationAndRoleGuards(t *testing.T) {
 	root, admin, _ := setupPermissionTest(t)
+	t.Setenv(service.GenerateDefaultTokenEnvironment, "true")
+	require.NoError(t, setting.Init())
 	doRoot := root.do
 	for _, body := range []string{
 		`{`,
@@ -277,6 +353,8 @@ func TestAdminCreateUserValidationAndRoleGuards(t *testing.T) {
 	var count int64
 	require.NoError(t, model.DB.Model(&model.User{}).Where("username = ?", "rolled-back").Count(&count).Error)
 	assert.Zero(t, count)
+	require.NoError(t, model.DB.Model(&model.Token{}).Count(&count).Error)
+	assert.Zero(t, count, "the default token must roll back with rejected permission provisioning")
 }
 
 func TestAdminCreateUserRequiresAdmin(t *testing.T) {

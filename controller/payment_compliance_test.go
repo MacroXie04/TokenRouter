@@ -1,6 +1,7 @@
 package controller_test
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -97,12 +98,23 @@ func TestRootOptionSecurityContract(t *testing.T) {
 	require.NoError(t, setting.UpdateOption("VisibleOption", "visible"))
 	require.NoError(t, setting.UpdateOption("StripeSecretKey", "sk_test_never_return"))
 	require.NoError(t, setting.UpdateOption("WeChatServerToken", "secret-token"))
+	require.NoError(t, setting.UpdateOption(setting.GitHubClientSecretOption, "github-option-secret"))
+	require.NoError(t, setting.UpdateOption(setting.DiscordClientSecretOption, "discord-option-secret"))
+	require.NoError(t, setting.UpdateOption(setting.OIDCClientSecretOption, "oidc-option-secret"))
+	require.NoError(t, setting.UpdateOption(setting.LinuxDOClientSecretOption, "linuxdo-option-secret"))
 
 	rec := do(http.MethodGet, "/api/option/", "")
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	assert.Contains(t, rec.Body.String(), "VisibleOption")
 	assert.NotContains(t, rec.Body.String(), "sk_test_never_return")
 	assert.NotContains(t, rec.Body.String(), "secret-token")
+	assert.NotContains(t, rec.Body.String(), "github-option-secret")
+	assert.NotContains(t, rec.Body.String(), "discord-option-secret")
+	assert.NotContains(t, rec.Body.String(), "oidc-option-secret")
+	assert.NotContains(t, rec.Body.String(), "linuxdo-option-secret")
+	assert.Contains(t, rec.Body.String(), `"key":"oidc.client_secret","value":"","redacted":true`)
+	assert.Contains(t, rec.Body.String(), setting.EmailDomainRestrictionEnabledOption)
+	assert.Contains(t, rec.Body.String(), setting.PasskeyUserVerificationOption)
 
 	// Ordinary updates use the reference key/value request and update cache.
 	rec = do(http.MethodPut, "/api/option/", `{"key":"VisibleOption","value":42}`)
@@ -122,6 +134,65 @@ func TestRootOptionSecurityContract(t *testing.T) {
 	rec = do(http.MethodPut, "/api/option/", `{"key":"QuotaForInviter","value":100}`)
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Equal(t, service.ErrPaymentComplianceRequired.Error(), decodeBody(t, rec)["message"])
+}
+
+func TestRootOptionUpdateRejectsUnsafeOrStructuredValues(t *testing.T) {
+	_, do, _ := setupChannelRead(t, constant.RoleRootUser)
+
+	requests := []string{
+		`{"key":"","value":"x"}`,
+		`{"key":"bad key","value":"x"}`,
+		`{"key":"Unsafe","value":{"nested":true}}`,
+		`{"key":"Unsafe","value":["nested"]}`,
+		`{"key":"Unsafe","value":null}`,
+		`{"key":"Unsafe","value":"direction\u202Eoverride"}`,
+	}
+	for _, body := range requests {
+		rec := do(http.MethodPut, "/api/option/", body)
+		assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+		assert.Equal(t, false, decodeBody(t, rec)["success"])
+	}
+
+	oversizedBody, err := json.Marshal(map[string]any{
+		"key":   "OversizedOption",
+		"value": strings.Repeat("x", (1<<20)+1),
+	})
+	require.NoError(t, err)
+	rec := do(http.MethodPut, "/api/option/", string(oversizedBody))
+	assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	assert.Empty(t, setting.GetOption("OversizedOption"))
+
+	// Text settings may still contain localized content and normal formatting.
+	validBody, err := json.Marshal(map[string]any{
+		"key":   "VisibleOption",
+		"value": "第一行\nsecond line",
+	})
+	require.NoError(t, err)
+	rec = do(http.MethodPut, "/api/option/", string(validBody))
+	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, true, decodeBody(t, rec)["success"])
+	assert.Equal(t, "第一行\nsecond line", setting.GetOption("VisibleOption"))
+
+	// JSON integers retain their exact lexical value instead of passing through
+	// a lossy float64 conversion.
+	rec = do(http.MethodPut, "/api/option/", `{"key":"VisibleOption","value":9007199254740993}`)
+	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, "9007199254740993", setting.GetOption("VisibleOption"))
+}
+
+func TestRootOptionReadFailsClosedOnUnsafeStoredData(t *testing.T) {
+	_, do, _ := setupChannelRead(t, constant.RoleRootUser)
+	const key = "UnsafeStoredOption"
+	require.NoError(t, setting.UpdateOption(key, "unsafe\x00value"))
+	t.Cleanup(func() {
+		_ = model.DB.Delete(&model.Option{}, "key = ?", key).Error
+		_ = setting.Sync()
+	})
+
+	rec := do(http.MethodGet, "/api/option/", "")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, false, decodeBody(t, rec)["success"])
+	assert.NotContains(t, rec.Body.String(), "unsafe")
 }
 
 func TestOptionAndComplianceRoleGuards(t *testing.T) {

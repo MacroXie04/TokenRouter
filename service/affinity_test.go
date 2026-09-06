@@ -1,6 +1,9 @@
 package service
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"math/rand"
 	"net/http"
 	"net/http/httptest"
@@ -203,4 +206,225 @@ func TestChannelAffinityPassHeadersTemplate(t *testing.T) {
 	outbound := httptest.NewRequest(http.MethodPost, "https://upstream.example/v1/responses", nil)
 	ApplyChannelAffinityRequestHeaders(ctx, outbound)
 	assert.Equal(t, "trace-123", outbound.Header.Get("X-Trace-ID"))
+}
+
+func TestChannelAffinityPassHeadersCannotOverwriteProviderCredentials(t *testing.T) {
+	ctx := affinityContext("header-session")
+	ctx.Request.Header.Set("Authorization", "Bearer user-secret")
+	ctx.Request.Header.Set("X-Api-Key", "user-api-key")
+	ctx.Request.Header.Set("Cookie", "dashboard_session=user-secret")
+	ctx.Request.Header.Set("X-Auth", "user-auth-secret")
+	ctx.Request.Header.Set("X-Token", "user-token-secret")
+	ctx.Request.Header.Set("X-Signature", "user-signature-secret")
+	ctx.Request.Header.Set("X-Upstream-Key", "attacker-controlled")
+	ctx.Request.Header.Set("X-Trace-ID", "trace-123")
+	ctx.Set(affinityContextMetaKey, channelAffinityMeta{ParamTemplate: map[string]any{
+		"operations": []any{map[string]any{
+			"mode":  "pass_headers",
+			"value": []any{"Authorization", "X-Api-Key", "Cookie", "X-Auth", "X-Token", "X-Signature", "X-Upstream-Key", "X-Trace-ID"},
+		}},
+	}})
+
+	outbound := httptest.NewRequest(http.MethodPost, "https://upstream.example/v1/responses", nil)
+	outbound.Header.Set("Authorization", "Bearer provider-secret")
+	outbound.Header.Set("X-Api-Key", "provider-api-key")
+	outbound.Header.Set("X-Upstream-Key", "provider-custom-secret")
+	ApplyChannelAffinityRequestHeaders(ctx, outbound)
+
+	assert.Equal(t, "Bearer provider-secret", outbound.Header.Get("Authorization"))
+	assert.Equal(t, "provider-api-key", outbound.Header.Get("X-Api-Key"))
+	assert.Empty(t, outbound.Header.Get("Cookie"))
+	assert.Empty(t, outbound.Header.Get("X-Auth"))
+	assert.Empty(t, outbound.Header.Get("X-Token"))
+	assert.Empty(t, outbound.Header.Get("X-Signature"))
+	assert.Equal(t, "provider-custom-secret", outbound.Header.Get("X-Upstream-Key"))
+	assert.Equal(t, "trace-123", outbound.Header.Get("X-Trace-ID"))
+}
+
+func TestBoundedTTLCacheUnchangedConfigureIsConstantWorkAndZeroDisables(t *testing.T) {
+	cache := newBoundedTTLCache[int](2)
+	cache.set("expired", 1, time.Hour)
+	cache.mu.Lock()
+	cache.items["expired"].Value.(*ttlCacheItem[int]).expiresAt = time.Now().Add(-time.Second)
+	cache.mu.Unlock()
+
+	cache.configure(2)
+	cache.mu.Lock()
+	assert.Len(t, cache.items, 1, "unchanged configure must not sweep the cache")
+	cache.mu.Unlock()
+	assert.Empty(t, cache.snapshot(), "explicit admin snapshots still sweep expiry")
+
+	cache.set("present", 2, time.Hour)
+	cache.configure(0)
+	cache.mu.Lock()
+	assert.Empty(t, cache.items, "capacity zero clears existing in-memory state")
+	cache.mu.Unlock()
+	cache.set("ignored", 3, time.Hour)
+	_, found := cache.get("ignored")
+	assert.False(t, found, "capacity zero rejects both writes and hits")
+}
+
+func TestChannelAffinityExplicitZeroDisablesChannelAndUsageStorage(t *testing.T) {
+	initTestDB(t)
+	previousRedisEnabled := common.RedisEnabled
+	common.RedisEnabled = false
+	t.Cleanup(func() { common.RedisEnabled = previousRedisEnabled })
+	configureAffinityTest(t, 0, []setting.ChannelAffinityRule{affinityHeaderRule("disabled-storage")})
+
+	ctx := affinityContext("zero-capacity-session")
+	_, found := GetPreferredChannelByAffinity(ctx, "model-a", "default", nil)
+	assert.False(t, found)
+	RecordChannelAffinity(ctx, 11, 11)
+	ObserveChannelAffinityUsage(ctx, &protocolkit.Usage{PromptTokens: 1, TotalTokens: 1}, constant.RelayFormatOpenAI)
+
+	stats := GetChannelAffinityCacheStats()
+	assert.False(t, stats.Enabled)
+	assert.True(t, stats.Complete)
+	assert.False(t, stats.Overflow)
+	assert.Zero(t, stats.Total)
+	assert.Empty(t, stats.ErrorCode)
+	meta, ok := getAffinityMeta(ctx)
+	require.True(t, ok)
+	assert.Zero(t, GetChannelAffinityUsageCacheStats("disabled-storage", "default", meta.KeyFingerprint).Total)
+}
+
+func TestWalkAffinityRedisEntriesPagesAndDeletesWithoutSkipping(t *testing.T) {
+	type stored struct {
+		member string
+		value  any
+	}
+	items := make([]stored, 600)
+	for i := range items {
+		entry := affinityCacheEntry{ChannelID: i + 1, RuleName: "keep"}
+		if i%3 == 0 {
+			entry.RuleName = "drop"
+		}
+		encoded, err := common.Marshal(entry)
+		require.NoError(t, err)
+		items[i] = stored{member: fmt.Sprintf("%064x", i+1), value: string(encoded)}
+	}
+	items[377].value = `{"channel_id":1,"channel_id":2,"rule_name":"keep"}`
+
+	fetchCalls := 0
+	largestFetch := 0
+	fetch := func(_ context.Context, start, stop int64) ([]string, []any, error) {
+		fetchCalls++
+		requested := int(stop - start + 1)
+		if requested > largestFetch {
+			largestFetch = requested
+		}
+		if start >= int64(len(items)) {
+			return nil, nil, nil
+		}
+		end := int(stop) + 1
+		if end > len(items) {
+			end = len(items)
+		}
+		page := items[int(start):end]
+		members := make([]string, len(page))
+		values := make([]any, len(page))
+		for i := range page {
+			members[i], values[i] = page[i].member, page[i].value
+		}
+		return members, values, nil
+	}
+	deleteChunks := make([]int, 0)
+	remove := func(_ context.Context, members []string) error {
+		deleteChunks = append(deleteChunks, len(members))
+		selected := make(map[string]struct{}, len(members))
+		for _, member := range members {
+			selected[member] = struct{}{}
+		}
+		kept := items[:0]
+		for _, item := range items {
+			if _, removeItem := selected[item.member]; !removeItem {
+				kept = append(kept, item)
+			}
+		}
+		items = kept
+		return nil
+	}
+
+	visited := 0
+	err := walkAffinityRedisEntries(context.Background(), 600, 600, affinityRedisPageSize, fetch, remove,
+		func(_ string, entry affinityCacheEntry) bool {
+			visited++
+			return entry.RuleName == "drop"
+		})
+	require.NoError(t, err)
+	assert.GreaterOrEqual(t, fetchCalls, 3)
+	assert.LessOrEqual(t, largestFetch, affinityRedisPageSize)
+	for _, size := range deleteChunks {
+		assert.LessOrEqual(t, size, affinityRedisPageSize)
+	}
+	assert.Equal(t, 599, visited, "the malformed duplicate-key row is rejected before the visitor")
+	assert.Len(t, items, 399)
+	for _, item := range items {
+		var entry affinityCacheEntry
+		require.True(t, decodeAffinityCacheEntry(item.value.(string), &entry))
+		assert.Equal(t, "keep", entry.RuleName)
+	}
+}
+
+func TestWalkAffinityRedisEntriesFailsBeforeFetchOnOverflowOrCancellation(t *testing.T) {
+	fetchCalls := 0
+	fetch := func(context.Context, int64, int64) ([]string, []any, error) {
+		fetchCalls++
+		return nil, nil, nil
+	}
+	remove := func(context.Context, []string) error { return nil }
+	visit := func(string, affinityCacheEntry) bool { return false }
+
+	err := walkAffinityRedisEntries(context.Background(), int64(setting.MaxChannelAffinityEntries)+1,
+		setting.MaxChannelAffinityEntries, affinityRedisPageSize, fetch, remove, visit)
+	require.ErrorIs(t, err, ErrChannelAffinityCacheScanOverflow)
+	assert.Zero(t, fetchCalls)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err = walkAffinityRedisEntries(ctx, 1, 1, 1, fetch, remove, visit)
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Zero(t, fetchCalls)
+
+	injected := errors.New("page failed")
+	err = walkAffinityRedisEntries(context.Background(), 1, 1, 1,
+		func(context.Context, int64, int64) ([]string, []any, error) { return nil, nil, injected }, remove, visit)
+	require.ErrorIs(t, err, injected)
+}
+
+func TestChannelAffinityRedisScriptsBoundMaintenanceWork(t *testing.T) {
+	for _, script := range []string{affinitySetScript, affinityUsageObserveScript} {
+		assert.Contains(t, script, "LIMIT', 0, batch")
+		assert.Contains(t, script, "if excess > batch then excess = batch end")
+		assert.NotContains(t, script, "ZREMRANGEBYSCORE")
+		assert.NotContains(t, script, "size - maximum - 1")
+	}
+}
+
+func TestBoundedTTLCacheConcurrentConfigureAndAccess(t *testing.T) {
+	cache := newBoundedTTLCache[int](64)
+	const workers = 24
+	const iterations = 200
+	var wait sync.WaitGroup
+	wait.Add(workers)
+	for worker := 0; worker < workers; worker++ {
+		go func(worker int) {
+			defer wait.Done()
+			for iteration := 0; iteration < iterations; iteration++ {
+				capacity := 64
+				if iteration%19 == 0 {
+					capacity = 32
+				}
+				cache.configure(capacity)
+				key := fmt.Sprintf("%d-%d", worker, iteration)
+				cache.set(key, iteration, time.Minute)
+				_, _ = cache.get(key)
+			}
+		}(worker)
+	}
+	wait.Wait()
+	cache.configure(64)
+	cache.mu.Lock()
+	assert.LessOrEqual(t, len(cache.items), 64)
+	cache.mu.Unlock()
 }

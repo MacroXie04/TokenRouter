@@ -1,9 +1,10 @@
 package service
 
 import (
+	"context"
 	"errors"
 	"fmt"
-	"strconv"
+	"math"
 	"strings"
 	"time"
 
@@ -35,23 +36,20 @@ var ErrSubscriptionQuotaExceeded = errors.New("订阅额度已用尽")
 
 // CreateSubscriptionPlan persists a subscription plan (admin).
 func CreateSubscriptionPlan(p *model.SubscriptionPlan) error {
-	if p.TotalAmount <= 0 {
-		return errors.New("订阅额度必须大于 0")
-	}
-	p.CreatedAt = common.NowTimestamp()
-	p.UpdatedAt = p.CreatedAt
-	return model.DB.Create(p).Error
+	return AdminCreateSubscriptionPlan(p)
 }
 
 // ListSubscriptionPlans returns enabled plans for the user-facing plans view,
 // highest sort order first, with display defaults normalized.
-func ListSubscriptionPlans() []model.SubscriptionPlan {
+func ListSubscriptionPlans() ([]model.SubscriptionPlan, error) {
 	var plans []model.SubscriptionPlan
-	model.DB.Where("enabled = ?", true).Order("sort_order desc, id desc").Find(&plans)
+	if err := model.DB.Where("enabled = ?", true).Order("sort_order desc, id desc").Find(&plans).Error; err != nil {
+		return nil, err
+	}
 	for i := range plans {
 		NormalizeSubscriptionPlanDefaults(&plans[i])
 	}
-	return plans
+	return plans, nil
 }
 
 // GetSubscriptionPlan loads a plan by id.
@@ -63,16 +61,63 @@ func GetSubscriptionPlan(id int) (*model.SubscriptionPlan, error) {
 	return &p, nil
 }
 
-// ParseSubscriptionPlanPrice parses the plan's stored price string. An empty
-// price means free; an unparseable non-empty value is a parameter error,
-// matching the admin plan-validation contract.
-func ParseSubscriptionPlanPrice(s string) (float64, error) {
+const maxSubscriptionPlanPriceTextLength = 64
+
+var maxPersistedSubscriptionPlanPrice = decimal.New(9999999999, -6) // DECIMAL(10,6)
+
+// parseSubscriptionPlanPriceDecimal accepts only finite, plain base-10
+// decimal syntax. Exponents are intentionally rejected: extreme exponents can
+// make arbitrary-precision comparison allocate unreasonable amounts of memory,
+// and the persisted price column represents a conventional decimal amount.
+func parseSubscriptionPlanPriceDecimal(s string) (decimal.Decimal, error) {
 	price := strings.TrimSpace(s)
 	if price == "" {
-		return 0, nil
+		return decimal.Zero, nil
 	}
-	f, err := strconv.ParseFloat(price, 64)
+	if len(price) > maxSubscriptionPlanPriceTextLength {
+		return decimal.Zero, errors.New("参数错误")
+	}
+	digits := 0
+	dotSeen := false
+	for i, char := range []byte(price) {
+		switch {
+		case char >= '0' && char <= '9':
+			digits++
+		case char == '.' && !dotSeen:
+			dotSeen = true
+		case (char == '+' || char == '-') && i == 0:
+		default:
+			return decimal.Zero, errors.New("参数错误")
+		}
+	}
+	if digits == 0 {
+		return decimal.Zero, errors.New("参数错误")
+	}
+	parsed, err := decimal.NewFromString(price)
 	if err != nil {
+		return decimal.Zero, errors.New("参数错误")
+	}
+	return parsed, nil
+}
+
+func subscriptionPlanPriceFitsDatabase(price decimal.Decimal) bool {
+	return price.Abs().LessThanOrEqual(maxPersistedSubscriptionPlanPrice) &&
+		price.Equal(price.Truncate(6))
+}
+
+// ParseSubscriptionPlanPrice parses the plan's stored price string. An empty
+// price means free; a non-decimal or non-finite value is a parameter error,
+// matching the admin plan-validation contract.
+func ParseSubscriptionPlanPrice(s string) (float64, error) {
+	price, err := parseSubscriptionPlanPriceDecimal(s)
+	if err != nil {
+		return 0, errors.New("参数错误")
+	}
+	if !subscriptionPlanPriceFitsDatabase(price) {
+		return 0, errors.New("参数错误")
+	}
+	f, _ := price.Float64()
+	if math.IsNaN(f) || math.IsInf(f, 0) {
 		return 0, errors.New("参数错误")
 	}
 	return f, nil
@@ -82,12 +127,23 @@ func ParseSubscriptionPlanPrice(s string) (float64, error) {
 // quota to deduct, rounding up, and rejects amounts that would saturate the
 // quota column instead of charging a clamped value.
 func calcSubscriptionBalanceQuota(priceAmount float64) (int, error) {
+	if math.IsNaN(priceAmount) || math.IsInf(priceAmount, 0) {
+		return 0, errors.New("参数错误")
+	}
 	if priceAmount <= 0 {
 		return 0, nil
 	}
 	quota := decimal.NewFromFloat(priceAmount).
 		Mul(decimal.NewFromInt(common.QuotaPerUnit)).
 		Ceil()
+	return common.QuotaFromDecimalStrict(quota)
+}
+
+func calcSubscriptionBalanceQuotaDecimal(price decimal.Decimal) (int, error) {
+	if price.Sign() <= 0 {
+		return 0, nil
+	}
+	quota := price.Mul(decimal.NewFromInt(common.QuotaPerUnit)).Ceil()
 	return common.QuotaFromDecimalStrict(quota)
 }
 
@@ -100,12 +156,18 @@ func PurchaseSubscriptionWithBalance(userId, planId int) error {
 	if userId <= 0 || planId <= 0 {
 		return errors.New("invalid userId or planId")
 	}
+	tradeSuffix, err := common.SecureRandomAlphanumeric(6)
+	if err != nil {
+		return err
+	}
+	tradeNo := fmt.Sprintf("SUBBALUSR%dNO%s%d", userId, tradeSuffix, time.Now().UnixNano())
 	var (
 		logPlanTitle string
 		logMoney     float64
 		chargedQuota int
+		auditEventID string
 	)
-	err := model.DB.Transaction(func(tx *gorm.DB) error {
+	err = model.DB.Transaction(func(tx *gorm.DB) error {
 		var plan model.SubscriptionPlan
 		if err := tx.First(&plan, planId).Error; err != nil {
 			return err
@@ -114,17 +176,28 @@ func PurchaseSubscriptionWithBalance(userId, planId int) error {
 		if !plan.Enabled {
 			return errors.New("套餐未启用")
 		}
-		price, err := ParseSubscriptionPlanPrice(plan.PriceAmount)
+		priceDecimal, err := parseSubscriptionPlanPriceDecimal(plan.PriceAmount)
 		if err != nil {
 			return err
 		}
-		if price < 0 {
+		if !subscriptionPlanPriceFitsDatabase(priceDecimal) {
+			return errors.New("参数错误")
+		}
+		if priceDecimal.IsNegative() {
 			return errors.New("套餐价格不能为负数")
+		}
+		if priceDecimal.GreaterThan(decimal.NewFromFloat(math.MaxFloat64)) {
+			return errors.New("参数错误")
+		}
+		price, _ := priceDecimal.Float64()
+		if math.IsNaN(price) || math.IsInf(price, 0) {
+			// Money is a legacy display column; billing above remains exact.
+			return errors.New("套餐价格无法精确表示")
 		}
 		if plan.AllowBalancePay != nil && !*plan.AllowBalancePay {
 			return errors.New("该套餐不允许使用余额兑换")
 		}
-		requiredQuota, err := calcSubscriptionBalanceQuota(price)
+		requiredQuota, err := calcSubscriptionBalanceQuotaDecimal(priceDecimal)
 		if err != nil {
 			return err
 		}
@@ -135,23 +208,35 @@ func PurchaseSubscriptionWithBalance(userId, planId int) error {
 			return err
 		}
 		if requiredQuota > 0 {
+			if !common.QuotaWithinBounds(user.Quota) {
+				return ErrUserQuotaOverflow
+			}
 			if user.Quota < requiredQuota {
 				return errors.New("余额不足")
 			}
-			if err := tx.Model(&model.User{}).Where("id = ?", userId).
-				Update("quota", gorm.Expr("quota - ?", requiredQuota)).Error; err != nil {
-				return err
+			newQuota := user.Quota - requiredQuota
+			result := tx.Model(&model.User{}).
+				Where("id = ? AND quota = ?", userId, user.Quota).
+				Update("quota", newQuota)
+			if result.Error != nil {
+				return result.Error
+			}
+			if result.RowsAffected != 1 {
+				return ErrUserQuotaOverflow
 			}
 		}
 		if _, err := createUserSubscriptionFromPlanTx(tx, userId, &plan, PaymentMethodBalance); err != nil {
 			return err
 		}
-		now := common.NowTimestamp()
+		now, err := model.DatabaseUnixTimestamp(tx)
+		if err != nil {
+			return err
+		}
 		order := model.SubscriptionOrder{
 			UserId:          userId,
 			PlanId:          plan.Id,
 			Money:           price,
-			TradeNo:         fmt.Sprintf("SUBBALUSR%dNO%s%d", userId, common.RandomAlphanumeric(6), time.Now().UnixNano()),
+			TradeNo:         tradeNo,
 			PaymentMethod:   PaymentMethodBalance,
 			PaymentProvider: PaymentProviderBalance,
 			Status:          TopUpStatusSuccess,
@@ -165,20 +250,30 @@ func PurchaseSubscriptionWithBalance(userId, planId int) error {
 		logPlanTitle = plan.Title
 		logMoney = price
 		chargedQuota = requiredQuota
+		content := fmt.Sprintf("使用余额购买订阅成功，套餐: %s，支付金额: %.2f，扣除额度: %d", logPlanTitle, logMoney, chargedQuota)
+		var auditErr error
+		auditEventID, auditErr = enqueuePaymentSystemLogTx(tx, "subscription_balance", order.TradeNo, userId, content, now)
+		if auditErr != nil {
+			return fmt.Errorf("persist balance subscription audit: %w", auditErr)
+		}
 		return nil
 	})
 	if err != nil {
 		return err
 	}
-	RecordSystemLog(userId, LogTypeTopup,
-		fmt.Sprintf("使用余额购买订阅成功，套餐: %s，支付金额: %.2f，扣除额度: %d", logPlanTitle, logMoney, chargedQuota))
+	if err := DeliverAuditLogOutboxEvent(auditEventID); err != nil {
+		common.SysError("balance subscription audit delivery deferred: " + err.Error())
+	}
 	return nil
 }
 
 // GetActiveSubscription returns the user's active (non-expired) subscription.
 func GetActiveSubscription(userId int) (*model.UserSubscription, error) {
 	var sub model.UserSubscription
-	now := common.NowTimestamp()
+	now, err := model.DatabaseUnixTimestamp(model.DB)
+	if err != nil {
+		return nil, err
+	}
 	if err := model.DB.Where("user_id = ? AND status = ? AND end_time > ?", userId, SubscriptionStatusActive, now).
 		Order("id desc").First(&sub).Error; err != nil {
 		return nil, ErrNoActiveSubscription
@@ -190,25 +285,64 @@ func GetActiveSubscription(userId int) (*model.UserSubscription, error) {
 // returning the amount consumed. It is atomic so concurrent requests cannot
 // overspend the subscription quota.
 func ConsumeSubscriptionQuota(userId, quota int) (int, error) {
-	if quota <= 0 {
+	if quota == 0 {
 		return 0, nil
 	}
-	sub, err := GetActiveSubscription(userId)
+	if err := validateQuotaAmount(quota); err != nil {
+		return 0, fmt.Errorf("subscription quota: %w", err)
+	}
+	err := model.DB.Transaction(func(tx *gorm.DB) error {
+		var sub model.UserSubscription
+		now, err := model.DatabaseUnixTimestamp(tx)
+		if err != nil {
+			return err
+		}
+		if err := subscriptionLockForUpdate(tx).
+			Where("user_id = ? AND status = ? AND end_time > ?", userId, SubscriptionStatusActive, now).
+			Order("id desc").First(&sub).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrNoActiveSubscription
+			}
+			return err
+		}
+		total, totalOK := boundedSubscriptionQuota(sub.AmountTotal)
+		used, usedOK := boundedSubscriptionQuota(sub.AmountUsed)
+		if !totalOK || !usedOK || used > total {
+			return ErrSubscriptionQuotaOverflow
+		}
+		resetPlan, err := subscriptionResetPlanTx(tx, &sub)
+		if err != nil {
+			return err
+		}
+		if err := maybeResetUserSubscriptionWithPlanTx(tx, &sub, resetPlan, now); err != nil {
+			return err
+		}
+		total, totalOK = boundedSubscriptionQuota(sub.AmountTotal)
+		used, usedOK = boundedSubscriptionQuota(sub.AmountUsed)
+		if !totalOK || !usedOK || used > total {
+			return ErrSubscriptionQuotaOverflow
+		}
+		newUsed, ok := common.AddQuotaWithinBounds(used, quota)
+		if !ok {
+			return ErrSubscriptionQuotaOverflow
+		}
+		if newUsed > total {
+			return ErrSubscriptionQuotaExceeded
+		}
+		result := tx.Model(&model.UserSubscription{}).
+			Where("id = ? AND status = ? AND end_time > ? AND amount_total = ? AND amount_used = ? AND usage_epoch = ? AND entitlement_version = ?",
+				sub.Id, SubscriptionStatusActive, now, sub.AmountTotal, sub.AmountUsed, sub.UsageEpoch, sub.EntitlementVersion).
+			UpdateColumn("amount_used", int64(newUsed))
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return ErrSubscriptionQuotaExceeded
+		}
+		return nil
+	})
 	if err != nil {
 		return 0, err
-	}
-	remaining := sub.AmountTotal - sub.AmountUsed
-	if remaining < int64(quota) {
-		return 0, ErrSubscriptionQuotaExceeded
-	}
-	res := model.DB.Model(&model.UserSubscription{}).
-		Where("id = ? AND amount_used + ? <= amount_total", sub.Id, quota).
-		UpdateColumn("amount_used", gormExpr("amount_used + ?", quota))
-	if res.Error != nil {
-		return 0, res.Error
-	}
-	if res.RowsAffected == 0 {
-		return 0, ErrSubscriptionQuotaExceeded
 	}
 	return quota, nil
 }
@@ -218,47 +352,71 @@ func ConsumeSubscriptionQuota(userId, quota int) (int, error) {
 // the last reset base, so a subscription that slept through several windows
 // catches up to the current one instead of drifting.
 func ResetSubscriptionQuota(sub *model.UserSubscription) error {
-	plan, err := GetSubscriptionPlan(sub.PlanId)
-	if err != nil {
-		return err
+	return ResetSubscriptionQuotaContext(context.Background(), sub)
+}
+
+// ResetSubscriptionQuotaContext is ResetSubscriptionQuota's cancellable form.
+// The transaction inherits ctx so cancellation cannot publish a partial reset.
+func ResetSubscriptionQuotaContext(ctx context.Context, sub *model.UserSubscription) error {
+	if ctx == nil {
+		return errors.New("subscription reset context is nil")
 	}
-	now := common.NowTimestamp()
-	if sub.NextResetTime > 0 && sub.NextResetTime > now {
-		return nil
+	if sub == nil || sub.Id <= 0 {
+		return errors.New("invalid subscription")
 	}
-	updates := map[string]any{"updated_at": now}
-	if NormalizeSubscriptionResetPeriod(plan.QuotaResetPeriod) == SubscriptionResetNever {
-		// The plan no longer resets: clear a stale schedule so the reset job
-		// stops selecting this subscription. Usage is intentionally kept.
-		if sub.NextResetTime == 0 {
+	return model.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var current model.UserSubscription
+		if err := subscriptionLockForUpdate(tx).Where("id = ?", sub.Id).First(&current).Error; err != nil {
+			return err
+		}
+		if current.Status != SubscriptionStatusActive {
+			return ErrSubscriptionStateChanged
+		}
+		if current.AmountUsed != sub.AmountUsed || current.LastResetTime != sub.LastResetTime ||
+			current.NextResetTime != sub.NextResetTime || current.EndTime != sub.EndTime ||
+			current.UsageEpoch != sub.UsageEpoch || current.EntitlementVersion != sub.EntitlementVersion {
+			return ErrSubscriptionStateChanged
+		}
+		now, err := model.DatabaseUnixTimestamp(tx)
+		if err != nil {
+			return err
+		}
+		if current.NextResetTime > 0 && current.NextResetTime > now {
+			*sub = current
 			return nil
 		}
-		updates["next_reset_time"] = 0
-		return model.DB.Model(&model.UserSubscription{}).Where("id = ?", sub.Id).Updates(updates).Error
-	}
-	baseUnix := sub.LastResetTime
-	if baseUnix <= 0 {
-		baseUnix = sub.StartTime
-	}
-	base := time.Unix(baseUnix, 0)
-	next := calcSubscriptionNextResetTime(base, plan, sub.EndTime)
-	advanced := false
-	for next > 0 && next <= now {
-		advanced = true
-		base = time.Unix(next, 0)
-		next = calcSubscriptionNextResetTime(base, plan, sub.EndTime)
-	}
-	if advanced {
-		updates["amount_used"] = 0
-		updates["last_reset_time"] = base.Unix()
-	} else if next > 0 && sub.NextResetTime == 0 {
-		updates["last_reset_time"] = base.Unix()
-	} else if next == sub.NextResetTime {
-		// Nothing due and nothing to correct.
+		plan, err := subscriptionResetPlanTx(tx, &current)
+		if err != nil {
+			return err
+		}
+		if plan.QuotaResetPeriod == SubscriptionResetNever {
+			if current.NextResetTime != 0 {
+				if err := updateSubscriptionResetState(tx, &current, current.AmountUsed, current.LastResetTime, 0, now, false); err != nil {
+					return err
+				}
+			}
+			*sub = current
+			return nil
+		}
+		baseUnix := current.LastResetTime
+		if baseUnix <= 0 {
+			baseUnix = current.StartTime
+		}
+		last, next, advanced := advanceSubscriptionResetSchedule(baseUnix, now, current.EndTime, plan)
+		switch {
+		case advanced:
+			err = updateSubscriptionResetState(tx, &current, 0, last, next, now, true)
+		case next > 0 && current.NextResetTime == 0:
+			err = updateSubscriptionResetState(tx, &current, current.AmountUsed, baseUnix, next, now, false)
+		case next != current.NextResetTime:
+			err = updateSubscriptionResetState(tx, &current, current.AmountUsed, current.LastResetTime, next, now, false)
+		}
+		if err != nil {
+			return err
+		}
+		*sub = current
 		return nil
-	}
-	updates["next_reset_time"] = next
-	return model.DB.Model(&model.UserSubscription{}).Where("id = ?", sub.Id).Updates(updates).Error
+	})
 }
 
 // PurchaseSubscription purchases a plan for the user with wallet balance and

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -13,8 +14,20 @@ import (
 	"github.com/tokenrouter/tokenrouter/common"
 	"github.com/tokenrouter/tokenrouter/constant"
 	"github.com/tokenrouter/tokenrouter/model"
+	"github.com/tokenrouter/tokenrouter/router"
 	"github.com/tokenrouter/tokenrouter/service"
 )
+
+func TestSystemTaskLogCleanupRequiresRoot(t *testing.T) {
+	unauthenticated := router.SetUpRouter()
+	recorder := httptest.NewRecorder()
+	unauthenticated.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/api/system-task/log-cleanup?target_timestamp=1", nil))
+	assert.Equal(t, http.StatusUnauthorized, recorder.Code)
+
+	_, adminRequest, _ := setupChannelRead(t, constant.RoleAdminUser)
+	recorder = adminRequest(http.MethodPost, "/api/system-task/log-cleanup?target_timestamp=1", "")
+	assert.Equal(t, http.StatusForbidden, recorder.Code)
+}
 
 func TestSystemTaskLogCleanupContract(t *testing.T) {
 	_, do, _ := setupChannelRead(t, constant.RoleRootUser)
@@ -61,6 +74,10 @@ func TestSystemTaskLogCleanupContract(t *testing.T) {
 	body := decodeBody(t, rec)
 	assert.Equal(t, false, body["success"])
 	assert.Equal(t, "target timestamp is required", body["message"])
+	rec = do(http.MethodPost, fmt.Sprintf("/api/system-task/log-cleanup?target_timestamp=%d", now+3600), "")
+	body = decodeBody(t, rec)
+	assert.Equal(t, false, body["success"])
+	assert.Equal(t, "target timestamp cannot be in the future", body["message"])
 
 	// Enqueue: pending task with the reference payload shape.
 	rec = do(http.MethodPost, fmt.Sprintf("/api/system-task/log-cleanup?target_timestamp=%d", target), "")

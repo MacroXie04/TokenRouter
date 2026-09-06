@@ -1,7 +1,9 @@
 package controller
 
 import (
+	"errors"
 	"net/http"
+	"net/url"
 	"strconv"
 
 	"github.com/gin-gonic/gin"
@@ -10,9 +12,47 @@ import (
 	"github.com/tokenrouter/tokenrouter/service"
 )
 
+const maxLogQueryBytes = 16 << 10
+
+var logScalarQueryKeys = map[string]struct{}{
+	"p": {}, "page_size": {}, "ps": {}, "size": {},
+	"type": {}, "start_timestamp": {}, "end_timestamp": {},
+	"token_name": {}, "username": {}, "model_name": {}, "channel": {},
+	"group": {}, "request_id": {}, "upstream_request_id": {},
+}
+
+// validateLogQueryShape rejects oversized and ambiguous scalar query strings
+// before the controller asks the database to aggregate or scan log rows.
+func validateLogQueryShape(c *gin.Context) error {
+	if c == nil || c.Request == nil || c.Request.URL == nil || len(c.Request.URL.RawQuery) > maxLogQueryBytes {
+		return errors.New("查询参数过大")
+	}
+	values, err := url.ParseQuery(c.Request.URL.RawQuery)
+	if err != nil {
+		return errors.New("查询参数无效")
+	}
+	for key, items := range values {
+		if _, scalar := logScalarQueryKeys[key]; scalar && len(items) != 1 {
+			return errors.New("查询参数不能重复")
+		}
+	}
+	return nil
+}
+
+func requireValidLogQuery(c *gin.Context) bool {
+	if err := validateLogQueryShape(c); err != nil {
+		c.JSON(http.StatusOK, gin.H{"success": false, "message": err.Error()})
+		return false
+	}
+	return true
+}
+
 // GetLogsStat aggregates consumed quota and the trailing-minute rpm/tpm for
 // the admin console (reference contract).
 func GetLogsStat(c *gin.Context) {
+	if !requireValidLogQuery(c) {
+		return
+	}
 	logType, _ := strconv.Atoi(c.Query("type"))
 	startTimestamp, _ := strconv.ParseInt(c.Query("start_timestamp"), 10, 64)
 	endTimestamp, _ := strconv.ParseInt(c.Query("end_timestamp"), 10, 64)
@@ -40,6 +80,9 @@ func GetLogsStat(c *gin.Context) {
 // GetLogsSelfStat aggregates the authenticated user's consumed quota and the
 // trailing-minute rpm/tpm (reference contract).
 func GetLogsSelfStat(c *gin.Context) {
+	if !requireValidLogQuery(c) {
+		return
+	}
 	user, err := service.GetUserByID(common.GetUserId(c))
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{"success": false, "message": "用户不存在"})
@@ -83,6 +126,9 @@ func SearchUserLogs(c *gin.Context) {
 // GetUserLogs lists the authenticated user's logs with the reference filter
 // contract and the redacted user-facing view.
 func GetUserLogs(c *gin.Context) {
+	if !requireValidLogQuery(c) {
+		return
+	}
 	pi := getPageQuery(c)
 	userId := common.GetUserId(c)
 	logType, _ := strconv.Atoi(c.Query("type"))
@@ -124,6 +170,9 @@ func GetLogByKey(c *gin.Context) {
 // contract (type, timestamps, username, token/model names, channel, group,
 // request ids) and pageInfo paging.
 func GetLogs(c *gin.Context) {
+	if !requireValidLogQuery(c) {
+		return
+	}
 	pi := getPageQuery(c)
 	logType, _ := strconv.Atoi(c.Query("type"))
 	startTimestamp, _ := strconv.ParseInt(c.Query("start_timestamp"), 10, 64)

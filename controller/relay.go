@@ -2,6 +2,7 @@ package controller
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -17,6 +18,8 @@ import (
 	"github.com/tokenrouter/tokenrouter/relay"
 	"github.com/tokenrouter/tokenrouter/service"
 )
+
+const maxPlaygroundRequestBodyBytes int64 = 16 << 20
 
 // Relay handler wrappers dispatch to the shared relay engine.
 func RelayChatCompletions(c *gin.Context)    { relay.Relay(c) }
@@ -38,9 +41,14 @@ func RelayRealtime(c *gin.Context)           { relay.RelayWebSocket(c) }
 func RelayClaudeMessages(c *gin.Context)     { relay.RelayClaudeMessages(c) }
 func RelayGeminiNative(c *gin.Context)       { relay.RelayGeminiNative(c) }
 func RelayJimeng(c *gin.Context)             { relay.RelayJimeng(c) }
+func RelayKlingTask(c *gin.Context)          { relay.RelayKlingTask(c) }
+func RelayKlingTaskFetch(c *gin.Context)     { relay.RelayKlingTaskFetch(c) }
+func RelayTask(c *gin.Context)               { relay.RelayVideoTask(c) }
+func RelayTaskFetch(c *gin.Context)          { relay.RelayVideoTaskFetch(c) }
+func VideoProxy(c *gin.Context)              { relay.VideoProxy(c) }
 
 func playgroundRequestGroup(c *gin.Context) (string, error) {
-	body, err := io.ReadAll(io.LimitReader(c.Request.Body, 16*1024*1024))
+	body, err := common.ReadAllLimited(c.Request.Body, maxPlaygroundRequestBodyBytes)
 	c.Request.Body = io.NopCloser(bytes.NewReader(body))
 	if err != nil {
 		return "", err
@@ -55,15 +63,10 @@ func playgroundRequestGroup(c *gin.Context) (string, error) {
 }
 
 func playgroundGroupAllowed(userGroup, requestedGroup string) bool {
-	if requestedGroup == "" || requestedGroup == userGroup {
-		return true
+	if requestedGroup == "" {
+		requestedGroup = userGroup
 	}
-	for _, group := range service.GetUserAutoGroups(userGroup) {
-		if group == requestedGroup {
-			return true
-		}
-	}
-	return false
+	return service.IsUserSelectableGroup(userGroup, requestedGroup)
 }
 
 // Playground delegates a dashboard session request to the ordinary relay
@@ -96,11 +99,7 @@ func Playground(c *gin.Context) {
 	}
 	requestedGroup, err := playgroundRequestGroup(c)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{
-			"message": "无效的 Playground 请求: " + err.Error(),
-			"type":    "new_api_error",
-			"code":    "",
-		}})
+		writePlaygroundRequestError(c, err)
 		return
 	}
 	if !playgroundGroupAllowed(group, requestedGroup) {
@@ -121,33 +120,40 @@ func Playground(c *gin.Context) {
 	relay.Relay(c)
 }
 
-// Task/async platform placeholders follow the reference placeholder behavior:
-// they accept the request and return a structured "not configured" result
-// rather than pretending to be fully implemented.
-func RelaySunoSubmit(c *gin.Context)        { taskNotConfigured(c, "suno") }
-func RelaySunoFetch(c *gin.Context)         { taskNotConfigured(c, "suno") }
-func RelayVideoSubmit(c *gin.Context)       { taskNotConfigured(c, "video") }
-func RelayVideoFetch(c *gin.Context)        { taskNotConfigured(c, "video") }
-func RelayMidjourneyImagine(c *gin.Context) { taskNotConfigured(c, "midjourney") }
-func RelayMidjourneyFetch(c *gin.Context)   { taskNotConfigured(c, "midjourney") }
-
-func taskNotConfigured(c *gin.Context, platform string) {
-	c.JSON(http.StatusNotImplemented, gin.H{
-		"success": false,
-		"message": "任务平台未配置: " + platform,
-	})
+func writePlaygroundRequestError(c *gin.Context, err error) {
+	status := http.StatusBadRequest
+	message := "无效的 Playground 请求: " + err.Error()
+	if errors.Is(err, common.ErrBodyTooLarge) {
+		status = http.StatusRequestEntityTooLarge
+		message = "Playground 请求体过大"
+	}
+	c.JSON(status, gin.H{"error": gin.H{
+		"message": message,
+		"type":    "new_api_error",
+		"code":    "",
+	}})
 }
+
+func RelaySunoSubmit(c *gin.Context)        { relay.RelaySunoTask(c) }
+func RelaySunoFetch(c *gin.Context)         { relay.RelaySunoTaskFetch(c) }
+func RelayVideoSubmit(c *gin.Context)       { relay.RelayVideoTask(c) }
+func RelayVideoFetch(c *gin.Context)        { relay.RelayVideoTaskFetch(c) }
+func RelayMidjourney(c *gin.Context)        { relay.RelayMidjourney(c) }
+func RelayMidjourneyImagine(c *gin.Context) { relay.RelayMidjourney(c) }
+func RelayMidjourneyFetch(c *gin.Context)   { relay.RelayMidjourney(c) }
 
 // RelayListModels returns the models available to the token's group in the
 // OpenAI-compatible /v1/models shape. Gemini clients (x-goog-api-key header or
 // a `key` query parameter) receive the Gemini model-list shape instead,
 // mirroring the reference's per-flavor dispatch.
 func RelayListModels(c *gin.Context) {
-	group := middleware.GetTokenGroup(c)
-	if group == "" {
-		group = service.GroupDefault
+	groups := middleware.GetTokenGroups(c)
+	models := middleware.FilterRelayModels(c, service.GetGroupsModels(groups))
+	models, err := relayModelsAllowedByPricingPreference(c, models)
+	if err != nil {
+		writeRelayModelCatalogError(c)
+		return
 	}
-	models := service.GetGroupModels(group)
 	names := make([]string, 0, len(models))
 	for m := range models {
 		names = append(names, m)
@@ -162,9 +168,22 @@ func RelayListModels(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"models": data, "nextPageToken": nil})
 		return
 	}
+	supportedEndpointTypes, err := service.GetModelSupportedEndpointTypes(groups, models)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{
+			"message": "Unable to build the model endpoint catalog",
+			"type":    "new_api_error",
+			"param":   "",
+			"code":    "endpoint_catalog_unavailable",
+		}})
+		return
+	}
 	data := make([]gin.H, 0, len(names))
 	for _, n := range names {
-		data = append(data, gin.H{"id": n, "object": "model", "owned_by": "tokenrouter"})
+		data = append(data, gin.H{
+			"id": n, "object": "model", "owned_by": "tokenrouter",
+			"supported_endpoint_types": supportedEndpointTypes[n],
+		})
 	}
 	c.JSON(http.StatusOK, gin.H{"object": "list", "data": data})
 }
@@ -172,11 +191,12 @@ func RelayListModels(c *gin.Context) {
 // RelayListModelsGemini serves GET /v1beta/models in the Gemini model-list
 // shape.
 func RelayListModelsGemini(c *gin.Context) {
-	group := middleware.GetTokenGroup(c)
-	if group == "" {
-		group = service.GroupDefault
+	models := middleware.FilterRelayModels(c, service.GetGroupsModels(middleware.GetTokenGroups(c)))
+	models, err := relayModelsAllowedByPricingPreference(c, models)
+	if err != nil {
+		writeRelayModelCatalogError(c)
+		return
 	}
-	models := service.GetGroupModels(group)
 	names := make([]string, 0, len(models))
 	for m := range models {
 		names = append(names, m)
@@ -195,12 +215,13 @@ func RelayListModelsGemini(c *gin.Context) {
 // reference's catalog-based behavior). Anthropic-shaped for Claude clients.
 func RelayRetrieveModel(c *gin.Context) {
 	modelId := c.Param("model")
-	group := middleware.GetTokenGroup(c)
-	if group == "" {
-		group = service.GroupDefault
+	groups := middleware.GetTokenGroups(c)
+	models, err := relayModelsAllowedByPricingPreference(c, service.GetGroupsModels(groups))
+	if err != nil {
+		writeRelayModelCatalogError(c)
+		return
 	}
-	models := service.GetGroupModels(group)
-	if _, ok := models[modelId]; !ok {
+	if _, ok := models[modelId]; !ok || !middleware.RelayModelAllowed(c, modelId) {
 		c.JSON(http.StatusNotFound, gin.H{"error": gin.H{
 			"message": "The model '" + modelId + "' does not exist",
 			"type":    "invalid_request_error",
@@ -218,7 +239,39 @@ func RelayRetrieveModel(c *gin.Context) {
 		})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"id": modelId, "object": "model", "owned_by": "tokenrouter"})
+	supportedEndpointTypes, err := service.GetModelSupportedEndpointTypes(groups, map[string]bool{modelId: true})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{
+			"message": "Unable to build the model endpoint catalog",
+			"type":    "new_api_error",
+			"param":   "",
+			"code":    "endpoint_catalog_unavailable",
+		}})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"id": modelId, "object": "model", "owned_by": "tokenrouter",
+		"supported_endpoint_types": supportedEndpointTypes[modelId],
+	})
+}
+
+func relayModelsAllowedByPricingPreference(c *gin.Context, models map[string]bool) (map[string]bool, error) {
+	user, err := service.GetUserByID(common.GetUserId(c))
+	if err != nil {
+		return nil, err
+	}
+	return service.FilterModelsByReferencePricing(
+		models, service.UserSettingsFromRaw(user.Setting).AcceptUnsetRatioModel,
+	)
+}
+
+func writeRelayModelCatalogError(c *gin.Context) {
+	c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{
+		"message": "Unable to build the model catalog",
+		"type":    "new_api_error",
+		"param":   "",
+		"code":    "model_catalog_unavailable",
+	}})
 }
 
 // RelayNotImplemented mirrors the reference's unimplemented relay endpoints

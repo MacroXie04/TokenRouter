@@ -4,9 +4,12 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
@@ -22,7 +25,7 @@ import (
 	"github.com/tokenrouter/tokenrouter/setting"
 )
 
-func setupAuthAdjacent(t *testing.T, role int) (http.Handler, func(method, path, body string) *httptest.ResponseRecorder, int, string) {
+func setupAuthAdjacent(t *testing.T, role int) (http.Handler, func(method, path, body string, headers ...map[string]string) *httptest.ResponseRecorder, int, string) {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 	t.Setenv("CRITICAL_RATE_LIMIT", "1000")
@@ -30,23 +33,32 @@ func setupAuthAdjacent(t *testing.T, role int) (http.Handler, func(method, path,
 	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
 	require.NoError(t, err)
 	require.NoError(t, db.AutoMigrate(&model.User{}, &model.Token{}, &model.UserSession{},
-		&model.Channel{}, &model.TwoFA{}, &model.PasskeyCredential{}, &model.AuthFlow{}, &model.Log{}, &model.Option{}))
+		&model.Channel{}, &model.TwoFA{}, &model.TwoFABackupCode{}, &model.PasskeyCredential{},
+		&model.AuthFlow{}, &model.ExternalIdentityClaim{}, &model.Log{}, &model.Option{}, &model.CasbinRule{}))
 	model.DB = db
 	model.LOG_DB = db
+	require.NoError(t, service.InitCasbin())
+	require.NoError(t, setting.Init())
 	require.NoError(t, setting.UpdateOption(setting.QuotaPerUnitOption, "500000"))
+	service.SetGroupRatios(map[string]float64{"default": 1, "vip": 1})
 
 	user := model.User{Username: "adjuser", Password: "pw", Role: role, Status: model.UserStatusEnabled,
-		Quota: 1000, AuthVersion: 1}
+		Quota: 1000, Group: service.GroupDefault, AuthVersion: 1}
 	require.NoError(t, model.DB.Create(&user).Error)
 	sid, access, refresh, err := service.CompleteLogin(&user, "127.0.0.1", "ua", "test")
 	require.NoError(t, err)
 
 	r := router.SetUpRouter()
-	do := func(method, path, body string) *httptest.ResponseRecorder {
+	do := func(method, path, body string, headers ...map[string]string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(method, path, strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		req.AddCookie(&http.Cookie{Name: "access_token", Value: access})
 		req.AddCookie(&http.Cookie{Name: "refresh_token", Value: sid + "." + refresh})
+		for _, headerSet := range headers {
+			for key, value := range headerSet {
+				req.Header.Set(key, value)
+			}
+		}
 		rec := httptest.NewRecorder()
 		r.ServeHTTP(rec, req)
 		return rec
@@ -79,6 +91,107 @@ func TestGenerateOAuthStateLogin(t *testing.T) {
 	assert.Equal(t, "github", flows[0].Provider)
 	assert.Equal(t, "login", flows[0].Intent)
 	assert.Equal(t, `{"affiliate_code":"mycode"}`, flows[0].Payload)
+}
+
+func TestGenerateOAuthStateBindsSafeReturnTarget(t *testing.T) {
+	_, do, _, _ := setupAuthAdjacent(t, constant.RoleCommonUser)
+
+	rec := do(http.MethodPost, "/api/oauth/state",
+		`{"provider":"github","intent":"login","aff":"partner","redirect":"/wallet?section=topup"}`)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	var flow model.AuthFlow
+	require.NoError(t, model.DB.Where("purpose = ?", service.AuthFlowPurposeOAuth).First(&flow).Error)
+	assert.JSONEq(t, `{"affiliate_code":"partner","return_to":"/wallet?section=topup"}`, flow.Payload)
+
+	var before int64
+	require.NoError(t, model.DB.Model(&model.AuthFlow{}).Count(&before).Error)
+	for _, redirect := range []string{
+		"https://attacker.example/",
+		"//attacker.example/",
+		"/oauth/github",
+		"/dashboard/../wallet",
+		"/wallet\\next",
+	} {
+		rec = do(http.MethodPost, "/api/oauth/state",
+			`{"provider":"github","intent":"login","redirect":`+strconv.Quote(redirect)+`}`)
+		assert.Equal(t, http.StatusBadRequest, rec.Code, redirect)
+	}
+	var after int64
+	require.NoError(t, model.DB.Model(&model.AuthFlow{}).Count(&after).Error)
+	assert.Equal(t, before, after)
+}
+
+func TestTelegramLoginRequiresOneTimeStateAndUsesBoundReturn(t *testing.T) {
+	_, do, _, _ := setupAuthAdjacent(t, constant.RoleCommonUser)
+	t.Setenv("TELEGRAM_BOT_TOKEN", telegramControllerBotToken)
+	t.Setenv("TELEGRAM_BOT_NAME", "TokenRouter_bot")
+	require.NoError(t, setting.UpdateOption(setting.TelegramOAuthEnabledOption, "true"))
+
+	stateResponse := do(http.MethodPost, "/api/oauth/state",
+		`{"provider":"telegram","intent":"login","redirect":"/wallet?section=topup"}`)
+	require.Equal(t, http.StatusOK, stateResponse.Code, stateResponse.Body.String())
+	stateData := decodeBody(t, stateResponse)["data"].(map[string]any)
+	flowToken := stateData["flow_token"].(string)
+	authDate := strconv.FormatInt(time.Now().Unix(), 10)
+	hash := telegramTestHash(t, "42", "Alice", authDate)
+	callback := "/api/oauth/telegram/login?" + url.Values{
+		"flow_token": {flowToken},
+		"id":         {"42"},
+		"first_name": {"Alice"},
+		"auth_date":  {authDate},
+		"hash":       {hash},
+	}.Encode()
+
+	completed := do(http.MethodGet, callback, "")
+	require.Equal(t, http.StatusFound, completed.Code, completed.Body.String())
+	assert.Equal(t, "/wallet?section=topup", completed.Header().Get("Location"))
+	assert.NotEmpty(t, completed.Result().Cookies())
+
+	replayed := do(http.MethodGet, callback, "")
+	require.Equal(t, http.StatusFound, replayed.Code)
+	assert.Equal(t, "/login?error=oauth_state", replayed.Header().Get("Location"))
+}
+
+func TestOAuthEntryOptionalAuthenticationRejectsOnlyPresentedInvalidCredentials(t *testing.T) {
+	handler, _, _, _ := setupAuthAdjacent(t, constant.RoleCommonUser)
+
+	request := httptest.NewRequest(http.MethodPost, "/api/oauth/state",
+		strings.NewReader(`{"provider":"github","intent":"login"}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	require.Equal(t, http.StatusOK, response.Code, response.Body.String())
+
+	request = httptest.NewRequest(http.MethodPost, "/api/oauth/state",
+		strings.NewReader(`{"provider":"github","intent":"login"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer invalid-presented-credential")
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	assert.Equal(t, http.StatusUnauthorized, response.Code)
+
+	var flowCount int64
+	require.NoError(t, model.DB.Model(&model.AuthFlow{}).Count(&flowCount).Error)
+	assert.EqualValues(t, 1, flowCount, "an invalid credential must not create an anonymous OAuth flow")
+}
+
+func TestOAuthAndRefreshRoutesDisableCaching(t *testing.T) {
+	handler, do, _, _ := setupAuthAdjacent(t, constant.RoleCommonUser)
+
+	telegram := httptest.NewRecorder()
+	handler.ServeHTTP(telegram, httptest.NewRequest(http.MethodGet, "/api/oauth/telegram/login", nil))
+	assert.Equal(t, http.StatusFound, telegram.Code)
+	assert.Contains(t, telegram.Header().Get("Cache-Control"), "no-store")
+
+	callback := httptest.NewRecorder()
+	handler.ServeHTTP(callback, httptest.NewRequest(http.MethodGet,
+		"/api/oauth/github/callback?state=invalid&code=invalid", nil))
+	assert.Equal(t, http.StatusFound, callback.Code)
+	assert.Contains(t, callback.Header().Get("Cache-Control"), "no-store")
+
+	refresh := do(http.MethodPost, "/api/user/auth/refresh", "")
+	require.Equal(t, http.StatusOK, refresh.Code, refresh.Body.String())
+	assert.Contains(t, refresh.Header().Get("Cache-Control"), "no-store")
 }
 
 func TestGenerateOAuthStateValidation(t *testing.T) {
@@ -180,6 +293,26 @@ func TestEmailBindTaken(t *testing.T) {
 	assert.Equal(t, "", user.Email)
 }
 
+func TestEmailBindRequiresBrowserSession(t *testing.T) {
+	handler, _, userId, _ := setupAuthAdjacent(t, constant.RoleCommonUser)
+	createEmailFlow(t, "pat-bind@example.com", "123456")
+	pat, err := service.GenerateUserAccessToken(userId)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/oauth/email/bind",
+		strings.NewReader(`{"email":"pat-bind@example.com","code":"123456"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+pat)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, "AUTH_SESSION_REQUIRED", decodeBody(t, rec)["code"])
+
+	var user model.User
+	require.NoError(t, model.DB.First(&user, userId).Error)
+	assert.False(t, user.EmailVerified)
+}
+
 // --- Admin reset passkey / 2FA ---
 
 func TestAdminResetPasskey(t *testing.T) {
@@ -194,14 +327,14 @@ func TestAdminResetPasskey(t *testing.T) {
 		UserID: victim.Id, CredentialID: "cred-1", PublicKey: "pk", Attachment: "platform",
 	}).Error)
 
-	// No passkey → success:false.
+	// A root cannot use an admin route to target itself or another root.
 	rec := do(http.MethodDelete, "/api/user/"+common.Int2Str(adminId)+"/reset_passkey", "")
-	assert.Equal(t, http.StatusOK, rec.Code)
-	assert.Equal(t, false, decodeBody(t, rec)["success"])
+	assert.Equal(t, http.StatusForbidden, rec.Code)
 
 	// Reset the victim's passkeys and revoke all their sessions.
 	require.NoError(t, model.DB.Create(&model.UserSession{
 		SID: "victim-sid", UserID: victim.Id, Version: 1, UserAuthVersion: 1, Status: "active", RefreshHash: "h",
+		ExpiresAt: common.NowTimestamp() + 3600,
 	}).Error)
 	rec = do(http.MethodDelete, "/api/user/"+common.Int2Str(victim.Id)+"/reset_passkey", "")
 	require.Equal(t, http.StatusOK, rec.Code)
@@ -253,15 +386,36 @@ func TestAdminDisable2FA(t *testing.T) {
 	require.NoError(t, model.DB.Create(&model.TwoFA{UserId: victim.Id, Secret: "S", IsEnabled: true}).Error)
 	require.NoError(t, model.DB.Create(&model.UserSession{
 		SID: "v2-sid", UserID: victim.Id, Version: 1, UserAuthVersion: 1, Status: "active", RefreshHash: "h",
+		ExpiresAt: common.NowTimestamp() + 3600,
 	}).Error)
 
-	// Not enabled → success:false.
+	// Even a root may not target itself: role management is strictly ordered.
 	rec := do(http.MethodDelete, "/api/user/"+common.Int2Str(adminId)+"/2fa", "")
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Equal(t, false, decodeBody(t, rec)["success"])
+	assert.Contains(t, rec.Body.String(), "无权操作同级或更高级用户")
 
-	// Disable the victim's 2FA and revoke sessions.
+	// A privileged dashboard session alone cannot disable the victim's factor.
 	rec = do(http.MethodDelete, "/api/user/"+common.Int2Str(victim.Id)+"/2fa", "")
+	require.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, "SECURITY_PROOF_REQUIRED", decodeBody(t, rec)["code"])
+	assert.True(t, service.TwoFAStatus(victim.Id))
+	var active model.UserSession
+	require.NoError(t, model.DB.Where("sid = ?", "v2-sid").First(&active).Error)
+	assert.Zero(t, active.RevokedAt)
+
+	// The actor can obtain a reset-scoped proof using their own factor, then
+	// disable the target and revoke the target's sessions.
+	adminSecret := "JBSWY3DPEHPK3PXP"
+	require.NoError(t, model.DB.Create(&model.TwoFA{
+		UserId: adminId, Secret: adminSecret, IsEnabled: true,
+	}).Error)
+	verify := do(http.MethodPost, "/api/verify",
+		`{"method":"2fa","code":"`+validTOTP(adminSecret)+`","scope":"twofa.reset"}`)
+	require.Equal(t, http.StatusOK, verify.Code, "body: %s", verify.Body.String())
+	proof := decodeBody(t, verify)["data"].(map[string]any)["proof_token"].(string)
+	rec = do(http.MethodDelete, "/api/user/"+common.Int2Str(victim.Id)+"/2fa", "",
+		map[string]string{"X-Security-Proof": proof})
 	require.Equal(t, http.StatusOK, rec.Code)
 	assert.Equal(t, "用户2FA已被强制禁用", decodeBody(t, rec)["message"])
 	assert.False(t, service.TwoFAStatus(victim.Id))

@@ -89,12 +89,20 @@ func applyChannelGroupFilter(query *gorm.DB, group string) *gorm.DB {
 	return query.Where("(',' || \"group\" || ',') LIKE ? ESCAPE '!'", "%,"+escaped+",%")
 }
 
-// channelSearchWhere builds the reference channel search condition:
-// (id = ? OR name LIKE ? OR key = ? OR base_url LIKE ?) AND models LIKE ?.
-func channelSearchWhere(keyword, modelKeyword string) (string, []any) {
-	where := "(id = ? OR name LIKE ? OR key = ? OR base_url LIKE ?) AND models LIKE ?"
+// channelSearchWhere builds the channel search condition. Exact credential
+// matching is available only to callers that already hold the sensitive-write
+// permission; ordinary readers must not get a credential-guessing oracle.
+func channelSearchWhere(keyword, modelKeyword string, includeKey bool) (string, []any) {
+	if includeKey {
+		where := "(id = ? OR name LIKE ? OR key = ? OR base_url LIKE ?) AND models LIKE ?"
+		return where, []any{
+			common.Str2Int(keyword), "%" + keyword + "%", keyword, "%" + keyword + "%",
+			"%" + modelKeyword + "%",
+		}
+	}
+	where := "(id = ? OR name LIKE ? OR base_url LIKE ?) AND models LIKE ?"
 	return where, []any{
-		common.Str2Int(keyword), "%" + keyword + "%", keyword, "%" + keyword + "%",
+		common.Str2Int(keyword), "%" + keyword + "%", "%" + keyword + "%",
 		"%" + modelKeyword + "%",
 	}
 }
@@ -102,8 +110,8 @@ func channelSearchWhere(keyword, modelKeyword string) (string, []any) {
 // SearchChannels searches channels by keyword (id/name/exact key/base URL) and
 // model substring, filtered by group, with the sort whitelist applied. The key
 // column is always omitted from results.
-func SearchChannels(keyword, group, modelKeyword string, sortOptions ChannelSortOptions) ([]*model.Channel, error) {
-	where, args := channelSearchWhere(keyword, modelKeyword)
+func SearchChannels(keyword, group, modelKeyword string, sortOptions ChannelSortOptions, includeKey bool) ([]*model.Channel, error) {
+	where, args := channelSearchWhere(keyword, modelKeyword, includeKey)
 	query := model.DB.Model(&model.Channel{}).Omit("key")
 	query = applyChannelGroupFilter(query.Where(where, args...), group)
 	var channels []*model.Channel
@@ -113,8 +121,8 @@ func SearchChannels(keyword, group, modelKeyword string, sortOptions ChannelSort
 
 // SearchChannelTags returns the distinct tags of channels matching the same
 // search condition, ordered by priority desc (or id desc with idSort).
-func SearchChannelTags(keyword, group, modelKeyword string, idSort bool) ([]string, error) {
-	where, args := channelSearchWhere(keyword, modelKeyword)
+func SearchChannelTags(keyword, group, modelKeyword string, idSort, includeKey bool) ([]string, error) {
+	where, args := channelSearchWhere(keyword, modelKeyword, includeKey)
 	order := clause.OrderByColumn{Column: clause.Column{Name: "priority"}, Desc: true}
 	if idSort {
 		order = clause.OrderByColumn{Column: clause.Column{Name: "id"}, Desc: true}
@@ -155,12 +163,9 @@ func GetEnabledChannelModels() ([]string, error) {
 	return names, nil
 }
 
-// RetryTimes returns the configured relay retry count: the RetryTimes option,
-// else the RETRY_TIMES env var, else the reference default of 2.
+// RetryTimes returns the request-independent retry policy snapshot. An
+// explicit zero is terminal; deployment environment precedence is resolved
+// once by the settings loader rather than re-read with fallback semantics.
 func RetryTimes() int {
-	retryTimes := setting.GetOptionIntOrDefault(setting.RetryTimesOption, 0)
-	if retryTimes <= 0 {
-		retryTimes = common.GetEnvInt("RETRY_TIMES", 2)
-	}
-	return retryTimes
+	return setting.GetChannelReliabilitySetting().RetryTimes
 }

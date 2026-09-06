@@ -2,11 +2,12 @@ package main
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io/fs"
 	"net/http"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 	"github.com/tokenrouter/tokenrouter/controller"
 	"github.com/tokenrouter/tokenrouter/middleware"
 	"github.com/tokenrouter/tokenrouter/model"
+	"github.com/tokenrouter/tokenrouter/relay"
 	"github.com/tokenrouter/tokenrouter/router"
 	"github.com/tokenrouter/tokenrouter/service"
 	"github.com/tokenrouter/tokenrouter/setting"
@@ -28,6 +30,10 @@ func main() {
 	_ = godotenv.Load()
 
 	common.SysLog("TokenRouter starting, version=" + common.Version)
+	if err := common.InitializeSessionSecret(); err != nil {
+		common.SysError("session secret configuration error: " + err.Error())
+		os.Exit(1)
+	}
 
 	if err := model.InitDB(); err != nil {
 		common.SysError("failed to init database: " + err.Error())
@@ -35,32 +41,18 @@ func main() {
 	}
 	if err := common.InitRedis(); err != nil {
 		common.SysError("failed to init redis: " + err.Error())
+		os.Exit(1)
 	}
 	common.InitSSRF()
 	service.InitMailer()
-	if err := setting.Init(); err != nil {
-		common.SysError("failed to load options: " + err.Error())
+	if err := runRuntimeInitializers(defaultRuntimeInitializers()); err != nil {
+		common.SysError("critical startup initialization failed: " + err.Error())
+		os.Exit(1)
 	}
-	service.LoadSensitiveWords()
-	if err := service.InitAbilityCache(); err != nil {
-		common.SysError("failed to load abilities: " + err.Error())
+	if err := service.StartBackgroundJobs(); err != nil {
+		common.SysError("background job configuration error: " + err.Error())
+		os.Exit(1)
 	}
-	if err := service.InitCasbin(); err != nil {
-		common.SysError("failed to init authorization engine: " + err.Error())
-	}
-	if err := service.InitPermissionAuthz(); err != nil {
-		common.SysError("failed to init permission engine: " + err.Error())
-	}
-	if err := service.InitWebAuthn(); err != nil {
-		common.SysError("failed to init WebAuthn: " + err.Error())
-	}
-	if err := service.ReloadPricingOptions(); err != nil {
-		common.SysError("failed to load pricing options: " + err.Error())
-	}
-	if err := service.RegisterSystemInstance(); err != nil {
-		common.SysError("failed to register system instance: " + err.Error())
-	}
-	service.StartBackgroundJobs()
 
 	controller.StartTime = common.NowTimestamp()
 
@@ -69,10 +61,7 @@ func main() {
 	serveEmbedded(r)
 
 	port := common.GetEnv("PORT", "3000")
-	srv := &http.Server{
-		Addr:    ":" + port,
-		Handler: r,
-	}
+	srv := newHTTPServer(":"+port, r)
 
 	go func() {
 		common.SysLog("listening on :" + port)
@@ -95,61 +84,92 @@ func main() {
 	common.SysLog("shutdown complete")
 }
 
-// serveEmbedded serves the embedded frontend, falling back to index.html for
-// client-side routes, and injects analytics (Google Analytics / Umami) into the
-// served index.html.
+const (
+	httpReadHeaderTimeout = 10 * time.Second
+	httpReadTimeout       = 5 * time.Minute
+	httpIdleTimeout       = 2 * time.Minute
+	httpMaxHeaderBytes    = 128 << 10
+)
+
+// newHTTPServer applies an explicit slow-client safety floor. WriteTimeout is
+// intentionally left at zero because relay responses can be long-lived SSE or
+// WebSocket streams whose own deadlines are enforced by the relay layer.
+func newHTTPServer(address string, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              address,
+		Handler:           handler,
+		ReadHeaderTimeout: httpReadHeaderTimeout,
+		ReadTimeout:       httpReadTimeout,
+		IdleTimeout:       httpIdleTimeout,
+		MaxHeaderBytes:    httpMaxHeaderBytes,
+	}
+}
+
+type runtimeInitializer struct {
+	name string
+	run  func() error
+}
+
+// defaultRuntimeInitializers is deliberately ordered. Settings publish first;
+// consumers then build routing, authorization, passkey, and pricing snapshots.
+// Any failure is fatal because serving with a stale/default snapshot can grant
+// unintended access or misprice traffic.
+func defaultRuntimeInitializers() []runtimeInitializer {
+	return []runtimeInitializer{
+		{name: "settings", run: setting.Init},
+		{name: "audit outbox privacy", run: service.ScrubDeliveredAuditLogPayloads},
+		{name: "relay HTTP transport", run: relay.InitHTTPClient},
+		{name: "sensitive words", run: func() error {
+			service.LoadSensitiveWords()
+			return nil
+		}},
+		{name: "channel abilities", run: service.InitAbilityCache},
+		{name: "authorization engine", run: service.InitCasbin},
+		{name: "permission engine", run: service.InitPermissionAuthz},
+		{name: "WebAuthn", run: service.InitWebAuthn},
+		{name: "pricing", run: service.ReloadPricingOptions},
+		{name: "system instance", run: service.RegisterSystemInstance},
+	}
+}
+
+func runRuntimeInitializers(initializers []runtimeInitializer) error {
+	for _, initializer := range initializers {
+		if initializer.name == "" || initializer.run == nil {
+			return errors.New("invalid runtime initializer")
+		}
+		if err := initializer.run(); err != nil {
+			return fmt.Errorf("%s: %w", initializer.name, err)
+		}
+	}
+	return nil
+}
+
+// serveEmbedded installs the embedded frontend after the API and relay routes
+// have been registered. Only otherwise-unmatched web requests reach this
+// handler, so its caching, compression, and abuse controls cannot change
+// responses from the data plane or dashboard API.
 func serveEmbedded(r *gin.Engine) {
 	dist, err := fs.Sub(web.Dist, "dist")
 	if err != nil {
 		common.SysError("embedded dist missing: " + err.Error())
 		return
 	}
-	fileServer := http.FileServer(http.FS(dist))
-	r.NoRoute(func(c *gin.Context) {
-		path := c.Request.URL.Path
-		// Relay/dashboard/api paths never fall back to the SPA: unknown
-		// endpoints under these prefixes return the structured RelayNotFound.
-		if strings.HasPrefix(path, "/v1") || strings.HasPrefix(path, "/api") || strings.HasPrefix(path, "/assets") {
-			controller.RelayNotFound(c)
-			return
-		}
-		if path != "/" && fileExists(dist, path) {
-			fileServer.ServeHTTP(c.Writer, c.Request)
-			return
-		}
-		// Serve index.html with analytics injection.
-		index, err := fs.ReadFile(dist, "index.html")
-		if err != nil {
-			fileServer.ServeHTTP(c.Writer, c.Request)
-			return
-		}
-		_, _ = c.Writer.Write([]byte(injectAnalytics(string(index))))
-	})
-}
-
-// injectAnalytics inserts the Google Analytics and Umami script tags before
-// </head> when their IDs are configured via environment variables.
-func injectAnalytics(html string) string {
-	scripts := ""
-	if ga := common.GetEnv("GOOGLE_ANALYTICS_ID", ""); ga != "" {
-		scripts += `<script async src="https://www.googletagmanager.com/gtag/js?id=` + ga + `"></script>` +
-			`<script>window.dataLayer=window.dataLayer||[];function gtag(){dataLayer.push(arguments);}gtag('js',new Date());gtag('config','` + ga + `');</script>`
+	handler, err := newEmbeddedWebHandler(dist)
+	if err != nil {
+		common.SysError("embedded web handler unavailable: " + err.Error())
+		return
 	}
-	if umami := common.GetEnv("UMAMI_WEBSITE_ID", ""); umami != "" {
-		src := common.GetEnv("UMAMI_SCRIPT_URL", "https://analytics.umami.is/script.js")
-		scripts += `<script defer src="` + src + `" data-website-id="` + umami + `"></script>`
-	}
-	if scripts == "" {
-		return html
-	}
-	return strings.Replace(html, "</head>", scripts+"</head>", 1)
+	r.NoRoute(handler.ServeGIN)
 }
 
 func fileExists(fsys fs.FS, path string) bool {
-	f, err := fsys.Open(path)
+	assetPath, ok := normalizedAssetPath(path)
+	if !ok || assetPath == "" {
+		return false
+	}
+	info, err := fs.Stat(fsys, assetPath)
 	if err != nil {
 		return false
 	}
-	_ = f.Close()
-	return true
+	return info.Mode().IsRegular()
 }

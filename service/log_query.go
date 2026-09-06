@@ -2,8 +2,11 @@ package service
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"gorm.io/gorm"
 
@@ -21,6 +24,56 @@ const maxRecentLogItems = 1000
 // logSearchCountLimit bounds the user log-search count (reference
 // logSearchCountLimit).
 const logSearchCountLimit = 10000
+
+const (
+	maxLogModelFilterBytes      = 255
+	maxLogUsernameFilterBytes   = 64
+	maxLogTokenNameFilterBytes  = 50
+	maxLogGroupFilterBytes      = 64
+	maxLogRequestIDFilterBytes  = 64
+	maxLogUpstreamIDFilterBytes = 128
+)
+
+// validateLogFilter keeps every value used to build a log query within the
+// corresponding persisted-field boundary. Besides bounding database work, it
+// rejects invisible control and bidi characters so an attacker cannot create
+// misleading operator searches or error/audit output.
+func validateLogFilter(name, value string, maximum int) error {
+	if value == "" {
+		return nil
+	}
+	if len(value) > maximum || !utf8.ValidString(value) {
+		return fmt.Errorf("%s 查询条件无效", name)
+	}
+	for _, character := range value {
+		if unicode.IsControl(character) || character == 0x061c || character == 0x200e || character == 0x200f ||
+			(character >= 0x202a && character <= 0x202e) || (character >= 0x2066 && character <= 0x2069) {
+			return fmt.Errorf("%s 查询条件无效", name)
+		}
+	}
+	return nil
+}
+
+func validateLogFilters(modelName, username, tokenName, group, requestID, upstreamRequestID string) error {
+	filters := []struct {
+		name    string
+		value   string
+		maximum int
+	}{
+		{name: "model_name", value: modelName, maximum: maxLogModelFilterBytes},
+		{name: "username", value: username, maximum: maxLogUsernameFilterBytes},
+		{name: "token_name", value: tokenName, maximum: maxLogTokenNameFilterBytes},
+		{name: "group", value: group, maximum: maxLogGroupFilterBytes},
+		{name: "request_id", value: requestID, maximum: maxLogRequestIDFilterBytes},
+		{name: "upstream_request_id", value: upstreamRequestID, maximum: maxLogUpstreamIDFilterBytes},
+	}
+	for _, filter := range filters {
+		if err := validateLogFilter(filter.name, filter.value, filter.maximum); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
 // logGroupColumn is the dialect-quoted "group" identifier ("group" is a
 // keyword in several SQL dialects).
@@ -68,9 +121,25 @@ func applyLogTextFilter(tx *gorm.DB, column, value string) (*gorm.DB, error) {
 	return tx.Where(column+" = ?", value), nil
 }
 
+func applyUpstreamRequestIDFilter(tx *gorm.DB, value string) *gorm.DB {
+	if value == "" {
+		return tx
+	}
+	normalized := common.NormalizeProviderCorrelationID(value)
+	if normalized == value {
+		return tx.Where("logs.upstream_request_id = ?", value)
+	}
+	// Match legacy raw rows as well as newly fingerprinted rows during rolling
+	// upgrades and historical searches.
+	return tx.Where("(logs.upstream_request_id = ? OR logs.upstream_request_id = ?)", value, normalized)
+}
+
 // GetAllLogs lists logs with the reference admin filter contract.
 func GetAllLogs(logType int, startTimestamp, endTimestamp int64, modelName, username, tokenName string,
 	startIdx, num, channel int, group, requestId, upstreamRequestId string) ([]model.Log, int64, error) {
+	if err := validateLogFilters(modelName, username, tokenName, group, requestId, upstreamRequestId); err != nil {
+		return nil, 0, err
+	}
 	tx := model.LOG_DB
 	if logType != LogTypeUnknown {
 		tx = tx.Where("logs.type = ?", logType)
@@ -89,7 +158,7 @@ func GetAllLogs(logType int, startTimestamp, endTimestamp int64, modelName, user
 		tx = tx.Where("logs.request_id = ?", requestId)
 	}
 	if upstreamRequestId != "" {
-		tx = tx.Where("logs.upstream_request_id = ?", upstreamRequestId)
+		tx = applyUpstreamRequestIDFilter(tx, upstreamRequestId)
 	}
 	if startTimestamp != 0 {
 		tx = tx.Where("logs.created_at >= ?", startTimestamp)
@@ -125,6 +194,9 @@ func GetAllLogs(logType int, startTimestamp, endTimestamp int64, modelName, user
 // the rows are redacted for the user-facing view.
 func GetUserLogs(userId, logType int, startTimestamp, endTimestamp int64, modelName, tokenName string,
 	startIdx, num int, group, requestId, upstreamRequestId string) ([]model.Log, int64, error) {
+	if err := validateLogFilters(modelName, "", tokenName, group, requestId, upstreamRequestId); err != nil {
+		return nil, 0, err
+	}
 	tx := model.LOG_DB.Where("logs.user_id = ?", userId)
 	if logType != LogTypeUnknown {
 		tx = tx.Where("logs.type = ?", logType)
@@ -140,7 +212,7 @@ func GetUserLogs(userId, logType int, startTimestamp, endTimestamp int64, modelN
 		tx = tx.Where("logs.request_id = ?", requestId)
 	}
 	if upstreamRequestId != "" {
-		tx = tx.Where("logs.upstream_request_id = ?", upstreamRequestId)
+		tx = applyUpstreamRequestIDFilter(tx, upstreamRequestId)
 	}
 	if startTimestamp != 0 {
 		tx = tx.Where("logs.created_at >= ?", startTimestamp)
@@ -189,6 +261,9 @@ type LogStat struct {
 // rpm/tpm count only consume-typed rows from the last minute).
 func SumUsedQuota(logType int, startTimestamp, endTimestamp int64, modelName, username, tokenName string, channel int, group string) (LogStat, error) {
 	var stat LogStat
+	if err := validateLogFilters(modelName, username, tokenName, group, "", ""); err != nil {
+		return stat, err
+	}
 	quotaTx := model.LOG_DB.Table("logs").Select("COALESCE(sum(quota), 0) quota")
 	rpmTpmTx := model.LOG_DB.Table("logs").
 		Select("count(*) rpm, COALESCE(sum(prompt_tokens), 0) + COALESCE(sum(completion_tokens), 0) tpm").

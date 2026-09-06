@@ -4,7 +4,6 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -71,14 +70,33 @@ func resolveCustomOAuthConfig(slug string) *OAuthConfig {
 // customOAuthHTTPClient talks to operator-configured endpoints, so dials go
 // through the SSRF guard (the reference uses a plain client here).
 var customOAuthHTTPClient = &http.Client{
-	Timeout:   20 * time.Second,
-	Transport: &http.Transport{Proxy: http.ProxyFromEnvironment, DialContext: common.SafeDialContext},
+	Timeout: 20 * time.Second,
+	// Environment proxies would validate only the proxy address and then let
+	// that proxy resolve/fetch the attacker-controlled destination, bypassing
+	// the SSRF dial policy. Direct guarded dialing is therefore mandatory.
+	Transport: &http.Transport{DialContext: common.SafeDialContext},
+	// Token and user-info requests carry credentials that must never be replayed
+	// to a redirect target.
+	CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	},
 }
 
 // customExchangeCode exchanges an authorization code at a custom provider's
 // token endpoint, honoring the configured auth style and accepting both JSON
 // and urlencoded (GitHub-style) token responses.
 func customExchangeCode(cfg *OAuthConfig, code, redirectURI string) (*OAuthToken, error) {
+	if cfg == nil || cfg.Custom == nil ||
+		validateOAuthCredentials(cfg.ClientID, cfg.ClientSecret, true) != nil ||
+		!validOAuthText(code, maxOAuthAuthorizationCodeBytes, false) || code != strings.TrimSpace(code) {
+		return nil, errors.New("OAuth token exchange request is invalid")
+	}
+	if _, err := validateOAuthURL(cfg.TokenURL, maxOAuthEndpointBytes, true); err != nil {
+		return nil, errors.New("OAuth token endpoint is invalid")
+	}
+	if _, err := validateOAuthURL(redirectURI, maxOAuthRedirectURIBytes, false); err != nil {
+		return nil, errors.New("OAuth redirect URI is invalid")
+	}
 	form := url.Values{}
 	form.Set("grant_type", "authorization_code")
 	form.Set("code", code)
@@ -87,6 +105,9 @@ func customExchangeCode(cfg *OAuthConfig, code, redirectURI string) (*OAuthToken
 	authStyle := cfg.Custom.AuthStyle
 	if authStyle == OAuthAuthStyleAutoDetect {
 		authStyle = OAuthAuthStyleInParams
+	}
+	if authStyle != OAuthAuthStyleInParams && authStyle != OAuthAuthStyleInHeader {
+		return nil, errors.New("OAuth token authentication style is invalid")
 	}
 	if authStyle == OAuthAuthStyleInParams {
 		form.Set("client_id", cfg.ClientID)
@@ -106,37 +127,70 @@ func customExchangeCode(cfg *OAuthConfig, code, redirectURI string) (*OAuthToken
 
 	resp, err := customOAuthHTTPClient.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, errors.New("OAuth token exchange request failed")
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
+	body, err := common.ReadAllLimited(resp.Body, maxOAuthResponseBytes)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("read token exchange response: %w", err)
+	}
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return nil, errors.New("OAuth token exchange was rejected")
 	}
 
-	var tokenResp struct {
-		AccessToken string `json:"access_token"`
-		TokenType   string `json:"token_type"`
-		Error       string `json:"error"`
-		ErrorDesc   string `json:"error_description"`
-	}
-	if err := common.Unmarshal(body, &tokenResp); err != nil {
+	var accessToken, tokenType, responseError string
+	raw, jsonErr := decodeBoundedOAuthJSONObject(body)
+	if jsonErr != nil {
 		values, parseErr := url.ParseQuery(string(body))
 		if parseErr != nil {
-			return nil, err
+			return nil, errors.New("OAuth token response is invalid")
 		}
-		tokenResp.AccessToken = values.Get("access_token")
-		tokenResp.TokenType = values.Get("token_type")
-		tokenResp.Error = values.Get("error")
-		tokenResp.ErrorDesc = values.Get("error_description")
+		pairs := 0
+		for key, items := range values {
+			pairs += len(items)
+			if key == "" || len(items) != 1 || !validOAuthText(key, maxOAuthEndpointQueryKeyBytes, false) ||
+				!validOAuthText(items[0], maxOAuthAccessTokenBytes, true) {
+				return nil, errors.New("OAuth token response is ambiguous")
+			}
+		}
+		if pairs > maxOAuthEndpointQueryPairs {
+			return nil, errors.New("OAuth token response has too many parameters")
+		}
+		accessToken = values.Get("access_token")
+		tokenType = values.Get("token_type")
+		responseError = values.Get("error")
+	} else {
+		var ok bool
+		if value, present := raw["access_token"]; present {
+			accessToken, ok = value.(string)
+			if !ok {
+				return nil, errors.New("OAuth token response is invalid")
+			}
+		}
+		if value, present := raw["token_type"]; present {
+			tokenType, ok = value.(string)
+			if !ok {
+				return nil, errors.New("OAuth token response is invalid")
+			}
+		}
+		if value, present := raw["error"]; present {
+			responseError, ok = value.(string)
+			if !ok {
+				return nil, errors.New("OAuth token response is invalid")
+			}
+		}
 	}
-	if tokenResp.Error != "" {
-		return nil, fmt.Errorf("token exchange failed: %s %s", tokenResp.Error, tokenResp.ErrorDesc)
+	if responseError != "" {
+		return nil, errors.New("OAuth token exchange was rejected")
 	}
-	if tokenResp.AccessToken == "" {
+	if accessToken == "" {
 		return nil, errors.New("token exchange returned no access_token")
 	}
-	return &OAuthToken{AccessToken: tokenResp.AccessToken, TokenType: tokenResp.TokenType}, nil
+	token := &OAuthToken{AccessToken: accessToken, TokenType: tokenType}
+	if err := validateOAuthToken(token); err != nil {
+		return nil, err
+	}
+	return token, nil
 }
 
 // OAuthAccessDeniedError signals that the provider's access policy rejected
@@ -160,6 +214,12 @@ func normalizeAuthorizationTokenType(tokenType string) string {
 // customFetchUserInfo fetches the raw userinfo document, extracts the mapped
 // identity fields via gjson paths, and enforces the provider's access policy.
 func customFetchUserInfo(cfg *OAuthConfig, token *OAuthToken) (*ProviderUser, error) {
+	if cfg == nil || cfg.Custom == nil || validateOAuthToken(token) != nil {
+		return nil, errors.New("OAuth userinfo request is invalid")
+	}
+	if _, err := validateOAuthURL(cfg.UserInfoURL, maxOAuthEndpointBytes, true); err != nil {
+		return nil, errors.New("OAuth userinfo endpoint is invalid")
+	}
 	provider := cfg.Custom
 	req, err := http.NewRequest(http.MethodGet, cfg.UserInfoURL, nil)
 	if err != nil {
@@ -169,27 +229,32 @@ func customFetchUserInfo(cfg *OAuthConfig, token *OAuthToken) (*ProviderUser, er
 	req.Header.Set("Accept", "application/json")
 	resp, err := customOAuthHTTPClient.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, errors.New("OAuth userinfo request failed")
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("userinfo failed: %s", resp.Status)
+		return nil, errors.New("OAuth userinfo request was rejected")
 	}
-	body, err := io.ReadAll(resp.Body)
+	body, err := common.ReadAllLimited(resp.Body, maxOAuthResponseBytes)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("read userinfo response: %w", err)
+	}
+	if _, err := decodeBoundedOAuthJSONObject(body); err != nil {
+		return nil, errors.New("OAuth userinfo response is invalid")
 	}
 	bodyStr := string(body)
 
-	userId := gjson.Get(bodyStr, provider.UserIdField).String()
-	if userId == "" {
-		// Numeric/typed ids stringify through the raw token (quotes trimmed).
-		if result := gjson.Get(bodyStr, provider.UserIdField); result.Exists() {
-			userId = strings.Trim(result.Raw, "\"")
-		}
+	identityResult := gjson.Get(bodyStr, provider.UserIdField)
+	userId := ""
+	if identityResult.Type == gjson.String || identityResult.Type == gjson.Number {
+		userId = identityResult.String()
 	}
 	if userId == "" {
 		return nil, fmt.Errorf("provider user has no id (field: %s)", provider.UserIdField)
+	}
+	userId, err = model.NormalizeCustomOAuthSubject(userId)
+	if err != nil {
+		return nil, errors.New("provider user has invalid id")
 	}
 
 	if policyRaw := strings.TrimSpace(provider.AccessPolicy); policyRaw != "" {
@@ -483,7 +548,7 @@ func renderAccessDeniedMessage(template, providerName, body string, failure *acc
 		return ""
 	})
 
-	return strings.TrimSpace(message)
+	return normalizeOAuthProfileText(message, 512)
 }
 
 // OAuthBindingInfo is the user-facing binding shape (provider metadata plus

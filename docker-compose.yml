@@ -14,7 +14,10 @@ services:
     environment:
       - SQL_DSN=postgresql://tokenrouter:change-me@postgres:5432/tokenrouter
       - REDIS_CONN_STRING=redis://:change-me@redis:6379
-      - SESSION_SECRET=change-me-to-a-random-string
+      - SESSION_SECRET=${SESSION_SECRET:?Set SESSION_SECRET to at least 32 random bytes}
+      - JIMENG_RECOVERY_DIR=/data/jimeng-recovery
+      - VIDEO_TASK_RECOVERY_DIR=/data/video-task-recovery
+      - ASYNC_TASK_ENCRYPTION_KEYS=${ASYNC_TASK_ENCRYPTION_KEYS:-}
       - TZ=Asia/Shanghai
     depends_on:
       - redis

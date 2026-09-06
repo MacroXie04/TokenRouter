@@ -3,6 +3,8 @@ package service
 import (
 	"math"
 	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -12,7 +14,10 @@ import (
 	"github.com/tokenrouter/tokenrouter/setting"
 )
 
-const PerfMetricSeriesSchema = "dbcd0a3c01b55203"
+const (
+	PerfMetricSeriesSchema             = "dbcd0a3c01b55203"
+	invalidPerfMetricRetentionFallback = 30
+)
 
 type PerfMetricSample struct {
 	Model        string
@@ -439,16 +444,23 @@ func perfMetricsEnabled() bool {
 
 func perfMetricFlushIntervalMinutes() int {
 	interval := setting.GetOptionIntOrDefault(setting.PerfMetricsFlushIntervalOption, 5)
-	if interval < 1 {
-		return 1
+	if interval < 1 || interval > 24*60 {
+		return 5
 	}
 	return interval
 }
 
 func perfMetricRetentionDays() int {
-	days := setting.GetOptionIntOrDefault(setting.PerfMetricsRetentionDaysOption, 0)
-	if days < 0 {
+	raw := setting.GetOption(setting.PerfMetricsRetentionDaysOption)
+	if raw == "" {
 		return 0
+	}
+	if raw != strings.TrimSpace(raw) || len(raw) > 16 {
+		return invalidPerfMetricRetentionFallback
+	}
+	days, err := strconv.Atoi(raw)
+	if err != nil || strconv.Itoa(days) != raw || days < 0 || days > 36_500 {
+		return invalidPerfMetricRetentionFallback
 	}
 	return days
 }

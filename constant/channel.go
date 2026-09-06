@@ -36,36 +36,38 @@ const (
 	ChannelTypeMoonshot       ChannelType = 25
 	ChannelTypeZhipuV4        ChannelType = 26
 	ChannelTypePerplexity     ChannelType = 27
-	ChannelTypeLingYiWanWu    ChannelType = 28
-	ChannelTypeAws            ChannelType = 29
-	ChannelTypeCohere         ChannelType = 30
-	ChannelTypeMiniMax        ChannelType = 31
-	ChannelTypeSunoAPI        ChannelType = 32
-	ChannelTypeDify           ChannelType = 33
-	ChannelTypeJina           ChannelType = 34
-	ChannelCloudflare         ChannelType = 35
-	ChannelTypeSiliconFlow    ChannelType = 36
-	ChannelTypeVertexAi       ChannelType = 37
-	ChannelTypeMistral        ChannelType = 38
-	ChannelTypeDeepSeek       ChannelType = 39
-	ChannelTypeMokaAI         ChannelType = 40
-	ChannelTypeVolcEngine     ChannelType = 41
-	ChannelTypeBaiduV2        ChannelType = 42
-	ChannelTypeXinference     ChannelType = 43
-	ChannelTypeXai            ChannelType = 44
-	ChannelTypeCoze           ChannelType = 45
-	ChannelTypeKling          ChannelType = 46
-	ChannelTypeJimeng         ChannelType = 47
-	ChannelTypeVidu           ChannelType = 48
-	ChannelTypeSubmodel       ChannelType = 49
-	ChannelTypeDoubaoVideo    ChannelType = 50
-	ChannelTypeSora           ChannelType = 51
-	ChannelTypeReplicate      ChannelType = 52
-	ChannelTypeCodex          ChannelType = 53
-	ChannelTypeAdvancedCustom ChannelType = 54
-	ChannelTypeSub2API        ChannelType = 55
-	ChannelTypeNewAPI         ChannelType = 56
-	ChannelTypeDummy          ChannelType = 57
+	// Values 28-30 and 32 are reserved by the reference catalog. Keep these
+	// gaps: channel type is a persisted and externally visible identifier.
+	ChannelTypeLingYiWanWu    ChannelType = 31
+	ChannelTypeAws            ChannelType = 33
+	ChannelTypeCohere         ChannelType = 34
+	ChannelTypeMiniMax        ChannelType = 35
+	ChannelTypeSunoAPI        ChannelType = 36
+	ChannelTypeDify           ChannelType = 37
+	ChannelTypeJina           ChannelType = 38
+	ChannelCloudflare         ChannelType = 39
+	ChannelTypeSiliconFlow    ChannelType = 40
+	ChannelTypeVertexAi       ChannelType = 41
+	ChannelTypeMistral        ChannelType = 42
+	ChannelTypeDeepSeek       ChannelType = 43
+	ChannelTypeMokaAI         ChannelType = 44
+	ChannelTypeVolcEngine     ChannelType = 45
+	ChannelTypeBaiduV2        ChannelType = 46
+	ChannelTypeXinference     ChannelType = 47
+	ChannelTypeXai            ChannelType = 48
+	ChannelTypeCoze           ChannelType = 49
+	ChannelTypeKling          ChannelType = 50
+	ChannelTypeJimeng         ChannelType = 51
+	ChannelTypeVidu           ChannelType = 52
+	ChannelTypeSubmodel       ChannelType = 53
+	ChannelTypeDoubaoVideo    ChannelType = 54
+	ChannelTypeSora           ChannelType = 55
+	ChannelTypeReplicate      ChannelType = 56
+	ChannelTypeCodex          ChannelType = 57
+	ChannelTypeAdvancedCustom ChannelType = 58
+	ChannelTypeSub2API        ChannelType = 59
+	ChannelTypeNewAPI         ChannelType = 60
+	ChannelTypeDummy          ChannelType = 61
 )
 
 // ChannelTypeName maps a channel type to its canonical display name.
@@ -190,6 +192,41 @@ func ChannelTypeName(t ChannelType) string {
 	}
 }
 
+// IsOpenAICompatibleChannelType reports whether a provider supports the broad
+// OpenAI-compatible surface used by relay dispatch, native-format conversion,
+// model discovery, and operational probes. Narrow OpenAI-family providers such
+// as Jina and Submodel are registered explicitly at dispatch so their smaller
+// endpoint sets cannot accidentally opt into these additional capabilities.
+func IsOpenAICompatibleChannelType(t ChannelType) bool {
+	switch t {
+	case ChannelTypeOpenAI,
+		ChannelTypeAzure,
+		ChannelTypeOllama,
+		ChannelTypeOpenAIMax,
+		ChannelTypeOhMyGPT,
+		ChannelTypeCustom,
+		ChannelTypeAILS,
+		ChannelTypeAIProxy,
+		ChannelTypeAPI2GPT,
+		ChannelTypeAIGC2D,
+		ChannelType360,
+		ChannelTypeOpenRouter,
+		ChannelTypeFastGPT,
+		ChannelTypePerplexity,
+		ChannelTypeLingYiWanWu,
+		ChannelTypeSiliconFlow,
+		ChannelTypeMistral,
+		ChannelTypeDeepSeek,
+		ChannelTypeXinference,
+		ChannelTypeXai,
+		ChannelTypeSub2API,
+		ChannelTypeNewAPI:
+		return true
+	default:
+		return false
+	}
+}
+
 // ChannelStatus values.
 const (
 	ChannelStatusUnknown          = 0
@@ -200,72 +237,76 @@ const (
 
 // Channel selection / auto-ban defaults.
 const (
-	AutoBanTimeSeconds        = 60
-	DefaultChannelWeight      = 1
-	DefaultChannelPriority    = 0
-	MaxChannelWeight          = 100
-	DefaultChannelTestModel   = ""
+	AutoBanTimeSeconds      = 60
+	DefaultChannelWeight    = 1
+	DefaultChannelPriority  = 0
+	MaxChannelWeight        = 100
+	DefaultChannelTestModel = ""
 )
 
 // ChannelBaseURLs maps a channel type to its default upstream base URL
 // (factual provider endpoints; empty where the type has no default).
 var ChannelBaseURLs = []string{
-	"",                                     // 0 Unknown
-	"https://api.openai.com",               // 1 OpenAI
-	"",                                     // 2 Midjourney
-	"",                                     // 3 Azure
-	"http://localhost:11434",               // 4 Ollama
-	"",                                     // 5 MidjourneyPlus
-	"https://api.openaimax.com",            // 6 OpenAIMax
-	"https://api.ohmygpt.com",              // 7 OhMyGPT
-	"",                                     // 8 Custom
-	"https://api.caipacity.com",            // 9 AILS
-	"https://api.aiproxy.io",               // 10 AIProxy
-	"",                                     // 11 PaLM
-	"https://api.api2gpt.com",              // 12 API2GPT
-	"https://api.aigc2d.com",               // 13 AIGC2D
-	"https://api.anthropic.com",            // 14 Anthropic
-	"https://aip.baidubce.com",             // 15 Baidu
-	"https://open.bigmodel.cn",             // 16 Zhipu
-	"https://dashscope.aliyuncs.com",       // 17 Ali
-	"",                                     // 18 Xunfei
-	"https://api.360.cn",                   // 19 360
-	"https://openrouter.ai/api",            // 20 OpenRouter
-	"https://api.aiproxy.io",               // 21 AIProxyLibrary
-	"https://fastgpt.run/api/openapi",      // 22 FastGPT
-	"https://hunyuan.tencentcloudapi.com",  // 23 Tencent
+	"",                                    // 0 Unknown
+	"https://api.openai.com",              // 1 OpenAI
+	"",                                    // 2 Midjourney
+	"",                                    // 3 Azure
+	"http://localhost:11434",              // 4 Ollama
+	"",                                    // 5 MidjourneyPlus
+	"https://api.openaimax.com",           // 6 OpenAIMax
+	"https://api.ohmygpt.com",             // 7 OhMyGPT
+	"",                                    // 8 Custom
+	"https://api.caipacity.com",           // 9 AILS
+	"https://api.aiproxy.io",              // 10 AIProxy
+	"",                                    // 11 PaLM
+	"https://api.api2gpt.com",             // 12 API2GPT
+	"https://api.aigc2d.com",              // 13 AIGC2D
+	"https://api.anthropic.com",           // 14 Anthropic
+	"https://aip.baidubce.com",            // 15 Baidu
+	"https://open.bigmodel.cn",            // 16 Zhipu
+	"https://dashscope.aliyuncs.com",      // 17 Ali
+	"",                                    // 18 Xunfei
+	"https://api.360.cn",                  // 19 360
+	"https://openrouter.ai/api",           // 20 OpenRouter
+	"https://api.aiproxy.io",              // 21 AIProxyLibrary
+	"https://fastgpt.run/api/openapi",     // 22 FastGPT
+	"https://hunyuan.tencentcloudapi.com", // 23 Tencent
 	"https://generativelanguage.googleapis.com", // 24 Gemini
-	"https://api.moonshot.cn",              // 25 Moonshot
-	"https://open.bigmodel.cn",             // 26 ZhipuV4
-	"https://api.perplexity.ai",            // 27 Perplexity
-	"https://api.lingyiwanwu.com",          // 28 LingYiWanWu
-	"",                                     // 29 Aws
-	"https://api.cohere.ai",                // 30 Cohere
-	"https://api.minimax.chat",             // 31 MiniMax
-	"",                                     // 32 SunoAPI
-	"https://api.dify.ai",                  // 33 Dify
-	"https://api.jina.ai",                  // 34 Jina
-	"https://api.cloudflare.com",           // 35 Cloudflare
-	"https://api.siliconflow.cn",           // 36 SiliconFlow
-	"",                                     // 37 VertexAi
-	"https://api.mistral.ai",               // 38 Mistral
-	"https://api.deepseek.com",             // 39 DeepSeek
-	"https://api.moka.ai",                  // 40 MokaAI
-	"https://ark.cn-beijing.volces.com",    // 41 VolcEngine
-	"https://qianfan.baidubce.com",         // 42 BaiduV2
-	"",                                     // 43 Xinference
-	"https://api.x.ai",                     // 44 Xai
-	"https://api.coze.cn",                  // 45 Coze
-	"https://api.klingai.com",              // 46 Kling
-	"https://visual.volcengineapi.com",     // 47 Jimeng
-	"https://api.vidu.cn",                  // 48 Vidu
-	"https://llm.submodel.ai",              // 49 Submodel
-	"https://ark.cn-beijing.volces.com",    // 50 DoubaoVideo
-	"https://api.openai.com",               // 51 Sora
-	"https://api.replicate.com",            // 52 Replicate
-	"https://chatgpt.com",                  // 53 Codex
-	"",                                     // 54 AdvancedCustom
-	"",                                     // 55 Sub2API
-	"",                                     // 56 NewAPI
-	"",                                     // 57 Dummy
+	"https://api.moonshot.cn",                   // 25 Moonshot
+	"https://open.bigmodel.cn",                  // 26 ZhipuV4
+	"https://api.perplexity.ai",                 // 27 Perplexity
+	"",                                          // 28 reserved
+	"",                                          // 29 reserved
+	"",                                          // 30 reserved
+	"https://api.lingyiwanwu.com",               // 31 LingYiWanWu
+	"",                                          // 32 reserved
+	"",                                          // 33 Aws
+	"https://api.cohere.ai",                     // 34 Cohere
+	"https://api.minimax.chat",                  // 35 MiniMax
+	"",                                          // 36 SunoAPI
+	"https://api.dify.ai",                       // 37 Dify
+	"https://api.jina.ai",                       // 38 Jina
+	"https://api.cloudflare.com",                // 39 Cloudflare
+	"https://api.siliconflow.cn",                // 40 SiliconFlow
+	"",                                          // 41 VertexAi
+	"https://api.mistral.ai",                    // 42 Mistral
+	"https://api.deepseek.com",                  // 43 DeepSeek
+	"https://api.moka.ai",                       // 44 MokaAI
+	"https://ark.cn-beijing.volces.com",         // 45 VolcEngine
+	"https://qianfan.baidubce.com",              // 46 BaiduV2
+	"",                                          // 47 Xinference
+	"https://api.x.ai",                          // 48 Xai
+	"https://api.coze.cn",                       // 49 Coze
+	"https://api.klingai.com",                   // 50 Kling
+	"https://visual.volcengineapi.com",          // 51 Jimeng
+	"https://api.vidu.cn",                       // 52 Vidu
+	"https://llm.submodel.ai",                   // 53 Submodel
+	"https://ark.cn-beijing.volces.com",         // 54 DoubaoVideo
+	"https://api.openai.com",                    // 55 Sora
+	"https://api.replicate.com",                 // 56 Replicate
+	"https://chatgpt.com",                       // 57 Codex
+	"",                                          // 58 AdvancedCustom
+	"",                                          // 59 Sub2API
+	"",                                          // 60 NewAPI
+	"",                                          // 61 Dummy
 }

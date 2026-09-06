@@ -2,12 +2,15 @@
 package controller
 
 import (
+	"net"
 	"net/http"
+	"net/url"
+	"strings"
+	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
 
 	"github.com/tokenrouter/tokenrouter/common"
-	"github.com/tokenrouter/tokenrouter/dto"
 	"github.com/tokenrouter/tokenrouter/model"
 	"github.com/tokenrouter/tokenrouter/service"
 	"github.com/tokenrouter/tokenrouter/setting"
@@ -15,6 +18,17 @@ import (
 
 // StartTime is the process start timestamp (set in main.go).
 var StartTime = common.NowTimestamp()
+
+const (
+	maxStatusNameBytes       = 128
+	maxStatusServerURLBytes  = 2048
+	maxStatusImageURLBytes   = 4096
+	maxStatusSiteKeyBytes    = 256
+	maxStatusOAuthIDBytes    = 256
+	maxStatusOAuthURLBytes   = 2048
+	maxStatusPasskeyBytes    = 16 << 10
+	maxStatusNavigationBytes = 64 << 10
+)
 
 // TestStatus reports database connectivity for monitoring probes. The
 // reference includes HTTP request counters in http_stats; TokenRouter does not
@@ -44,17 +58,108 @@ func TestStatus(c *gin.Context) {
 
 // GetStatus returns the health/status payload.
 func GetStatus(c *gin.Context) {
-	data := gin.H{
-		"version":            common.Version,
-		"start_time":         StartTime,
-		"app_name":           common.ProductName,
-		"site_name":          setting.GetSiteName(),
-		"node_name":          common.GetEnv("NODE_NAME", "tokenrouter-node-1"),
-		"wechat_login":       service.WeChatAuthEnabled(),
-		"wechat_qrcode":      service.WeChatQRCodeURL(),
-		"turnstile_check":    service.TurnstileEnabled(),
-		"turnstile_site_key": service.TurnstileSiteKey(),
+	githubConfig := service.GetOAuthConfig("github")
+	discordConfig := service.GetOAuthConfig("discord")
+	oidcConfig := service.GetOAuthConfig("oidc")
+	linuxDOConfig := service.GetOAuthConfig("linuxdo")
+	passkeyEnabled := false
+	var passkeyConfig setting.PasskeySetting
+	if setting.GetAuthenticationSetting().Passkey.Enabled {
+		if effective, err := service.EffectivePasskeySetting(); err == nil {
+			passkeyConfig = effective
+			passkeyEnabled = true
+		}
 	}
+	telegramOAuth := service.TelegramOAuthEnabled()
+	telegramBotName := ""
+	if telegramOAuth {
+		telegramBotName = service.TelegramBotName()
+	}
+	systemName := boundedPublicStatusText(setting.GetSiteName(), maxStatusNameBytes, common.ProductName)
+	consoleContent := setting.GetConsoleContentSetting()
+	data := gin.H{
+		"version":                   common.Version,
+		"start_time":                StartTime,
+		"app_name":                  common.ProductName,
+		"system_name":               systemName,
+		"site_name":                 systemName,
+		"logo":                      publicStatusImageURL(setting.GetOption(setting.LogoOption)),
+		"node_name":                 boundedPublicStatusText(common.GetEnv("NODE_NAME", "tokenrouter-node-1"), maxStatusNameBytes, "tokenrouter-node-1"),
+		"wechat_login":              service.WeChatAuthEnabled(),
+		"wechat_qrcode":             publicStatusImageURL(service.WeChatQRCodeURL()),
+		"turnstile_check":           service.TurnstileEnabled(),
+		"turnstile_site_key":        boundedPublicStatusText(service.TurnstileSiteKey(), maxStatusSiteKeyBytes, ""),
+		"passkey_login":             passkeyEnabled,
+		"github_oauth":              githubConfig.Enabled,
+		"discord_oauth":             discordConfig.Enabled,
+		"oidc_enabled":              oidcConfig.Enabled,
+		"linuxdo_oauth":             linuxDOConfig.Enabled,
+		"telegram_oauth":            telegramOAuth,
+		"telegram_bot_name":         telegramBotName,
+		"checkin_enabled":           setting.GetCheckinSetting().Enabled,
+		"self_use_mode_enabled":     setting.GetOptionBool(setting.SelfUseModeEnabledOption, false),
+		"demo_site_enabled":         setting.GetOptionBool(setting.DemoSiteEnabledOption, false),
+		"register_enabled":          setting.GetOptionBool(setting.RegistrationEnabledOption, true),
+		"password_login_enabled":    setting.GetOptionBool(setting.PasswordLoginEnabledOption, true),
+		"password_register_enabled": setting.GetOptionBool(setting.PasswordRegisterEnabledOption, true),
+		"email_verification":        setting.GetOptionBool(setting.EmailVerificationEnabledOption, false),
+		"default_collapse_sidebar":  setting.GetOperationsSetting().DefaultCollapseSidebar,
+		"server_address":            publicStatusServerURL(setting.GetOption(setting.ServerAddressOption)),
+		"chats":                     setting.GetChatPresetMaps(),
+		// Expose the persisted public navigation policy so the browser applies the
+		// same conditional visibility and authentication rules as the API.
+		"HeaderNavModules": boundedPublicStatusText(
+			setting.GetOptionOrDefault(setting.HeaderNavModulesOption, ""),
+			maxStatusNavigationBytes,
+			"",
+		),
+		"SidebarModulesAdmin": boundedPublicStatusText(
+			setting.GetOptionOrDefault(setting.SidebarModulesAdminOption, ""),
+			maxStatusNavigationBytes,
+			"",
+		),
+		"api_info_enabled":      consoleContent.APIInfoEnabled,
+		"faq_enabled":           consoleContent.FAQEnabled,
+		"uptime_kuma_enabled":   consoleContent.UptimeKumaEnabled,
+		"announcements_enabled": consoleContent.AnnouncementsEnabled,
+	}
+	// Provider metadata is advertised only alongside a runnable provider. A
+	// malformed environment override therefore cannot publish a dead sign-in
+	// button or stale client identifier. Secrets are never included.
+	if githubConfig.Enabled {
+		data["github_client_id"] = boundedPublicStatusText(githubConfig.ClientID, maxStatusOAuthIDBytes, "")
+	}
+	if discordConfig.Enabled {
+		data["discord_client_id"] = boundedPublicStatusText(discordConfig.ClientID, maxStatusOAuthIDBytes, "")
+	}
+	if linuxDOConfig.Enabled {
+		data["linuxdo_client_id"] = boundedPublicStatusText(linuxDOConfig.ClientID, maxStatusOAuthIDBytes, "")
+		data["linuxdo_minimum_trust_level"] = linuxDOConfig.MinimumTrustLevel
+	}
+	if oidcConfig.Enabled {
+		data["oidc_client_id"] = boundedPublicStatusText(oidcConfig.ClientID, maxStatusOAuthIDBytes, "")
+		data["oidc_authorization_endpoint"] = boundedPublicStatusText(oidcConfig.AuthURL, maxStatusOAuthURLBytes, "")
+		data["oidc_display_name"] = boundedPublicStatusText(oidcConfig.DisplayName, maxStatusNameBytes, "OIDC")
+	}
+	if passkeyEnabled {
+		data["passkey_display_name"] = boundedPublicStatusText(passkeyConfig.RPDisplayName, maxStatusNameBytes, common.ProductName)
+		data["passkey_rp_id"] = boundedPublicStatusText(passkeyConfig.RPID, 253, "")
+		data["passkey_origins"] = boundedPublicStatusText(strings.Join(passkeyConfig.Origins, ","), maxStatusPasskeyBytes, "")
+		data["passkey_allow_insecure"] = passkeyConfig.AllowInsecureOrigin
+		data["passkey_user_verification"] = passkeyConfig.UserVerification
+		data["passkey_attachment"] = passkeyConfig.AttachmentPreference
+	}
+	if consoleContent.APIInfoEnabled {
+		data["api_info"] = consoleContent.APIInfo
+	}
+	if consoleContent.FAQEnabled {
+		data["faq"] = consoleContent.FAQ
+	}
+	if consoleContent.AnnouncementsEnabled {
+		data["announcements"] = consoleContent.Announcements
+	}
+	data["user_agreement_enabled"] = setting.GetOption("legal.user_agreement") != ""
+	data["privacy_policy_enabled"] = setting.GetOption("legal.privacy_policy") != ""
 	// Enabled custom OAuth providers surface their public login metadata
 	// (never the client secret); the key is absent when none are enabled.
 	if providers, err := model.GetEnabledCustomOAuthProviders(); err == nil && len(providers) > 0 {
@@ -73,7 +178,7 @@ func GetStatus(c *gin.Context) {
 				Id:                    provider.Id,
 				Name:                  provider.Name,
 				Slug:                  provider.Slug,
-				Icon:                  provider.Icon,
+				Icon:                  publicStatusImageURL(provider.Icon),
 				ClientId:              provider.ClientId,
 				AuthorizationEndpoint: provider.AuthorizationEndpoint,
 				Scopes:                provider.Scopes,
@@ -88,36 +193,146 @@ func GetStatus(c *gin.Context) {
 	})
 }
 
+func boundedPublicStatusText(value string, maximumBytes int, fallback string) string {
+	if len(value) > maximumBytes || !utf8.ValidString(value) {
+		return fallback
+	}
+	for _, character := range value {
+		if character < 0x20 || (character >= 0x7f && character <= 0x9f) || character == 0x061c ||
+			character == 0x200e || character == 0x200f ||
+			(character >= 0x202a && character <= 0x202e) ||
+			(character >= 0x2066 && character <= 0x2069) {
+			return fallback
+		}
+	}
+	return value
+}
+
+func publicStatusServerURL(raw string) string {
+	return safePublicStatusURL(raw, maxStatusServerURLBytes, false, false)
+}
+
+func publicStatusImageURL(raw string) string {
+	return safePublicStatusURL(raw, maxStatusImageURLBytes, true, true)
+}
+
+func safePublicStatusURL(raw string, maximumBytes int, allowRelative, allowQuery bool) string {
+	if raw == "" {
+		return ""
+	}
+	if raw != strings.TrimSpace(raw) || strings.Contains(raw, `\`) ||
+		boundedPublicStatusText(raw, maximumBytes, "") == "" {
+		return ""
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Opaque != "" || parsed.User != nil || parsed.Fragment != "" {
+		return ""
+	}
+	if allowRelative && parsed.Scheme == "" && parsed.Host == "" && strings.HasPrefix(parsed.Path, "/") &&
+		!strings.HasPrefix(parsed.Path, "//") {
+		return raw
+	}
+	if !parsed.IsAbs() || parsed.Hostname() == "" || !allowQuery && parsed.RawQuery != "" {
+		return ""
+	}
+	if parsed.Scheme == "https" {
+		return raw
+	}
+	if parsed.Scheme != "http" {
+		return ""
+	}
+	host := strings.TrimSuffix(strings.ToLower(parsed.Hostname()), ".")
+	address := net.ParseIP(host)
+	if host == "localhost" || strings.HasSuffix(host, ".localhost") || address != nil && address.IsLoopback() {
+		return raw
+	}
+	return ""
+}
+
 // GetNotice returns the public notice content.
 func GetNotice(c *gin.Context) {
-	c.JSON(http.StatusOK, dto.Ok(setting.GetOptionOrDefault("Notice", "")))
+	writePublicContent(c, "Notice")
 }
 
 // GetAbout returns the about-page content.
 func GetAbout(c *gin.Context) {
-	c.JSON(http.StatusOK, dto.Ok(gin.H{
-		"version":  common.Version,
-		"app_name": common.ProductName,
-		"about":    setting.GetOptionOrDefault("About", ""),
-	}))
+	writePublicContent(c, "About")
 }
+
+// Reference compatibility: About is the configured string itself, while
+// process metadata remains available from /api/status. All five public
+// documents therefore share the same bounded response shape.
 
 // GetHomePageContent returns the home-page content blocks.
 func GetHomePageContent(c *gin.Context) {
-	c.JSON(http.StatusOK, dto.Ok(setting.GetOptionOrDefault("HomePageContent", "")))
+	writePublicContent(c, "HomePageContent")
 }
 
 // GetPricing returns the pricing page configuration.
 func GetPricing(c *gin.Context) {
-	c.JSON(http.StatusOK, dto.Ok(setting.GetOptionOrDefault("Pricing", "{}")))
+	userGroup := ""
+	if userID := common.GetUserId(c); userID > 0 {
+		user, err := service.GetUserByID(userID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"success": false,
+				"message": "unable to resolve pricing access",
+			})
+			return
+		}
+		userGroup = user.Group
+		if userGroup == "" {
+			userGroup = service.GroupDefault
+		}
+	}
+	catalog, err := service.BuildPricingCatalog(userGroup)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"message": "unable to build pricing catalog",
+		})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"success":            true,
+		"message":            "",
+		"data":               catalog.Items,
+		"vendors":            catalog.Vendors,
+		"group_ratio":        catalog.GroupRatio,
+		"usable_group":       catalog.UsableGroup,
+		"supported_endpoint": catalog.SupportedEndpoint,
+		"auto_groups":        catalog.AutoGroups,
+		"pricing_version":    catalog.Version,
+	})
 }
 
 // GetUserAgreement returns the user agreement text.
 func GetUserAgreement(c *gin.Context) {
-	c.JSON(http.StatusOK, dto.Ok(setting.GetOptionOrDefault("UserAgreement", "")))
+	writePublicContent(c, "legal.user_agreement")
 }
 
 // GetPrivacyPolicy returns the privacy policy text.
 func GetPrivacyPolicy(c *gin.Context) {
-	c.JSON(http.StatusOK, dto.Ok(setting.GetOptionOrDefault("PrivacyPolicy", "")))
+	writePublicContent(c, "legal.privacy_policy")
+}
+
+// publicContentMaxBytes keeps a bad or unexpectedly large database option from
+// turning an unauthenticated endpoint into an unbounded response. The browser
+// independently applies a one-million-character ceiling before rendering.
+const publicContentMaxBytes = 1_000_000
+
+func writePublicContent(c *gin.Context, optionKey string) {
+	content := setting.GetOption(optionKey)
+	if len(content) > publicContentMaxBytes {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"message": "public content exceeds the safe display limit",
+		})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "",
+		"data":    content,
+	})
 }

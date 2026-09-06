@@ -7,6 +7,7 @@ const (
 	RequestIdKey             = "X-Request-Id"
 	ContextKeyUserId         = "user_id"
 	ContextKeyUsername       = "username"
+	ContextKeyUserGroup      = "user_group"
 	ContextKeyRole           = "role"
 	ContextKeyTokenId        = "token_id"
 	ContextKeyTokenName      = "token_name"
@@ -44,6 +45,17 @@ func GetUsername(c *gin.Context) string {
 		}
 	}
 	return ""
+}
+
+// SetUserGroup stores the authenticated user's own group. This is distinct
+// from ContextKeyGroup, which is the channel group selected for a relay.
+func SetUserGroup(c *gin.Context, group string) {
+	c.Set(ContextKeyUserGroup, group)
+}
+
+// GetUserGroup returns the authenticated user's own group ("" if absent).
+func GetUserGroup(c *gin.Context) string {
+	return GetString(c, ContextKeyUserGroup)
 }
 
 // SetRole stores the user role on the context.

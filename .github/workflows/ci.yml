@@ -6,38 +6,209 @@ on:
   pull_request:
 
 jobs:
-  backend:
+  frontend:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install dependencies (frozen)
+        working-directory: web
+        run: npm ci --no-audit --no-fund
+      - name: Lint
+        working-directory: web
+        run: npm run lint
+      - name: Test
+        working-directory: web
+        run: npm test
+      - name: Typecheck
+        working-directory: web
+        run: npm run typecheck
+      - name: Translation completeness
+        run: |
+          node scripts/check-translations.mjs --self-test
+          node scripts/check-translations.mjs
+      - name: Build
+        working-directory: web
+        run: npm run build
+      - name: Upload embedded frontend
+        uses: actions/upload-artifact@v4
+        with:
+          name: tokenrouter-web-dist
+          path: web/dist
+          if-no-files-found: error
+          retention-days: 1
+
+  backend:
+    needs: frontend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download embedded frontend
+        uses: actions/download-artifact@v4
+        with:
+          name: tokenrouter-web-dist
+          path: web/dist
       - uses: actions/setup-go@v5
         with:
           go-version: "1.26"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Format
+        shell: bash
+        run: |
+          unformatted="$(gofmt -l $(git ls-files '*.go'))"
+          if [[ -n "$unformatted" ]]; then
+            echo "The following Go files need gofmt:"
+            echo "$unformatted"
+            exit 1
+          fi
+      - name: Acceptance gate failure-propagation regression
+        run: bash scripts/test-tokenrouter-acceptance.sh
+      - name: Release scanner regressions
+        run: |
+          node scripts/verify-go-test-manifest.mjs --self-test
+          bash scripts/scan-repository-secrets.sh --self-test
+          bash scripts/scan-repository-secrets.sh
       - name: Vet
         run: go vet ./...
       - name: Build
         run: go build ./...
       - name: Test
         run: go test ./...
+      - name: Race tests
+        run: go test -race ./common/... ./middleware/... ./relay/... ./router/... ./service/...
       - name: Protocol module (standalone)
         run: |
           cd protocolkit
+          GOWORK=off go vet ./...
           GOWORK=off go build ./...
           GOWORK=off go test ./...
+      - name: Exact route matrix
+        run: bash scripts/verify-api-matrix.sh
 
-  frontend:
+  server-database-matrix:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: tokenrouter-ci
+          MYSQL_DATABASE: tokenrouter_ci
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -ptokenrouter-ci"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: tokenrouter
+          POSTGRES_PASSWORD: tokenrouter-ci
+          POSTGRES_DB: tokenrouter_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U tokenrouter -d tokenrouter_ci"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+      clickhouse:
+        image: clickhouse/clickhouse-server:24.8
+        env:
+          CLICKHOUSE_USER: tokenrouter
+          CLICKHOUSE_PASSWORD: tokenrouter-ci
+          CLICKHOUSE_DB: tokenrouter_logs
+        ports:
+          - 9000:9000
+        options: >-
+          --health-cmd="clickhouse-client --user tokenrouter --password tokenrouter-ci --database tokenrouter_logs --query 'SELECT 1'"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd="redis-cli ping"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
     steps:
       - uses: actions/checkout@v4
-      - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-go@v5
         with:
-          bun-version: latest
-      - name: Install
-        working-directory: web
-        run: bun install
-      - name: Typecheck
-        working-directory: web
-        run: bun run typecheck
-      - name: Build
-        working-directory: web
-        run: bun run build
+          go-version: "1.26"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Exact-test manifest verifier regression
+        run: node scripts/verify-go-test-manifest.mjs --self-test
+      - name: MySQL migration, accounting, scheduler, retention, outbox, and async-task lifecycle
+        env:
+          TOKENROUTER_TEST_SQL_DSN: root:tokenrouter-ci@tcp(127.0.0.1:3306)/tokenrouter_ci?charset=utf8mb4&parseTime=True&loc=UTC
+          TOKENROUTER_TEST_ALLOW_SCHEMA_RESET: "1"
+          TOKENROUTER_CHANNEL_TYPE_CATALOG: reference-v1
+        run: |
+          bash scripts/run-go-test-manifest.sh \
+            ./model:TestDatabaseMatrixExternalMigration \
+            ./model:TestRelationalLogRetentionExternalDatabaseLifecycle \
+            ./service:TestRelayAccountingExternalDatabaseConcurrency \
+            ./service:TestChannelMultiKeyExternalDatabaseConcurrency \
+            ./service:TestSystemTaskExternalDatabaseLeaseAndCadence \
+            ./service:TestAuditOutboxExternalDatabaseLeaseAndDelivery \
+            ./service:TestSubscriptionUsageEpochExternalDatabaseLifecycle \
+            ./service:TestTaskOperationAccountingExternalDatabaseLifecycle \
+            ./relay:TestJimengExternalDatabaseAtomicLifecycle
+      - name: PostgreSQL migration, accounting, scheduler, retention, outbox, and async-task lifecycle
+        env:
+          TOKENROUTER_TEST_SQL_DSN: postgres://tokenrouter:tokenrouter-ci@127.0.0.1:5432/tokenrouter_ci?sslmode=disable
+          TOKENROUTER_TEST_ALLOW_SCHEMA_RESET: "1"
+          TOKENROUTER_CHANNEL_TYPE_CATALOG: reference-v1
+        run: |
+          bash scripts/run-go-test-manifest.sh \
+            ./model:TestDatabaseMatrixExternalMigration \
+            ./model:TestRelationalLogRetentionExternalDatabaseLifecycle \
+            ./service:TestRelayAccountingExternalDatabaseConcurrency \
+            ./service:TestChannelMultiKeyExternalDatabaseConcurrency \
+            ./service:TestSystemTaskExternalDatabaseLeaseAndCadence \
+            ./service:TestAuditOutboxExternalDatabaseLeaseAndDelivery \
+            ./service:TestSubscriptionUsageEpochExternalDatabaseLifecycle \
+            ./service:TestTaskOperationAccountingExternalDatabaseLifecycle \
+            ./relay:TestJimengExternalDatabaseAtomicLifecycle
+      - name: ClickHouse audit-log schema, insert, retention, and retry deduplication
+        env:
+          TOKENROUTER_TEST_CLICKHOUSE_DSN: clickhouse://tokenrouter:tokenrouter-ci@127.0.0.1:9000/tokenrouter_logs?dial_timeout=5s
+          TOKENROUTER_TEST_ALLOW_SCHEMA_RESET: "1"
+        run: |
+          bash scripts/run-go-test-manifest.sh \
+            ./model:TestClickHouseExternalLogLifecycle \
+            ./model:TestClickHouseLogRetentionExternalDatabaseLifecycle
+      - name: Redis shared-store atomicity and expiry lifecycle
+        env:
+          TOKENROUTER_TEST_REDIS_DSN: redis://127.0.0.1:6379/15
+        run: >-
+          bash scripts/run-go-test-manifest.sh
+          ./common:TestRedisExternalSharedStoreLifecycle
+
+  container-image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compose configuration
+        env:
+          SESSION_SECRET: 71d94f2ac8e603b57c1ae0469fdb3285e47ac9106bd25f83
+        run: docker compose config --quiet
+      - name: Build Dockerfile, start isolated image, and clean up
+        env:
+          TOKENROUTER_DOCKER_TEST_TAG: tokenrouter-ci:${{ github.run_id }}-${{ github.run_attempt }}
+        run: bash scripts/test-docker-image.sh

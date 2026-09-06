@@ -18,20 +18,24 @@ import (
 	"github.com/tokenrouter/tokenrouter/common"
 	"github.com/tokenrouter/tokenrouter/constant"
 	"github.com/tokenrouter/tokenrouter/model"
+	"github.com/tokenrouter/tokenrouter/protocolkit"
 	"github.com/tokenrouter/tokenrouter/router"
 	"github.com/tokenrouter/tokenrouter/service"
+	"github.com/tokenrouter/tokenrouter/setting"
 )
 
 func setupClaudeRelay(t *testing.T, mockURL string, channelType int, modelName string) (string, int) {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
+	t.Cleanup(common.InitSSRF)
 	t.Setenv("SSRF_DISABLE", "true")
 	common.InitSSRF()
 	dsn := "file:" + filepath.Join(t.TempDir(), "claude.db") + "?_pragma=busy_timeout(5000)"
 	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
 	require.NoError(t, err)
 	require.NoError(t, db.AutoMigrate(&model.User{}, &model.Token{}, &model.Channel{}, &model.Ability{}, &model.Log{}, &model.PerfMetric{},
-		&model.SubscriptionPlan{}, &model.UserSubscription{}, &model.SubscriptionPreConsumeRecord{}))
+		&model.SubscriptionPlan{}, &model.UserSubscription{}, &model.SubscriptionPreConsumeRecord{}, &model.RelayQuotaReservationRecord{},
+		&model.Option{}))
 	model.DB = db
 	model.LOG_DB = db
 
@@ -153,10 +157,13 @@ func TestClaudeMessagesViaOpenAIChannelStream(t *testing.T) {
 }
 
 func TestClaudeMessagesNativeAnthropicPassthrough(t *testing.T) {
-	var gotPath, gotVersion string
+	var gotPath, gotVersion, gotModel string
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
 		gotVersion = r.Header.Get("anthropic-version")
+		var request protocolkit.ClaudeRequest
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&request))
+		gotModel = request.Model
 		resp := map[string]any{
 			"id": "msg_01", "type": "message", "role": "assistant", "model": "claude-3-5-sonnet-20241022",
 			"content":     []map[string]any{{"type": "text", "text": "native reply"}},
@@ -168,6 +175,8 @@ func TestClaudeMessagesNativeAnthropicPassthrough(t *testing.T) {
 	defer mock.Close()
 
 	key, _ := setupClaudeRelay(t, mock.URL, int(constant.ChannelTypeAnthropic), "claude-3-5-sonnet-20241022")
+	require.NoError(t, model.DB.Model(&model.Channel{}).Where("name = ?", "mock").
+		Update("model_mapping", `{"claude-3-5-sonnet-20241022":"claude-upstream-deployment"}`).Error)
 	r := router.SetUpRouter()
 
 	body := `{"model":"claude-3-5-sonnet-20241022","max_tokens":128,"messages":[{"role":"user","content":"hello"}]}`
@@ -175,7 +184,155 @@ func TestClaudeMessagesNativeAnthropicPassthrough(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
 	assert.Equal(t, "/v1/messages", gotPath, "native path must hit the Anthropic Messages endpoint")
 	assert.Equal(t, "2023-06-01", gotVersion)
+	assert.Equal(t, "claude-upstream-deployment", gotModel)
 	assert.Contains(t, rec.Body.String(), "native reply")
+}
+
+func TestClaudeMessagesNativeAppliesHeadersDefaultsAndThinkingPolicy(t *testing.T) {
+	const (
+		clientModel   = "claude-policy-thinking"
+		upstreamModel = "claude-policy"
+	)
+	var gotHeader, gotPolicyHeader string
+	var gotRequest protocolkit.ClaudeRequest
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		gotHeader = request.Header.Get("anthropic-beta")
+		gotPolicyHeader = request.Header.Get("x-policy")
+		require.NoError(t, json.NewDecoder(request.Body).Decode(&gotRequest))
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id": "msg_policy", "type": "message", "role": "assistant", "model": upstreamModel,
+			"content": []map[string]any{{"type": "text", "text": "configured"}}, "stop_reason": "end_turn",
+			"usage": map[string]any{"input_tokens": 4, "output_tokens": 2},
+		})
+	}))
+	defer mock.Close()
+
+	key, _ := setupClaudeRelay(t, mock.URL, int(constant.ChannelTypeAnthropic), clientModel)
+	require.NoError(t, setting.Init())
+	require.NoError(t, setting.UpdateOptions(map[string]string{
+		setting.ClaudeModelHeadersSettingsOption: `{"claude-policy-thinking":{"Anthropic-Beta":["token-efficient-tools"],"X-Policy":["enabled"]}}`,
+		setting.ClaudeDefaultMaxTokensOption:     `{"default":8192,"claude-policy":4096}`,
+	}))
+	recorder := claudeRelayRequest(t, router.SetUpRouter(), key,
+		`{"model":"claude-policy-thinking","messages":[{"role":"user","content":"hello"}]}`)
+
+	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+	assert.Equal(t, "token-efficient-tools", gotHeader)
+	assert.Equal(t, "enabled", gotPolicyHeader)
+	assert.Equal(t, upstreamModel, gotRequest.Model)
+	assert.Equal(t, 4096, gotRequest.MaxTokens)
+	require.NotNil(t, gotRequest.Thinking)
+	assert.Equal(t, "enabled", gotRequest.Thinking.Type)
+	assert.Equal(t, 3276, gotRequest.Thinking.BudgetTokens)
+	require.NotNil(t, gotRequest.Temperature)
+	assert.Equal(t, 1.0, *gotRequest.Temperature)
+}
+
+func TestClaudeMessagesNativePreservesConfiguredZeroDefaultMaxTokens(t *testing.T) {
+	const modelName = "claude-cache"
+	var gotRequest protocolkit.ClaudeRequest
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		require.NoError(t, json.NewDecoder(request.Body).Decode(&gotRequest))
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id": "msg_cache", "type": "message", "role": "assistant", "model": modelName,
+			"content": []map[string]any{{"type": "text", "text": "warmed"}}, "stop_reason": "end_turn",
+			"usage": map[string]any{"input_tokens": 1, "output_tokens": 0},
+		})
+	}))
+	defer mock.Close()
+
+	key, _ := setupClaudeRelay(t, mock.URL, int(constant.ChannelTypeAnthropic), modelName)
+	require.NoError(t, setting.Init())
+	require.NoError(t, setting.UpdateOption(setting.ClaudeDefaultMaxTokensOption,
+		`{"default":8192,"claude-cache":0}`))
+	recorder := claudeRelayRequest(t, router.SetUpRouter(), key,
+		`{"model":"claude-cache","messages":[{"role":"user","content":"pre-warm"}]}`)
+
+	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+	assert.Equal(t, modelName, gotRequest.Model)
+	assert.Zero(t, gotRequest.MaxTokens)
+}
+
+func TestClaudeMessagesNativeTieredCacheTTLSettlement(t *testing.T) {
+	const modelName = "claude-tiered-native"
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id": "msg_tiered", "type": "message", "role": "assistant", "model": modelName,
+			"content": []map[string]any{{"type": "text", "text": "priced"}}, "stop_reason": "end_turn",
+			"usage": map[string]any{
+				"input_tokens": 100, "cache_read_input_tokens": 20, "cache_creation_input_tokens": 30,
+				"cache_creation": map[string]any{
+					"ephemeral_5m_input_tokens": 10, "ephemeral_1h_input_tokens": 20,
+				},
+				"output_tokens": 5,
+			},
+		})
+	}))
+	defer mock.Close()
+
+	key, userID := setupClaudeRelay(t, mock.URL, int(constant.ChannelTypeAnthropic), modelName)
+	require.NoError(t, setting.Init())
+	require.NoError(t, setting.UpdateOptions(map[string]string{
+		"ModelBillingMode": `{"` + modelName + `":"tiered_expr"}`,
+		"ModelBillingExpr": `{"` + modelName + `":"p * 2 + c * 8 + cr * 0.2 + cc * 2.5 + cc1h * 4"}`,
+	}))
+	t.Cleanup(func() {
+		_ = setting.UpdateOptions(map[string]string{"ModelBillingMode": `{}`, "ModelBillingExpr": `{}`})
+	})
+
+	recorder := claudeRelayRequest(t, router.SetUpRouter(), key,
+		`{"model":"`+modelName+`","max_tokens":128,"messages":[{"role":"user","content":"hello"}]}`)
+	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+
+	var user model.User
+	var token model.Token
+	var channel model.Channel
+	require.NoError(t, model.DB.First(&user, userID).Error)
+	require.NoError(t, model.DB.Where("user_id = ?", userID).First(&token).Error)
+	require.NoError(t, model.DB.Where("name = ?", "mock").First(&channel).Error)
+	assert.Equal(t, 500000-175, user.Quota)
+	assert.Equal(t, 175, user.UsedQuota)
+	assert.Equal(t, 175, token.UsedQuota)
+	assert.Equal(t, int64(175), channel.UsedQuota)
+}
+
+func TestClaudeMessagesNativeStreamRetainsStartUsageForTieredSettlement(t *testing.T) {
+	const modelName = "claude-tiered-stream"
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher := w.(http.Flusher)
+		events := []string{
+			`{"type":"message_start","message":{"usage":{"input_tokens":100,"cache_read_input_tokens":20,"cache_creation_input_tokens":30,"cache_creation":{"ephemeral_5m_input_tokens":10,"ephemeral_1h_input_tokens":20},"output_tokens":0}}}`,
+			`{"type":"content_block_delta","delta":{"type":"text_delta","text":"priced"}}`,
+			`{"type":"message_delta","usage":{"output_tokens":5}}`,
+			`{"type":"message_stop"}`,
+		}
+		for _, event := range events {
+			_, _ = w.Write([]byte("data: " + event + "\n\n"))
+			flusher.Flush()
+		}
+	}))
+	defer mock.Close()
+
+	key, userID := setupClaudeRelay(t, mock.URL, int(constant.ChannelTypeAnthropic), modelName)
+	require.NoError(t, setting.Init())
+	require.NoError(t, setting.UpdateOptions(map[string]string{
+		"ModelBillingMode": `{"` + modelName + `":"tiered_expr"}`,
+		"ModelBillingExpr": `{"` + modelName + `":"p * 2 + c * 8 + cr * 0.2 + cc * 2.5 + cc1h * 4"}`,
+	}))
+	t.Cleanup(func() {
+		_ = setting.UpdateOptions(map[string]string{"ModelBillingMode": `{}`, "ModelBillingExpr": `{}`})
+	})
+
+	recorder := claudeRelayRequest(t, router.SetUpRouter(), key,
+		`{"model":"`+modelName+`","max_tokens":128,"stream":true,"messages":[{"role":"user","content":"hello"}]}`)
+	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+	assert.Contains(t, recorder.Body.String(), `"type":"message_start"`)
+
+	var user model.User
+	require.NoError(t, model.DB.First(&user, userID).Error)
+	assert.Equal(t, 500000-175, user.Quota)
+	assert.Equal(t, 175, user.UsedQuota)
 }
 
 func TestClaudeMessagesValidation(t *testing.T) {

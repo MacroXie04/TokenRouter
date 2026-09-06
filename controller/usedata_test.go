@@ -1,14 +1,18 @@
 package controller_test
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 
 	"github.com/tokenrouter/tokenrouter/common"
 	"github.com/tokenrouter/tokenrouter/constant"
@@ -200,4 +204,129 @@ func TestDataFlowContract(t *testing.T) {
 	body = decodeBody(t, rec)
 	assert.Equal(t, false, body["success"])
 	assert.Equal(t, "时间跨度不能超过 1 个月", body["message"])
+}
+
+func TestDataEndpointsValidateUniformRanges(t *testing.T) {
+	_, do, _ := setupChannelRead(t, constant.RoleRootUser)
+	start, _, _ := dataSpanWindow()
+	endpoints := []string{
+		"/api/data/",
+		"/api/data/users",
+		"/api/data/self",
+		"/api/data/flow",
+		"/api/data/flow/self",
+	}
+
+	for _, endpoint := range endpoints {
+		t.Run(strings.TrimPrefix(endpoint, "/api/data/"), func(t *testing.T) {
+			rec := do(http.MethodGet, endpoint, "")
+			body := decodeBody(t, rec)
+			assert.Equal(t, false, body["success"], rec.Body.String())
+			assert.Equal(t, "invalid start_timestamp", body["message"])
+
+			rec = do(http.MethodGet, fmt.Sprintf(
+				"%s?start_timestamp=%d&end_timestamp=%d", endpoint, start+1, start,
+			), "")
+			body = decodeBody(t, rec)
+			assert.Equal(t, false, body["success"], rec.Body.String())
+			assert.Equal(t, "invalid time range", body["message"])
+
+			rec = do(http.MethodGet, fmt.Sprintf(
+				"%s?start_timestamp=%d&end_timestamp=%d",
+				endpoint, start, start+service.DashboardDataMaxRangeSeconds+1,
+			), "")
+			body = decodeBody(t, rec)
+			assert.Equal(t, false, body["success"], rec.Body.String())
+			assert.Equal(t, "时间跨度不能超过 1 个月", body["message"])
+
+			rec = do(http.MethodGet, fmt.Sprintf(
+				"%s?start_timestamp=%d&end_timestamp=%d",
+				endpoint, start, start+service.DashboardDataMaxRangeSeconds,
+			), "")
+			body = decodeBody(t, rec)
+			assert.Equal(t, true, body["success"], rec.Body.String())
+			assert.Equal(t, "", body["message"])
+			assert.NotNil(t, body["data"])
+		})
+	}
+}
+
+func TestDataEndpointQueryFailureIsGenericAndRequestScoped(t *testing.T) {
+	_, do, _ := setupChannelRead(t, constant.RoleRootUser)
+	start, end, _ := dataSpanWindow()
+	deadlineObserved := false
+	callbackName := "test:fail_dashboard_data_query"
+	require.NoError(t, model.DB.Callback().Query().Before("gorm:query").Register(callbackName, func(tx *gorm.DB) {
+		if tx.Statement.Table != (model.QuotaData{}).TableName() {
+			return
+		}
+		deadline, ok := tx.Statement.Context.Deadline()
+		deadlineObserved = ok && time.Until(deadline) > 0 && time.Until(deadline) <= 5*time.Second
+		tx.AddError(errors.New("injected database password=dashboard-secret"))
+	}))
+	t.Cleanup(func() { _ = model.DB.Callback().Query().Remove(callbackName) })
+
+	rec := do(http.MethodGet, fmt.Sprintf(
+		"/api/data/?start_timestamp=%d&end_timestamp=%d", start, end,
+	), "")
+	body := decodeBody(t, rec)
+	assert.Equal(t, false, body["success"])
+	assert.Equal(t, "unable to load dashboard data", body["message"])
+	assert.NotContains(t, rec.Body.String(), "dashboard-secret")
+	assert.True(t, deadlineObserved, "dashboard query should inherit a bounded request context")
+}
+
+func TestDataEndpointResponseSizeFailsClosed(t *testing.T) {
+	_, do, uid := setupChannelRead(t, constant.RoleRootUser)
+	start, end, hour := dataSpanWindow()
+	marker := "dashboard-sensitive-marker"
+	token := model.Token{
+		UserId: uid, Key: "sk-oversized-dashboard-token",
+		Name: strings.Repeat(marker, 100_000), Status: 1,
+		CreatedTime: common.NowTimestamp(), UnlimitedQuota: true,
+	}
+	require.NoError(t, model.DB.Create(&token).Error)
+	insertQuotaDataRow(t, uid, "chreader", "gpt-4o", "default", token.Id, 0, 1, 1, 1, hour, "node-1")
+
+	rec := do(http.MethodGet, fmt.Sprintf(
+		"/api/data/flow?start_timestamp=%d&end_timestamp=%d", start, end,
+	), "")
+	body := decodeBody(t, rec)
+	assert.Equal(t, false, body["success"])
+	assert.Equal(t, "unable to load dashboard data", body["message"])
+	assert.Less(t, rec.Body.Len(), 1_000)
+	assert.NotContains(t, rec.Body.String(), marker)
+}
+
+func TestDataAdminUsernameFilterIsBoundedAndUnambiguous(t *testing.T) {
+	_, do, _ := setupChannelRead(t, constant.RoleRootUser)
+	start, end, _ := dataSpanWindow()
+	endpoints := []string{"/api/data/", "/api/data/flow"}
+	validUsername := strings.Repeat("界", 64)
+	invalidQueries := map[string]string{
+		"65 code points":   "username=" + url.QueryEscape(strings.Repeat("界", 65)),
+		"duplicate":        "username=alice&username=bob",
+		"leading space":    "username=" + url.QueryEscape(" alice"),
+		"control":          "username=" + url.QueryEscape("ali\x00ce"),
+		"bidi override":    "username=" + url.QueryEscape("ali\u202ece"),
+		"invalid encoding": "username=%FF",
+	}
+
+	for _, endpoint := range endpoints {
+		t.Run(strings.TrimPrefix(endpoint, "/api/data/"), func(t *testing.T) {
+			base := fmt.Sprintf("%s?start_timestamp=%d&end_timestamp=%d", endpoint, start, end)
+			rec := do(http.MethodGet, base+"&username="+url.QueryEscape(validUsername), "")
+			body := decodeBody(t, rec)
+			assert.Equal(t, true, body["success"], rec.Body.String())
+
+			for name, query := range invalidQueries {
+				t.Run(name, func(t *testing.T) {
+					rec := do(http.MethodGet, base+"&"+query, "")
+					body := decodeBody(t, rec)
+					assert.Equal(t, false, body["success"], rec.Body.String())
+					assert.Equal(t, "invalid username", body["message"])
+				})
+			}
+		})
+	}
 }

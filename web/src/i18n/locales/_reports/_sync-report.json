@@ -1,0 +1,85 @@
+{
+  "base": "en.json",
+  "keyCount": 2644,
+  "locales": {
+    "en": {
+      "file": "en.json",
+      "keyCount": 2644,
+      "duplicateKeyCount": 0,
+      "missingCount": 0,
+      "extrasCount": 0,
+      "invalidValueCount": 0,
+      "untranslatedCount": 0,
+      "interpolationMismatchCount": 0
+    },
+    "fr": {
+      "file": "fr.json",
+      "keyCount": 2644,
+      "duplicateKeyCount": 0,
+      "missingCount": 0,
+      "extrasCount": 0,
+      "invalidValueCount": 0,
+      "untranslatedCount": 0,
+      "interpolationMismatchCount": 0
+    },
+    "ja": {
+      "file": "ja.json",
+      "keyCount": 2644,
+      "duplicateKeyCount": 0,
+      "missingCount": 0,
+      "extrasCount": 0,
+      "invalidValueCount": 0,
+      "untranslatedCount": 0,
+      "interpolationMismatchCount": 0
+    },
+    "ru": {
+      "file": "ru.json",
+      "keyCount": 2644,
+      "duplicateKeyCount": 0,
+      "missingCount": 0,
+      "extrasCount": 0,
+      "invalidValueCount": 0,
+      "untranslatedCount": 0,
+      "interpolationMismatchCount": 0
+    },
+    "vi": {
+      "file": "vi.json",
+      "keyCount": 2644,
+      "duplicateKeyCount": 0,
+      "missingCount": 0,
+      "extrasCount": 0,
+      "invalidValueCount": 0,
+      "untranslatedCount": 0,
+      "interpolationMismatchCount": 0
+    },
+    "zh-TW": {
+      "file": "zh-TW.json",
+      "keyCount": 2644,
+      "duplicateKeyCount": 0,
+      "missingCount": 0,
+      "extrasCount": 0,
+      "invalidValueCount": 0,
+      "untranslatedCount": 0,
+      "interpolationMismatchCount": 0
+    },
+    "zh": {
+      "file": "zh.json",
+      "keyCount": 2644,
+      "duplicateKeyCount": 0,
+      "missingCount": 0,
+      "extrasCount": 0,
+      "invalidValueCount": 0,
+      "untranslatedCount": 0,
+      "interpolationMismatchCount": 0
+    }
+  },
+  "source": {
+    "fileCount": 110,
+    "literalKeyCount": 2019,
+    "staticallyResolvedKeyCount": 517,
+    "staticallyResolvedMissingFromBaseCount": 0,
+    "runtimeKeyCount": 2536,
+    "missingFromBaseCount": 0,
+    "missingFromBase": []
+  }
+}

@@ -1,6 +1,8 @@
 package common
 
 import (
+	"context"
+	"errors"
 	"net"
 	"testing"
 
@@ -49,6 +51,100 @@ func TestSafeDialContextBlocksLoopback(t *testing.T) {
 	_, err := SafeDialContext(t.Context(), "tcp", "127.0.0.1:80")
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "ssrf")
+}
+
+type staticSSRFResolver struct {
+	addresses []net.IPAddr
+	err       error
+	calls     int
+}
+
+func (resolver *staticSSRFResolver) LookupIPAddr(_ context.Context, _ string) ([]net.IPAddr, error) {
+	resolver.calls++
+	return resolver.addresses, resolver.err
+}
+
+func TestSafeDialContextPinsValidatedResolution(t *testing.T) {
+	resolver := &staticSSRFResolver{addresses: []net.IPAddr{{IP: net.ParseIP("8.8.8.8")}}}
+	var dialed string
+	dialFailure := errors.New("injected dial failure")
+
+	_, err := safeDialContext(
+		t.Context(),
+		"tcp",
+		"safe.example:443",
+		resolver,
+		func(_ context.Context, _ string, address string) (net.Conn, error) {
+			dialed = address
+			return nil, dialFailure
+		},
+	)
+
+	assert.ErrorIs(t, err, dialFailure)
+	assert.Equal(t, 1, resolver.calls)
+	assert.Equal(t, "8.8.8.8:443", dialed)
+	assert.NotEqual(t, "safe.example:443", dialed)
+}
+
+func TestSafeDialContextRejectsMixedUnsafeResolutionBeforeDial(t *testing.T) {
+	resolver := &staticSSRFResolver{addresses: []net.IPAddr{
+		{IP: net.ParseIP("8.8.8.8")},
+		{IP: net.ParseIP("127.0.0.1")},
+	}}
+	dialCalls := 0
+
+	_, err := safeDialContext(
+		t.Context(),
+		"tcp",
+		"rebinding.example:80",
+		resolver,
+		func(context.Context, string, string) (net.Conn, error) {
+			dialCalls++
+			return nil, nil
+		},
+	)
+
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "blocked address 127.0.0.1")
+	assert.Equal(t, 0, dialCalls)
+}
+
+func TestSafeDialContextTriesOnlyResolvedAddresses(t *testing.T) {
+	resolver := &staticSSRFResolver{addresses: []net.IPAddr{
+		{IP: net.ParseIP("8.8.8.8")},
+		{IP: net.ParseIP("1.1.1.1")},
+	}}
+	var dialed []string
+
+	_, err := safeDialContext(
+		t.Context(),
+		"tcp4",
+		"safe.example:8443",
+		resolver,
+		func(_ context.Context, _ string, address string) (net.Conn, error) {
+			dialed = append(dialed, address)
+			return nil, errors.New("offline")
+		},
+	)
+
+	assert.Error(t, err)
+	assert.Equal(t, []string{"8.8.8.8:8443", "1.1.1.1:8443"}, dialed)
+}
+
+func TestSafeDialContextRejectsUnsupportedNetworkAndMalformedAddress(t *testing.T) {
+	resolver := &staticSSRFResolver{}
+	dial := func(context.Context, string, string) (net.Conn, error) {
+		t.Fatal("dial must not be called")
+		return nil, nil
+	}
+
+	_, err := safeDialContext(t.Context(), "unix", "/tmp/private.sock", resolver, dial)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "unsupported network")
+
+	_, err = safeDialContext(t.Context(), "tcp", "missing-port.example", resolver, dial)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid address")
 }
 
 func parseIP(t *testing.T, s string) net.IP {

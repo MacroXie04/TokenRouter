@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -21,9 +22,11 @@ func TestResetModelRatioContract(t *testing.T) {
 	_, do, rootID := setupChannelRead(t, constant.RoleRootUser)
 	previousPrices := service.ExportedModelPrices()
 	previousRatios := service.ExportedGroupRatios()
+	previousSpecialRatios := service.ExportedGroupGroupRatios()
 	t.Cleanup(func() {
 		service.SetModelPriceRegistry(previousPrices)
 		service.SetGroupRatios(previousRatios)
+		service.SetGroupGroupRatios(previousSpecialRatios)
 	})
 
 	service.SetModelPriceRegistry(map[string]service.ModelPrice{
@@ -58,9 +61,11 @@ func TestPricingOptionsWriteThroughToLiveBilling(t *testing.T) {
 	_, do, _ := setupChannelRead(t, constant.RoleRootUser)
 	previousPrices := service.ExportedModelPrices()
 	previousRatios := service.ExportedGroupRatios()
+	previousSpecialRatios := service.ExportedGroupGroupRatios()
 	t.Cleanup(func() {
 		service.SetModelPriceRegistry(previousPrices)
 		service.SetGroupRatios(previousRatios)
+		service.SetGroupGroupRatios(previousSpecialRatios)
 	})
 
 	requestBody, err := json.Marshal(map[string]any{
@@ -95,6 +100,28 @@ func TestPricingOptionsWriteThroughToLiveBilling(t *testing.T) {
 	assert.Equal(t, true, decodeBody(t, rec)["success"])
 	assert.Equal(t, 5000, service.ComputeQuota("custom-model", "vip", 1000, 0))
 
+	requestBody, err = json.Marshal(map[string]any{
+		"key":   setting.GroupGroupRatioOption,
+		"value": `{"default":{"vip":0.5}}`,
+	})
+	require.NoError(t, err)
+	rec = do(http.MethodPut, "/api/option/", string(requestBody))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, true, decodeBody(t, rec)["success"])
+	assert.Equal(t, 1000, service.ComputeQuotaForUser("custom-model", "default", "vip", 1000, 0))
+
+	persistedSpecial := setting.GetOption(setting.GroupGroupRatioOption)
+	requestBody, err = json.Marshal(map[string]any{
+		"key":   setting.GroupGroupRatioOption,
+		"value": `{"default":{"vip":-1}}`,
+	})
+	require.NoError(t, err)
+	rec = do(http.MethodPut, "/api/option/", string(requestBody))
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, false, decodeBody(t, rec)["success"])
+	assert.Equal(t, persistedSpecial, setting.GetOption(setting.GroupGroupRatioOption))
+	assert.Equal(t, 1000, service.ComputeQuotaForUser("custom-model", "default", "vip", 1000, 0))
+
 	// Simulate another node writing options directly to the shared database. A
 	// local synchronization refreshes both runtime registries coherently.
 	require.NoError(t, model.DB.Model(&model.Option{}).
@@ -103,8 +130,12 @@ func TestPricingOptionsWriteThroughToLiveBilling(t *testing.T) {
 	require.NoError(t, model.DB.Model(&model.Option{}).
 		Where("key = ?", setting.GroupRatioOption).
 		Update("value", `{"vip":3}`).Error)
+	require.NoError(t, model.DB.Model(&model.Option{}).
+		Where("key = ?", setting.GroupGroupRatioOption).
+		Update("value", `{"default":{"vip":0.25}}`).Error)
 	require.NoError(t, service.SyncRuntimeOptions())
 	assert.Equal(t, 10500, service.ComputeQuota("custom-model", "vip", 1000, 0))
+	assert.Equal(t, 875, service.ComputeQuotaForUser("custom-model", "default", "vip", 1000, 0))
 
 	// Invalid remote settings do not publish either half of a new snapshot.
 	require.NoError(t, model.DB.Model(&model.Option{}).
@@ -115,6 +146,47 @@ func TestPricingOptionsWriteThroughToLiveBilling(t *testing.T) {
 		Update("value", `{"vip":0}`).Error)
 	require.Error(t, service.SyncRuntimeOptions())
 	assert.Equal(t, 10500, service.ComputeQuota("custom-model", "vip", 1000, 0))
+	assert.Equal(t, 875, service.ComputeQuotaForUser("custom-model", "default", "vip", 1000, 0))
+}
+
+func TestQuotaPerUnitIsAnImmutablePublicOption(t *testing.T) {
+	_, do, _ := setupChannelRead(t, constant.RoleRootUser)
+	require.NoError(t, setting.UpdateOption(setting.QuotaPerUnitOption, strconv.Itoa(common.QuotaPerUnit)))
+
+	requestBody, err := json.Marshal(map[string]any{
+		"key":   setting.QuotaPerUnitOption,
+		"value": common.QuotaPerUnit + 1,
+	})
+	require.NoError(t, err)
+	rec := do(http.MethodPut, "/api/option/", string(requestBody))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, false, decodeBody(t, rec)["success"])
+	assert.Equal(t, strconv.Itoa(common.QuotaPerUnit), setting.GetOption(setting.QuotaPerUnitOption))
+
+	requestBody, err = json.Marshal(map[string]any{
+		"key":   setting.QuotaPerUnitOption,
+		"value": common.QuotaPerUnit,
+	})
+	require.NoError(t, err)
+	rec = do(http.MethodPut, "/api/option/", string(requestBody))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, true, decodeBody(t, rec)["success"])
+
+	rec = do(http.MethodGet, "/api/option/", "")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	response := decodeBody(t, rec)
+	options, ok := response["data"].([]any)
+	require.True(t, ok)
+	found := false
+	for _, candidate := range options {
+		option, ok := candidate.(map[string]any)
+		if !ok || option["key"] != setting.QuotaPerUnitOption {
+			continue
+		}
+		found = true
+		assert.Equal(t, strconv.Itoa(common.QuotaPerUnit), option["value"])
+	}
+	assert.True(t, found, "fixed QuotaPerUnit must remain visible to settings clients")
 }
 
 func TestResetModelRatioRoleGuard(t *testing.T) {

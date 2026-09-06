@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -12,6 +13,14 @@ import (
 	"github.com/tokenrouter/tokenrouter/model"
 	"github.com/tokenrouter/tokenrouter/service"
 )
+
+func writeAdminSubscriptionError(c *gin.Context, err error) {
+	if errors.Is(err, service.ErrSubscriptionTargetForbidden) {
+		c.JSON(http.StatusForbidden, dto.Fail(err.Error()))
+		return
+	}
+	c.JSON(http.StatusBadRequest, dto.Fail(err.Error()))
+}
 
 // SubscriptionPlanDTO wraps a plan for list responses.
 type SubscriptionPlanDTO struct {
@@ -127,9 +136,9 @@ func AdminBindSubscription(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, dto.Fail("参数错误"))
 		return
 	}
-	msg, err := service.AdminBindSubscription(req.UserId, req.PlanId)
+	msg, err := service.AdminBindSubscriptionAuthorized(req.UserId, req.PlanId, common.GetRole(c))
 	if err != nil {
-		c.JSON(http.StatusBadRequest, dto.Fail(err.Error()))
+		writeAdminSubscriptionError(c, err)
 		return
 	}
 	if msg != "" {
@@ -146,9 +155,9 @@ func AdminListUserSubscriptions(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, dto.Fail("无效的用户ID"))
 		return
 	}
-	subs, err := service.AdminListUserSubscriptions(userId)
+	subs, err := service.AdminListUserSubscriptionsAuthorized(userId, common.GetRole(c))
 	if err != nil {
-		c.JSON(http.StatusBadRequest, dto.Fail(err.Error()))
+		writeAdminSubscriptionError(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, dto.Ok(subs))
@@ -172,9 +181,9 @@ func AdminCreateUserSubscription(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, dto.Fail("参数错误"))
 		return
 	}
-	msg, err := service.AdminBindSubscription(userId, req.PlanId)
+	msg, err := service.AdminBindSubscriptionAuthorized(userId, req.PlanId, common.GetRole(c))
 	if err != nil {
-		c.JSON(http.StatusBadRequest, dto.Fail(err.Error()))
+		writeAdminSubscriptionError(c, err)
 		return
 	}
 	if msg != "" {
@@ -215,9 +224,11 @@ func AdminResetUserSubscriptionsByPlan(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, dto.Fail("参数错误"))
 		return
 	}
-	result, err := service.AdminResetUserSubscriptionsByPlan(userId, req.PlanId, resolveAdvanceResetTime(req.AdvanceResetTime))
+	result, err := service.AdminResetUserSubscriptionsByPlanAuthorized(
+		userId, req.PlanId, resolveAdvanceResetTime(req.AdvanceResetTime), common.GetRole(c),
+	)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, dto.Fail(err.Error()))
+		writeAdminSubscriptionError(c, err)
 		return
 	}
 	recordSubscriptionResetUserLogs(result)
@@ -236,9 +247,11 @@ func AdminResetPlanSubscriptions(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, dto.Fail("参数错误"))
 		return
 	}
-	result, err := service.AdminResetPlanSubscriptions(planId, resolveAdvanceResetTime(req.AdvanceResetTime))
+	result, err := service.AdminResetPlanSubscriptionsAuthorized(
+		planId, resolveAdvanceResetTime(req.AdvanceResetTime), common.GetRole(c),
+	)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, dto.Fail(err.Error()))
+		writeAdminSubscriptionError(c, err)
 		return
 	}
 	recordSubscriptionResetUserLogs(result)
@@ -254,9 +267,9 @@ func AdminInvalidateUserSubscription(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, dto.Fail("无效的订阅ID"))
 		return
 	}
-	msg, err := service.AdminInvalidateUserSubscription(subId)
+	msg, err := service.AdminInvalidateUserSubscriptionAuthorized(subId, common.GetRole(c))
 	if err != nil {
-		c.JSON(http.StatusBadRequest, dto.Fail(err.Error()))
+		writeAdminSubscriptionError(c, err)
 		return
 	}
 	if msg != "" {
@@ -273,13 +286,36 @@ func AdminDeleteUserSubscription(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, dto.Fail("无效的订阅ID"))
 		return
 	}
-	msg, err := service.AdminDeleteUserSubscription(subId)
+	msg, err := service.AdminDeleteUserSubscriptionAuthorized(subId, common.GetRole(c))
 	if err != nil {
-		c.JSON(http.StatusBadRequest, dto.Fail(err.Error()))
+		writeAdminSubscriptionError(c, err)
 		return
 	}
 	if msg != "" {
 		c.JSON(http.StatusOK, dto.Ok(gin.H{"message": msg}))
+		return
+	}
+	c.JSON(http.StatusOK, dto.Ok(nil))
+}
+
+// ResolveLegacySubscriptionEntitlementReview applies a root-attested immutable
+// reset snapshot to an orphaned legacy subscription in review state.
+func ResolveLegacySubscriptionEntitlementReview(c *gin.Context) {
+	if !requirePaymentCompliance(c) {
+		return
+	}
+	subscriptionID, _ := strconv.Atoi(c.Param("id"))
+	if subscriptionID <= 0 {
+		c.JSON(http.StatusBadRequest, dto.Fail("无效的订阅ID"))
+		return
+	}
+	var resolution service.LegacySubscriptionEntitlementResolution
+	if err := c.ShouldBindJSON(&resolution); err != nil {
+		c.JSON(http.StatusBadRequest, dto.Fail("参数错误"))
+		return
+	}
+	if err := service.ResolveLegacySubscriptionEntitlementReview(common.GetUserId(c), subscriptionID, resolution); err != nil {
+		c.JSON(http.StatusBadRequest, dto.Fail(err.Error()))
 		return
 	}
 	c.JSON(http.StatusOK, dto.Ok(nil))

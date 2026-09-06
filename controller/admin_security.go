@@ -8,8 +8,8 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/tokenrouter/tokenrouter/common"
-	"github.com/tokenrouter/tokenrouter/constant"
 	"github.com/tokenrouter/tokenrouter/dto"
+	"github.com/tokenrouter/tokenrouter/middleware"
 	"github.com/tokenrouter/tokenrouter/model"
 	"github.com/tokenrouter/tokenrouter/service"
 )
@@ -17,6 +17,10 @@ import (
 // EmailBind binds a code-verified email to the signed-in user (POST
 // /api/oauth/email/bind). The code must have been sent to that address.
 func EmailBind(c *gin.Context) {
+	identity, ok := requireLoginSession(c)
+	if !ok {
+		return
+	}
 	var req struct {
 		Email string `json:"email"`
 		Code  string `json:"code"`
@@ -25,7 +29,7 @@ func EmailBind(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, dto.Fail("invalid request body"))
 		return
 	}
-	userId := common.GetUserId(c)
+	userId := identity.UserID
 	if userId == 0 {
 		c.JSON(http.StatusUnauthorized, gin.H{"success": false, "message": "not authenticated"})
 		return
@@ -42,10 +46,11 @@ func EmailBind(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"success": true, "message": ""})
 }
 
-// canManageTargetRole reports whether an operator role may manage the target
-// role (root manages everyone; otherwise strictly higher roles only).
+// canManageTargetRole reports whether an operator role is strictly higher than
+// the target role. A root may manage lower roles but never itself or another
+// root account.
 func canManageTargetRole(myRole, targetRole int) bool {
-	return myRole == constant.RoleRootUser || myRole > targetRole
+	return myRole > targetRole
 }
 
 // AdminResetPasskey removes a target user's passkeys and revokes all of their
@@ -65,15 +70,16 @@ func AdminResetPasskey(c *gin.Context) {
 		c.JSON(http.StatusForbidden, dto.Fail("no permission"))
 		return
 	}
-	if !service.PasskeyEnabled(id) {
+	passkeyEnabled, err := service.PasskeyEnabledChecked(id)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, dto.Fail("查询 Passkey 状态失败"))
+		return
+	}
+	if !passkeyEnabled {
 		c.JSON(http.StatusOK, gin.H{"success": false, "message": "该用户尚未绑定 Passkey"})
 		return
 	}
-	if err := service.DeleteAllPasskeys(id); err != nil {
-		c.JSON(http.StatusInternalServerError, dto.Fail("重置失败"))
-		return
-	}
-	if err := service.RevokeAllUserSessions(id); err != nil {
+	if err := service.ResetPasskeysAndRevokeSessions(id); err != nil {
 		c.JSON(http.StatusInternalServerError, dto.Fail("重置失败"))
 		return
 	}
@@ -125,15 +131,20 @@ func AdminDisable2FA(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"success": false, "message": "无权操作同级或更高级用户的2FA设置"})
 		return
 	}
-	if !service.TwoFAStatus(id) {
+	twoFAEnabled, err := service.TwoFAStatusChecked(id)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, dto.Fail("查询 2FA 状态失败"))
+		return
+	}
+	if !twoFAEnabled {
 		c.JSON(http.StatusOK, gin.H{"success": false, "message": "用户未启用2FA"})
 		return
 	}
-	if err := service.DisableTwoFA(id); err != nil {
-		c.JSON(http.StatusInternalServerError, dto.Fail("禁用失败"))
+	if !middleware.RequireSecurityProof(c, service.SecurityProofScopeTwoFAReset,
+		[]string{service.SecurityProofMethod2FA, service.SecurityProofMethodPasskey}) {
 		return
 	}
-	if err := service.RevokeAllUserSessions(id); err != nil {
+	if err := service.DisableTwoFAAndRevokeSessions(id); err != nil {
 		c.JSON(http.StatusInternalServerError, dto.Fail("禁用失败"))
 		return
 	}

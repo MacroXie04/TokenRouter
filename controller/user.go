@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -10,6 +11,7 @@ import (
 	"github.com/tokenrouter/tokenrouter/common"
 	"github.com/tokenrouter/tokenrouter/constant"
 	"github.com/tokenrouter/tokenrouter/dto"
+	"github.com/tokenrouter/tokenrouter/middleware"
 	"github.com/tokenrouter/tokenrouter/model"
 	"github.com/tokenrouter/tokenrouter/service"
 	"github.com/tokenrouter/tokenrouter/setting"
@@ -22,20 +24,58 @@ const (
 
 func setAuthCookies(c *gin.Context, sid, access, refresh string) {
 	secure := common.GetEnvBool("SESSION_COOKIE_SECURE", false)
+	c.SetSameSite(http.SameSiteLaxMode)
 	c.SetCookie(accessCookie, access, int(service.AccessTokenTTL.Seconds()), "/", "", secure, true)
 	c.SetCookie(refreshCookie, sid+"."+refresh, int(service.RefreshTokenTTL.Seconds()), "/", "", secure, true)
 }
 
+func setAccessCookie(c *gin.Context, access string) {
+	secure := common.GetEnvBool("SESSION_COOKIE_SECURE", false)
+	c.SetSameSite(http.SameSiteLaxMode)
+	c.SetCookie(accessCookie, access, int(service.AccessTokenTTL.Seconds()), "/", "", secure, true)
+}
+
+func setRefreshedAuthCookies(c *gin.Context, sid, access, refresh string, expiresAt, validatedAt int64) error {
+	if validatedAt <= 0 || expiresAt <= validatedAt {
+		return service.ErrSessionExpiryInvalid
+	}
+	remaining := expiresAt - validatedAt
+	if remaining > int64(service.RefreshTokenTTL/time.Second) {
+		return service.ErrSessionExpiryInvalid
+	}
+	secure := common.GetEnvBool("SESSION_COOKIE_SECURE", false)
+	c.SetSameSite(http.SameSiteLaxMode)
+	c.SetCookie(accessCookie, access, int(service.AccessTokenTTL.Seconds()), "/", "", secure, true)
+	c.SetCookieData(&http.Cookie{
+		Name:     refreshCookie,
+		Value:    sid + "." + refresh,
+		Path:     "/",
+		Expires:  time.Unix(expiresAt, 0).UTC(),
+		MaxAge:   int(remaining),
+		Secure:   secure,
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+	})
+	return nil
+}
+
 func clearAuthCookies(c *gin.Context) {
-	c.SetCookie(accessCookie, "", -1, "/", "", false, true)
-	c.SetCookie(refreshCookie, "", -1, "/", "", false, true)
+	secure := common.GetEnvBool("SESSION_COOKIE_SECURE", false)
+	c.SetSameSite(http.SameSiteLaxMode)
+	c.SetCookie(accessCookie, "", -1, "/", "", secure, true)
+	c.SetCookie(refreshCookie, "", -1, "/", "", secure, true)
 }
 
 // Register handles user sign-up. Bot protection is enforced by the
 // TurnstileCheck middleware (query-param contract, matching the reference).
 func Register(c *gin.Context) {
-	if !setting.GetOptionBool(setting.RegistrationEnabledOption, true) {
+	registrationPolicy := setting.GetRegistrationGroupPolicy()
+	if !registrationPolicy.RegistrationEnabled() {
 		c.JSON(http.StatusForbidden, dto.Fail("注册已关闭"))
+		return
+	}
+	if !registrationPolicy.PasswordRegistrationEnabled() {
+		c.JSON(http.StatusForbidden, dto.Fail("密码注册已关闭"))
 		return
 	}
 	var req dto.RegisterRequest
@@ -43,9 +83,35 @@ func Register(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, dto.Fail("参数错误: "+err.Error()))
 		return
 	}
+	req.Username = strings.TrimSpace(req.Username)
+	if err := service.ValidateRegistrationUsername(req.Username); err != nil {
+		c.JSON(http.StatusBadRequest, dto.Fail("参数错误"))
+		return
+	}
+	if err := service.ValidateRegistrationPassword(req.Password); err != nil {
+		c.JSON(http.StatusBadRequest, dto.Fail("参数错误"))
+		return
+	}
 	if _, err := service.GetUserByUsername(req.Username); err == nil {
 		c.JSON(http.StatusBadRequest, dto.Fail("用户名已存在"))
 		return
+	}
+	emailVerificationRequired := setting.GetOptionBool(setting.EmailVerificationEnabledOption, false)
+	if emailVerificationRequired && (req.Email == "" || !service.ValidEmailVerificationCode(req.VerificationCode)) {
+		c.JSON(http.StatusBadRequest, dto.Fail("需要邮箱验证码"))
+		return
+	}
+	if req.Email != "" {
+		email, _, err := model.NormalizeVerifiedEmail(req.Email)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, dto.Fail("邮箱格式无效"))
+			return
+		}
+		if err := setting.ValidateEmailRegistrationPolicy(email); err != nil {
+			c.JSON(http.StatusBadRequest, dto.Fail(err.Error()))
+			return
+		}
+		req.Email = email
 	}
 	hash, err := common.PasswordHash(req.Password)
 	if err != nil {
@@ -68,21 +134,40 @@ func Register(c *gin.Context) {
 		Status:      model.UserStatusEnabled,
 		Email:       req.Email,
 		InviterId:   inviterId,
-		Group:       setting.GetOptionOrDefault(setting.DefaultGroupOption, service.GroupDefault),
-		Quota:       setting.GetOptionIntOrDefault(setting.InitialQuotaOption, 500000),
 		CreatedAt:   common.NowTimestamp(),
 		AuthVersion: 1,
 	}
-	if err := model.DB.Create(&user).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, dto.Fail("注册失败: "+err.Error()))
+	if emailVerificationRequired {
+		err = service.CreateUserWithReferralAndVerifiedEmail(&user, req.Email, req.VerificationCode)
+	} else {
+		err = service.CreateUserWithReferral(&user)
+	}
+	if err != nil {
+		if errors.Is(err, service.ErrRegistrationDisabled) {
+			c.JSON(http.StatusForbidden, dto.Fail("注册已关闭"))
+			return
+		}
+		if errors.Is(err, service.ErrPasswordRegistrationDisabled) {
+			c.JSON(http.StatusForbidden, dto.Fail("密码注册已关闭"))
+			return
+		}
+		if errors.Is(err, service.ErrInvalidVerificationCode) || errors.Is(err, service.ErrEmailAlreadyTaken) {
+			c.JSON(http.StatusBadRequest, dto.Fail(err.Error()))
+			return
+		}
+		common.SysError("register user transaction failed: " + err.Error())
+		c.JSON(http.StatusInternalServerError, dto.Fail("注册失败"))
 		return
 	}
-	service.CreditInviter(inviterId, user.Id)
 	c.JSON(http.StatusOK, dto.OkMessage("注册成功"))
 }
 
 // Login handles password sign-in.
 func Login(c *gin.Context) {
+	if !setting.GetOptionBool(setting.PasswordLoginEnabledOption, true) {
+		c.JSON(http.StatusForbidden, dto.Fail("密码登录已关闭"))
+		return
+	}
 	var req dto.LoginRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, dto.Fail("参数错误: "+err.Error()))
@@ -90,25 +175,34 @@ func Login(c *gin.Context) {
 	}
 	user, err := service.AuthenticatePassword(req.Username, req.Password)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, dto.Fail(err.Error()))
+		writePasswordAuthenticationError(c, err)
 		return
 	}
-	if service.TwoFAStatus(user.Id) {
-		flowToken, err := service.CreateAuthFlow(service.AuthFlowPurposeLogin2FA, "password", "", user.Id, "", "", 5*time.Minute)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, dto.Fail("登录失败"))
-			return
-		}
-		c.JSON(http.StatusOK, dto.Ok(gin.H{"twofa_required": true, "flow_token": flowToken}))
-		return
-	}
-	sid, access, refresh, err := service.CompleteLogin(user, c.ClientIP(), c.GetHeader("User-Agent"), "password")
+	twoFAEnabled, err := service.TwoFAStatusChecked(user.Id)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, dto.Fail("登录失败"))
 		return
 	}
+	if twoFAEnabled {
+		flowToken, err := service.BeginTwoFALogin(user)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, dto.Fail("登录失败"))
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"success": true,
+			"message": "",
+			"data":    gin.H{"twofa_required": true, "flow_token": flowToken},
+		})
+		return
+	}
+	sid, access, refresh, err := service.CompleteLogin(user, c.ClientIP(), c.GetHeader("User-Agent"), "password")
+	if err != nil {
+		writeAuthSessionError(c, err)
+		return
+	}
 	setAuthCookies(c, sid, access, refresh)
-	c.JSON(http.StatusOK, dto.Ok(userResponse(user)))
+	c.JSON(http.StatusOK, gin.H{"success": true, "message": "", "data": userResponse(user)})
 }
 
 // Login2FA completes a two-step login with a TOTP or backup code.
@@ -120,41 +214,148 @@ func Login2FA(c *gin.Context) {
 	}
 	user, sid, access, refresh, err := service.Login2FA(req.FlowToken, req.Code, c.ClientIP(), c.GetHeader("User-Agent"))
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, dto.Fail(err.Error()))
+		switch {
+		case errors.Is(err, service.ErrSessionLimit), errors.Is(err, service.ErrSessionIssuanceLimit),
+			errors.Is(err, service.ErrSessionRevoked):
+			writeAuthSessionError(c, err)
+		case errors.Is(err, service.ErrInvalidFlowToken), errors.Is(err, service.ErrInvalidCredentials),
+			errors.Is(err, service.ErrTwoFANotEnabled), errors.Is(err, service.ErrTwoFAInvalidCode),
+			errors.Is(err, service.ErrTwoFALocked):
+			writeStableAuthError(c, http.StatusUnauthorized, "AUTH_2FA_INVALID")
+		default:
+			writeAuthSessionError(c, err)
+		}
 		return
 	}
 	setAuthCookies(c, sid, access, refresh)
-	c.JSON(http.StatusOK, dto.Ok(userResponse(user)))
+	c.JSON(http.StatusOK, gin.H{"success": true, "message": "", "data": userResponse(user)})
 }
 
 // RefreshAuth rotates the refresh token and issues a new access token.
 func RefreshAuth(c *gin.Context) {
-	cookie, err := c.Cookie(refreshCookie)
-	if err != nil {
-		c.JSON(http.StatusUnauthorized, dto.Fail("缺少刷新令牌"))
-		return
-	}
-	parts := strings.SplitN(cookie, ".", 2)
-	if len(parts) != 2 {
-		c.JSON(http.StatusUnauthorized, dto.Fail("刷新令牌格式错误"))
-		return
-	}
-	access, newRefresh, user, err := service.RefreshSession(parts[0], parts[1])
-	if err != nil {
+	sid, refresh, status := readRefreshCredential(c)
+	if status == refreshCredentialMissing {
 		clearAuthCookies(c)
-		c.JSON(http.StatusUnauthorized, dto.Fail("会话已失效"))
+		writeAuthSessionError(c, service.ErrRefreshTokenInvalid)
 		return
 	}
-	setAuthCookies(c, parts[0], access, newRefresh)
-	c.JSON(http.StatusOK, dto.Ok(userResponse(user)))
+	if status != refreshCredentialValid {
+		clearAuthCookies(c)
+		writeAuthSessionError(c, service.ErrRefreshTokenInvalid)
+		return
+	}
+	result, err := service.RefreshSessionWithResult(sid, refresh)
+	if err != nil {
+		if errors.Is(err, service.ErrRefreshTokenInvalid) ||
+			errors.Is(err, service.ErrSessionRevoked) ||
+			errors.Is(err, service.ErrRefreshReplay) ||
+			errors.Is(err, service.ErrSessionExpiryInvalid) {
+			clearAuthCookies(c)
+		}
+		writeAuthSessionError(c, err)
+		return
+	}
+	if err := setRefreshedAuthCookies(
+		c, sid, result.AccessToken, result.RefreshToken, result.ExpiresAt, result.ValidatedAt,
+	); err != nil {
+		clearAuthCookies(c)
+		writeAuthSessionError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, dto.Ok(userResponse(result.User)))
+}
+
+type refreshCredentialStatus uint8
+
+const (
+	refreshCredentialMissing refreshCredentialStatus = iota
+	refreshCredentialMalformed
+	refreshCredentialValid
+)
+
+func readRefreshCredential(c *gin.Context) (string, string, refreshCredentialStatus) {
+	if c == nil || c.Request == nil {
+		return "", "", refreshCredentialMissing
+	}
+	var value string
+	count := 0
+	for _, cookie := range c.Request.Cookies() {
+		if cookie.Name == refreshCookie {
+			value = cookie.Value
+			count++
+		}
+	}
+	if count == 0 {
+		return "", "", refreshCredentialMissing
+	}
+	if count != 1 || len(value) > 321 || strings.Count(value, ".") != 1 {
+		return "", "", refreshCredentialMalformed
+	}
+	sid, refresh, _ := strings.Cut(value, ".")
+	if !validRefreshCredentialPart(sid, 64) || !validRefreshCredentialPart(refresh, 256) {
+		return "", "", refreshCredentialMalformed
+	}
+	return sid, refresh, refreshCredentialValid
+}
+
+func validRefreshCredentialPart(value string, maximum int) bool {
+	if value == "" || len(value) > maximum {
+		return false
+	}
+	for index := range len(value) {
+		character := value[index]
+		if !((character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') ||
+			(character >= '0' && character <= '9') || character == '-' || character == '_') {
+			return false
+		}
+	}
+	return true
+}
+
+func writeStableAuthError(c *gin.Context, status int, code string) {
+	c.Header("Cache-Control", "no-store")
+	c.JSON(status, gin.H{
+		"success": false,
+		"code":    code,
+		"message": http.StatusText(status),
+	})
+}
+
+func writePasswordAuthenticationError(c *gin.Context, err error) {
+	if errors.Is(err, service.ErrPasswordVerificationBusy) {
+		c.Header("Retry-After", "1")
+		writeStableAuthError(c, http.StatusTooManyRequests, "AUTH_PASSWORD_VERIFICATION_BUSY")
+		return
+	}
+	c.JSON(http.StatusUnauthorized, dto.Fail(err.Error()))
 }
 
 // AuthLogout revokes the current session.
 func AuthLogout(c *gin.Context) {
-	if cookie, err := c.Cookie(refreshCookie); err == nil {
+	claims, accessErr := middleware.GetDashboardSessionClaims(c)
+	if accessErr == nil {
+		if _, err := service.RevokeUserSession(claims.UserID, claims.SessionID, "logout"); err != nil {
+			c.JSON(http.StatusInternalServerError, dto.Fail("退出登录失败"))
+			return
+		}
+		clearAuthCookies(c)
+		c.JSON(http.StatusOK, dto.OkMessage("已退出登录"))
+		return
+	}
+	if !errors.Is(accessErr, middleware.ErrDashboardSessionInvalid) &&
+		!errors.Is(accessErr, service.ErrSessionRevoked) {
+		c.JSON(http.StatusInternalServerError, dto.Fail("退出登录失败"))
+		return
+	}
+
+	cookie, err := c.Cookie(refreshCookie)
+	if err == nil {
 		parts := strings.SplitN(cookie, ".", 2)
-		if len(parts) == 2 {
-			_ = service.RevokeSession(parts[0])
+		if len(parts) == 2 && parts[0] != "" && parts[1] != "" && !strings.Contains(parts[1], ".") {
+			if _, err := service.RevokeSessionByRefreshToken(parts[0], parts[1]); err != nil {
+				c.JSON(http.StatusInternalServerError, dto.Fail("退出登录失败"))
+				return
+			}
 		}
 	}
 	clearAuthCookies(c)
@@ -201,8 +402,22 @@ func calculateUserPermissions(userRole int) gin.H {
 
 // DeleteSelf soft-deletes the authenticated user's account.
 func DeleteSelf(c *gin.Context) {
-	userId := common.GetUserId(c)
-	if err := service.DeleteUser(userId); err != nil {
+	identity, ok := requireLoginSession(c)
+	if !ok {
+		return
+	}
+	user, err := service.GetUserByID(identity.UserID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, dto.Fail("删除失败"))
+		return
+	}
+	// Preserve the reference safety invariant: the super administrator cannot
+	// remove the account that anchors instance administration.
+	if user.Role == constant.RoleRootUser {
+		c.JSON(http.StatusOK, dto.Fail("不能删除超级管理员账户"))
+		return
+	}
+	if err := service.DeleteUser(identity.UserID); err != nil {
 		c.JSON(http.StatusInternalServerError, dto.Fail("删除失败"))
 		return
 	}
@@ -218,25 +433,68 @@ func UpdateSelf(c *gin.Context) {
 		return
 	}
 	userId := common.GetUserId(c)
+	if req.Language != nil || req.SidebarModules != nil {
+		if req.DisplayName != "" || req.Email != "" || req.Password != "" || req.OldPassword != "" {
+			c.JSON(http.StatusBadRequest, dto.Fail("个人偏好不能与账户凭据同时更新"))
+			return
+		}
+		if err := service.UpdateUserProfilePreferences(userId, req.Language, req.SidebarModules); err != nil {
+			c.JSON(http.StatusBadRequest, dto.Fail("个人偏好格式无效"))
+			return
+		}
+		c.JSON(http.StatusOK, dto.OkMessage("更新成功"))
+		return
+	}
 	updates := map[string]any{}
 	if req.DisplayName != "" {
-		updates["display_name"] = req.DisplayName
+		displayName := strings.TrimSpace(req.DisplayName)
+		if displayName == "" || strings.ContainsRune(displayName, '\x00') {
+			c.JSON(http.StatusBadRequest, dto.Fail("昵称格式无效"))
+			return
+		}
+		updates["display_name"] = displayName
 	}
 	if req.Email != "" {
-		updates["email"] = req.Email
+		user, err := service.GetUserByID(userId)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, dto.Fail("更新失败"))
+			return
+		}
+		if service.NormalizeEmail(req.Email) != service.NormalizeEmail(user.Email) {
+			c.JSON(http.StatusBadRequest, dto.Fail("请先通过邮箱验证码绑定新邮箱"))
+			return
+		}
 	}
 	if req.Password != "" {
 		if req.OldPassword == "" {
 			c.JSON(http.StatusBadRequest, dto.Fail("请输入原密码"))
 			return
 		}
-		user, err := service.GetUserByID(userId)
-		if err != nil || !common.PasswordVerify(req.OldPassword, user.Password) {
-			c.JSON(http.StatusBadRequest, dto.Fail("原密码错误"))
+		sid, ok := currentSid(c)
+		if !ok {
+			c.JSON(http.StatusForbidden, gin.H{
+				"success": false,
+				"code":    "AUTH_SESSION_REQUIRED",
+				"message": "修改密码需要登录会话",
+			})
 			return
 		}
-		hash, _ := common.PasswordHash(req.Password)
-		updates["password"] = hash
+		displayName, _ := updates["display_name"].(string)
+		access, err := service.ChangePasswordKeepSession(userId, sid, req.OldPassword, req.Password, displayName)
+		if err != nil {
+			switch {
+			case errors.Is(err, service.ErrInvalidCredentials):
+				c.JSON(http.StatusBadRequest, dto.Fail("原密码错误"))
+			case errors.Is(err, service.ErrSessionRevoked):
+				clearAuthCookies(c)
+				c.JSON(http.StatusUnauthorized, dto.Fail("会话已失效"))
+			default:
+				c.JSON(http.StatusInternalServerError, dto.Fail("更新失败"))
+			}
+			return
+		}
+		setAccessCookie(c, access)
+		delete(updates, "display_name")
 	}
 	if len(updates) > 0 {
 		if err := service.UpdateUser(userId, updates); err != nil {
@@ -248,18 +506,29 @@ func UpdateSelf(c *gin.Context) {
 }
 
 func userResponse(u *model.User) gin.H {
+	userSettings := service.UserSettingsFromRaw(u.Setting)
+	safeSettings := service.SafeUserSettingsJSON(u.Setting)
 	return gin.H{
-		"id":            u.Id,
-		"username":      u.Username,
-		"display_name":  u.DisplayName,
-		"role":          u.Role,
-		"status":        u.Status,
-		"email":         u.Email,
-		"group":         u.Group,
-		"quota":         u.Quota,
-		"used_quota":    u.UsedQuota,
-		"request_count": u.RequestCount,
-		"created_at":    u.CreatedAt,
+		"id":              u.Id,
+		"username":        u.Username,
+		"display_name":    u.DisplayName,
+		"role":            u.Role,
+		"status":          u.Status,
+		"email":           u.Email,
+		"email_verified":  u.EmailVerified,
+		"github_id":       u.GitHubId,
+		"discord_id":      u.DiscordId,
+		"oidc_id":         u.OidcId,
+		"wechat_id":       u.WeChatId,
+		"telegram_id":     u.TelegramId,
+		"linuxdo_id":      u.LinuxDOId,
+		"group":           u.Group,
+		"quota":           u.Quota,
+		"used_quota":      u.UsedQuota,
+		"request_count":   u.RequestCount,
+		"created_at":      u.CreatedAt,
+		"setting":         safeSettings,
+		"sidebar_modules": userSettings.SidebarModules,
 	}
 }
 
@@ -267,8 +536,11 @@ func userResponse(u *model.User) gin.H {
 // signed-in user and returns it (reference contract: GET /api/user/token).
 // The new token replaces any previously issued one.
 func GenerateAccessToken(c *gin.Context) {
-	userId := common.GetUserId(c)
-	key, err := service.GenerateUserAccessToken(userId)
+	identity, ok := requireLoginSession(c)
+	if !ok {
+		return
+	}
+	key, err := service.GenerateUserAccessToken(identity.UserID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, dto.Fail("生成失败"))
 		return

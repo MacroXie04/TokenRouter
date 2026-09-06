@@ -1,0 +1,410 @@
+.pricing-page {
+  max-width: 1180px;
+}
+
+.pricing-heading {
+  margin-bottom: 0.5rem;
+}
+
+.pricing-state {
+  padding-block: 2.5rem;
+  text-align: center;
+}
+
+.pricing-controls {
+  display: grid;
+  gap: 1rem;
+}
+
+.pricing-controls label {
+  margin: 0;
+}
+
+.pricing-filter-note {
+  margin: -0.35rem 0 0;
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.pricing-filter-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
+  gap: 0.8rem;
+}
+
+.pricing-toolbar,
+.pricing-view-switch,
+.pricing-pagination,
+.pricing-model-card > header,
+.pricing-detail-prices,
+.pricing-pills {
+  display: flex;
+  align-items: center;
+}
+
+.pricing-toolbar {
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  padding-top: 0.2rem;
+}
+
+.pricing-toolbar p {
+  margin: 0 auto 0 0;
+  color: var(--muted);
+  font-size: 0.86rem;
+}
+
+.pricing-view-switch {
+  gap: 0.2rem;
+  padding: 0.2rem;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+}
+
+.pricing-view-switch button {
+  padding: 0.35rem 0.65rem;
+  background: transparent;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.pricing-view-switch button[aria-pressed='true'] {
+  background: var(--accent);
+  color: #fff;
+}
+
+.pricing-toolbar .link {
+  margin-left: 0;
+}
+
+.pricing-card-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1rem;
+}
+
+.pricing-model-card {
+  display: flex;
+  min-width: 0;
+  min-height: 18rem;
+  flex-direction: column;
+  gap: 1rem;
+  margin: 0;
+}
+
+.pricing-model-card > header {
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.8rem;
+}
+
+.pricing-model-card header p,
+.pricing-model-card h2,
+.pricing-description,
+.pricing-owner,
+.pricing-detail-hero h2,
+.pricing-detail-hero > p {
+  margin: 0;
+}
+
+.pricing-model-card header p,
+.pricing-owner {
+  color: var(--muted);
+  font-size: 0.76rem;
+}
+
+.pricing-model-card h2 {
+  margin-top: 0.25rem;
+  overflow-wrap: anywhere;
+  font-size: 1rem;
+}
+
+.pricing-model-card h2 a,
+.pricing-detail-link {
+  color: var(--accent);
+}
+
+.pricing-type {
+  flex: 0 0 auto;
+  padding: 0.18rem 0.45rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 0.68rem;
+}
+
+.pricing-description {
+  display: -webkit-box;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 0.84rem;
+  line-height: 1.5;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
+.pricing-price-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.6rem;
+  margin: 0;
+}
+
+.pricing-price-grid div {
+  min-width: 0;
+  padding: 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.pricing-price-grid dt,
+.pricing-detail-prices dt {
+  color: var(--muted);
+  font-size: 0.7rem;
+}
+
+.pricing-price-grid dd,
+.pricing-detail-prices dd {
+  margin: 0.25rem 0 0;
+  overflow-wrap: anywhere;
+  font-weight: 700;
+}
+
+.pricing-dynamic-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  margin: 0;
+  padding: 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--muted);
+  font-size: 0.76rem;
+}
+
+.pricing-dynamic-summary code {
+  color: var(--text);
+}
+
+.pricing-pills {
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.pricing-pills span {
+  max-width: 100%;
+  padding: 0.2rem 0.45rem;
+  overflow: hidden;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--muted);
+  font-size: 0.7rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pricing-detail-link {
+  margin-top: auto;
+  font-size: 0.82rem;
+  text-decoration: none;
+}
+
+.pricing-table-wrap {
+  padding: 0;
+}
+
+.pricing-table {
+  min-width: 850px;
+}
+
+.pricing-table td {
+  max-width: 18rem;
+  vertical-align: top;
+  font-size: 0.84rem;
+}
+
+.pricing-table tbody th {
+  max-width: 18rem;
+  text-align: left;
+  vertical-align: top;
+  font-size: 0.84rem;
+}
+
+.pricing-table tbody th:first-child a {
+  overflow-wrap: anywhere;
+}
+
+.pricing-table tbody th:first-child small {
+  display: block;
+  margin-top: 0.25rem;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 0.72rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pricing-table-price span {
+  display: block;
+  white-space: nowrap;
+}
+
+.pricing-pagination {
+  justify-content: center;
+  gap: 1rem;
+  margin-top: 1.2rem;
+  color: var(--muted);
+  font-size: 0.84rem;
+}
+
+.pricing-pagination button {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  color: var(--text);
+}
+
+.pricing-detail {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+}
+
+.pricing-detail > .card {
+  min-width: 0;
+  margin: 0;
+}
+
+.pricing-detail-hero,
+.pricing-detail > .card:last-child {
+  grid-column: 1 / -1;
+}
+
+.pricing-detail-hero h2 {
+  margin-top: 0.25rem;
+  overflow-wrap: anywhere;
+  font-size: clamp(1.45rem, 4vw, 2.2rem);
+}
+
+.pricing-detail-hero > p:not(.pricing-owner) {
+  max-width: 60rem;
+  margin-top: 0.8rem;
+  color: var(--muted);
+  line-height: 1.6;
+}
+
+.pricing-detail-hero .pricing-pills {
+  margin-top: 1rem;
+}
+
+.pricing-detail-prices {
+  align-items: stretch;
+  flex-wrap: wrap;
+  gap: 0.7rem;
+  margin: 1rem 0 0;
+}
+
+.pricing-detail-prices div {
+  min-width: 9rem;
+  flex: 1;
+  padding: 0.8rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.pricing-detail-prices small {
+  display: block;
+  color: var(--muted);
+  font-size: 0.7rem;
+  font-weight: 400;
+}
+
+.pricing-dynamic-billing {
+  margin-top: 1rem;
+}
+
+.pricing-dynamic-billing > dl {
+  display: grid;
+  gap: 0.7rem;
+  margin: 0;
+}
+
+.pricing-dynamic-billing > dl > div {
+  min-width: 0;
+  padding: 0.8rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.pricing-dynamic-billing dt {
+  color: var(--muted);
+  font-size: 0.7rem;
+}
+
+.pricing-dynamic-billing dd {
+  margin: 0.35rem 0 0;
+}
+
+.pricing-dynamic-billing dd code {
+  display: block;
+  max-height: 11rem;
+  overflow: auto;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.pricing-dynamic-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-top: 0.7rem;
+}
+
+.pricing-dynamic-legend span {
+  padding: 0.25rem 0.45rem;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--muted);
+  font-size: 0.7rem;
+}
+
+.pricing-detail table {
+  min-width: 560px;
+}
+
+.pricing-detail td {
+  font-size: 0.82rem;
+  vertical-align: top;
+}
+
+.pricing-detail code {
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+@media (max-width: 900px) {
+  .pricing-card-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 680px) {
+  .pricing-filter-grid,
+  .pricing-card-grid,
+  .pricing-detail {
+    grid-template-columns: 1fr;
+  }
+
+  .pricing-detail-hero,
+  .pricing-detail > .card:last-child {
+    grid-column: auto;
+  }
+
+  .pricing-toolbar {
+    align-items: stretch;
+  }
+
+  .pricing-toolbar p {
+    width: 100%;
+  }
+}

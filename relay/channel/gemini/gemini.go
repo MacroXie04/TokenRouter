@@ -2,9 +2,7 @@
 package gemini
 
 import (
-	"bufio"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 
@@ -13,6 +11,7 @@ import (
 	"github.com/tokenrouter/tokenrouter/constant"
 	"github.com/tokenrouter/tokenrouter/protocolkit"
 	relaycommon "github.com/tokenrouter/tokenrouter/relay/common"
+	"github.com/tokenrouter/tokenrouter/setting"
 )
 
 // Adaptor is the Gemini adapter.
@@ -27,16 +26,18 @@ func (a *Adaptor) GetRequestURL(meta *relaycommon.Meta) (string, error) {
 	if base == "" {
 		base = "https://generativelanguage.googleapis.com"
 	}
+	model := relaycommon.PrepareGeminiRequest(nil, meta.OriginalModelName, meta.ModelName, false)
+	version := setting.GetGeminiAPIVersion(model)
 	if a.Mode == constant.RelayModeEmbeddings {
 		// The embedding payload is always built batch-style (requests array),
 		// matching the reference; use the batch endpoint.
-		return relaycommon.JoinURL(base, "/v1beta/models/"+meta.ModelName+":batchEmbedContents"), nil
+		return relaycommon.JoinURL(base, "/"+version+"/models/"+model+":batchEmbedContents"), nil
 	}
 	action := "generateContent"
 	if meta.IsStream {
 		action = "streamGenerateContent?alt=sse"
 	}
-	return relaycommon.JoinURL(base, "/v1beta/models/"+meta.ModelName+":"+action), nil
+	return relaycommon.JoinURL(base, "/"+version+"/models/"+model+":"+action), nil
 }
 
 func (a *Adaptor) SetupRequestHeader(req *http.Request, meta *relaycommon.Meta) error {
@@ -50,6 +51,11 @@ func (a *Adaptor) ConvertRequest(meta *relaycommon.Meta) ([]byte, error) {
 		return convertEmbeddingRequest(meta)
 	}
 	geminiReq := protocolkit.OpenAIRequestToGeminiRequest(meta.Request)
+	_ = relaycommon.PrepareGeminiRequest(geminiReq, meta.OriginalModelName, meta.ModelName, true)
+	// Gemini selects the mapped model from the request URL. Omitting the
+	// OpenAI-facing model from the body prevents two conflicting model names
+	// from being sent upstream.
+	geminiReq.Model = ""
 	return protocolkit.MarshalJSON(geminiReq)
 }
 
@@ -121,15 +127,15 @@ func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, meta *relaycom
 	if meta.IsStream {
 		return a.streamResponse(c, resp, meta)
 	}
-	return a.nonStreamResponse(c, resp)
+	return a.nonStreamResponse(c, resp, meta)
 }
 
 // embeddingResponse converts the batch embedContent response into the OpenAI
 // embeddings list shape. Embeddings are billed by prompt tokens.
 func (a *Adaptor) embeddingResponse(c *gin.Context, resp *http.Response, meta *relaycommon.Meta) (*protocolkit.Usage, error) {
-	body, err := io.ReadAll(resp.Body)
+	body, err := relaycommon.ReadUpstreamBody(resp.Body, relaycommon.MaxUpstreamLargeJSONBodyBytes)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("read Gemini embedding response: %w", err)
 	}
 	var batch struct {
 		Embeddings []protocolkit.ContentEmbedding `json:"embeddings"`
@@ -146,24 +152,31 @@ func (a *Adaptor) embeddingResponse(c *gin.Context, resp *http.Response, meta *r
 	b, _ := protocolkit.MarshalJSON(out)
 	c.Status(resp.StatusCode)
 	c.Header("Content-Type", "application/json")
-	_, _ = c.Writer.Write(b)
+	if _, err := c.Writer.Write(b); err != nil {
+		return usage, fmt.Errorf("write Gemini embedding response: %w", err)
+	}
 	return usage, nil
 }
 
-func (a *Adaptor) nonStreamResponse(c *gin.Context, resp *http.Response) (*protocolkit.Usage, error) {
-	body, err := io.ReadAll(resp.Body)
+func (a *Adaptor) nonStreamResponse(c *gin.Context, resp *http.Response, meta *relaycommon.Meta) (*protocolkit.Usage, error) {
+	body, err := relaycommon.ReadUpstreamBody(resp.Body, relaycommon.MaxUpstreamJSONBodyBytes)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("read Gemini response: %w", err)
 	}
 	var geminiResp protocolkit.GeminiChatResponse
 	if err := protocolkit.UnmarshalJSON(body, &geminiResp); err != nil {
-		return nil, relaycommon.HandleErrorResponse(resp)
+		return nil, fmt.Errorf("decode Gemini response: %w", err)
+	}
+	if err := observeGeminiGoogleSearch(meta.ToolHooks(), &geminiResp); err != nil {
+		return nil, fmt.Errorf("observe Gemini Google Search usage: %w", err)
 	}
 	openaiResp := protocolkit.GeminiResponseToOpenAIResponse(&geminiResp)
 	out, _ := protocolkit.MarshalJSON(openaiResp)
 	c.Status(resp.StatusCode)
 	c.Header("Content-Type", "application/json")
-	_, _ = c.Writer.Write(out)
+	if _, err := c.Writer.Write(out); err != nil {
+		return openaiResp.Usage, fmt.Errorf("write Gemini response: %w", err)
+	}
 	return openaiResp.Usage, nil
 }
 
@@ -177,9 +190,23 @@ func (a *Adaptor) streamResponse(c *gin.Context, resp *http.Response, meta *rela
 	var usage *protocolkit.Usage
 	var contentChars int
 	var promptTokens int
+	roleSent := false
+	finishSent := false
+	sawToolCall := false
 
-	scanner := bufio.NewScanner(resp.Body)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	sendChunk := func(delta protocolkit.ChatCompletionsStreamResponseChoiceDelta, finishReason *string) {
+		chunk := protocolkit.ChatCompletionsStreamResponse{
+			Object: "chat.completion.chunk",
+			Choices: []protocolkit.ChatCompletionsStreamResponseChoice{{
+				Index: 0, Delta: delta, FinishReason: finishReason,
+			}},
+		}
+		body, _ := protocolkit.MarshalJSON(chunk)
+		_, _ = c.Writer.WriteString("data: " + string(body) + "\n\n")
+		c.Writer.Flush()
+	}
+
+	scanner := relaycommon.NewUpstreamSSEScanner(resp.Body)
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -194,34 +221,106 @@ func (a *Adaptor) streamResponse(c *gin.Context, resp *http.Response, meta *rela
 		if err := protocolkit.UnmarshalJSON([]byte(data), &geminiResp); err != nil {
 			continue
 		}
+		if err := observeGeminiGoogleSearch(meta.ToolHooks(), &geminiResp); err != nil {
+			return usage, fmt.Errorf("observe Gemini stream Google Search usage: %w", err)
+		}
 		if geminiResp.UsageMetadata != nil {
 			usage = protocolkit.GeminiUsageToOpenAIUsage(geminiResp.UsageMetadata)
 			promptTokens = usage.PromptTokens
 		}
-		if len(geminiResp.Candidates) > 0 && geminiResp.Candidates[0].Content != nil {
-			for _, p := range geminiResp.Candidates[0].Content.Parts {
-				if p.Text != "" {
-					contentChars += len(p.Text)
-					chunk := protocolkit.ChatCompletionsStreamResponse{
-						Object: "chat.completion.chunk",
-						Choices: []protocolkit.ChatCompletionsStreamResponseChoice{{
-							Index: 0,
-							Delta: protocolkit.ChatCompletionsStreamResponseChoiceDelta{Content: p.Text},
-						}},
+		if len(geminiResp.Candidates) > 0 {
+			candidate := geminiResp.Candidates[0]
+			if candidate.Content != nil {
+				if !roleSent {
+					sendChunk(protocolkit.ChatCompletionsStreamResponseChoiceDelta{Role: "assistant"}, nil)
+					roleSent = true
+				}
+				for partIndex, p := range candidate.Content.Parts {
+					if p.Text != "" {
+						contentChars += len(p.Text)
+						delta := protocolkit.ChatCompletionsStreamResponseChoiceDelta{Content: p.Text}
+						if p.Thought {
+							delta.Content = ""
+							delta.ReasoningContent = p.Text
+						}
+						sendChunk(delta, nil)
 					}
-					b, _ := protocolkit.MarshalJSON(chunk)
-					_, _ = c.Writer.WriteString("data: " + string(b) + "\n\n")
-					c.Writer.Flush()
+					if p.FunctionCall != nil {
+						sawToolCall = true
+						sendChunk(protocolkit.ChatCompletionsStreamResponseChoiceDelta{ToolCalls: []protocolkit.ToolCallResponse{{
+							Index: partIndex, Id: geminiStreamToolCallID(p.FunctionCall.Name), Type: "function",
+							Function: &protocolkit.FunctionResponse{
+								Name: p.FunctionCall.Name, Arguments: protocolkit.ToJSONString(p.FunctionCall.Args),
+							},
+						}}}, nil)
+					}
+				}
+			}
+			if !finishSent {
+				if reason := mapGeminiStreamFinishReason(candidate.FinishReason); reason != "" {
+					if sawToolCall {
+						reason = "tool_calls"
+					}
+					sendChunk(protocolkit.ChatCompletionsStreamResponseChoiceDelta{}, &reason)
+					finishSent = true
 				}
 			}
 		}
 	}
 
-	_, _ = c.Writer.WriteString("data: [DONE]\n\n")
-	c.Writer.Flush()
-
 	if usage == nil && contentChars > 0 {
 		usage = relaycommon.EstimateStreamUsage(promptTokens, contentChars)
 	}
+	if err := scanner.Err(); err != nil {
+		return usage, fmt.Errorf("read Gemini event stream (maximum event %d bytes): %w",
+			relaycommon.MaxUpstreamSSEEventBytes, err)
+	}
+	_, _ = c.Writer.WriteString("data: [DONE]\n\n")
+	c.Writer.Flush()
 	return usage, nil
+}
+
+func observeGeminiGoogleSearch(hooks *relaycommon.ToolUsageHooks, response *protocolkit.GeminiChatResponse) error {
+	if hooks == nil || hooks.MarkGeminiGoogleSearch == nil || response == nil {
+		return nil
+	}
+	for _, candidate := range response.Candidates {
+		if candidate.GroundingMetadata != nil && len(candidate.GroundingMetadata.WebSearchQueries) > 0 {
+			return hooks.MarkGeminiGoogleSearch()
+		}
+	}
+	return nil
+}
+
+func geminiStreamToolCallID(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "call_gemini"
+	}
+	var id strings.Builder
+	id.WriteString("call_")
+	for _, r := range name {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') ||
+			(r >= '0' && r <= '9') || r == '_' || r == '-' {
+			id.WriteRune(r)
+		} else {
+			id.WriteByte('_')
+		}
+	}
+	return id.String()
+}
+
+func mapGeminiStreamFinishReason(reason string) string {
+	switch reason {
+	case "STOP":
+		return "stop"
+	case "MAX_TOKENS":
+		return "length"
+	case "SAFETY", "RECITATION", "PROHIBITED_CONTENT", "SPII", "BLOCKLIST":
+		return "content_filter"
+	case "MALFORMED_FUNCTION_CALL":
+		return "tool_calls"
+	default:
+		return strings.ToLower(reason)
+	}
 }

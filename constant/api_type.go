@@ -68,6 +68,53 @@ const (
 	RelayModeAlphaSearch                    RelayMode = 37
 )
 
+// APIType identifies the wire adapter used for a channel. These numeric
+// values are externally observable and persisted by compatible deployments;
+// keep them stable and append new values only before APITypeDummy.
+type APIType int
+
+const (
+	APITypeOpenAI APIType = iota
+	APITypeAnthropic
+	APITypePaLM
+	APITypeBaidu
+	APITypeZhipu
+	APITypeAli
+	APITypeXunfei
+	APITypeAIProxyLibrary
+	APITypeTencent
+	APITypeGemini
+	APITypeZhipuV4
+	APITypeOllama
+	APITypePerplexity
+	APITypeAws
+	APITypeCohere
+	APITypeDify
+	APITypeJina
+	APITypeCloudflare
+	APITypeSiliconFlow
+	APITypeVertexAi
+	APITypeMistral
+	APITypeDeepSeek
+	APITypeMokaAI
+	APITypeVolcEngine
+	APITypeBaiduV2
+	APITypeOpenRouter
+	APITypeXinference
+	APITypeXai
+	APITypeCoze
+	APITypeJimeng
+	APITypeMoonshot
+	APITypeSubmodel
+	APITypeMiniMax
+	APITypeReplicate
+	APITypeCodex
+	APITypeAdvancedCustom
+	APITypeSub2API
+	APITypeNewAPI
+	APITypeDummy
+)
+
 // RelayModeName returns a stable string for a relay mode.
 func RelayModeName(m RelayMode) string {
 	if name, ok := relayModeNames[m]; ok {
@@ -161,17 +208,85 @@ func PathToRelayMode(path string) RelayMode {
 		return RelayModeRerank
 	case p == "/v1/realtime":
 		return RelayModeRealtime
-	case p == "/v1/video/submit":
+	case p == "/v1/video/submit", p == "/v1/video/generations", p == "/v1/videos",
+		strings.HasSuffix(p, "/remix") && strings.HasPrefix(p, "/v1/videos/"):
 		return RelayModeVideoSubmit
-	case p == "/v1/video/tasks", strings.HasPrefix(p, "/v1/video/tasks/"):
+	case p == "/v1/video/tasks", strings.HasPrefix(p, "/v1/video/tasks/"),
+		strings.HasPrefix(p, "/v1/video/generations/"), strings.HasPrefix(p, "/v1/videos/"):
 		return RelayModeVideoFetchByID
-	case strings.HasPrefix(p, "/mj/submit/imagine"), strings.HasPrefix(p, "/v1/mj/submit/imagine"):
-		return RelayModeMidjourneyImagine
-	case strings.HasPrefix(p, "/mj"):
-		return RelayModeMidjourneyTaskFetch
-	case strings.HasPrefix(p, "/v1/suno"):
+	case PathToRelayModeMidjourney(p) != RelayModeUnknown:
+		return PathToRelayModeMidjourney(p)
+	case p == "/suno/fetch":
+		return RelayModeSunoFetch
+	case strings.HasPrefix(p, "/suno/fetch/"):
+		return RelayModeSunoFetchByID
+	case strings.HasPrefix(p, "/suno/submit/"):
 		return RelayModeSunoSubmit
 	default:
 		return RelayModeUnknown
 	}
+}
+
+// PathToRelayModeMidjourney maps both /mj and /:mode/mj paths to the
+// reference's exact Midjourney operation. It deliberately has no generic
+// /mj fallback: an unregistered spelling must fail closed instead of being
+// mistaken for an owner-scoped task fetch.
+func PathToRelayModeMidjourney(path string) RelayMode {
+	p, ok := canonicalMidjourneyRoutePath(path)
+	if !ok {
+		return RelayModeUnknown
+	}
+	switch {
+	case p == "/submit/action":
+		return RelayModeMidjourneyAction
+	case p == "/submit/modal":
+		return RelayModeMidjourneyModal
+	case p == "/submit/shorten":
+		return RelayModeMidjourneyShorten
+	case p == "/insight-face/swap":
+		return RelayModeSwapFace
+	case p == "/submit/upload-discord-images":
+		return RelayModeMidjourneyUpload
+	case p == "/submit/imagine":
+		return RelayModeMidjourneyImagine
+	case p == "/submit/video":
+		return RelayModeMidjourneyVideo
+	case p == "/submit/edits":
+		return RelayModeMidjourneyEdits
+	case p == "/submit/blend":
+		return RelayModeMidjourneyBlend
+	case p == "/submit/describe":
+		return RelayModeMidjourneyDescribe
+	case p == "/notify":
+		return RelayModeMidjourneyNotify
+	case p == "/submit/simple-change":
+		return RelayModeMidjourneySimpleChange
+	case p == "/submit/change":
+		return RelayModeMidjourneyChange
+	case exactMidjourneyTaskRoute(p, "fetch"):
+		return RelayModeMidjourneyTaskFetch
+	case exactMidjourneyTaskRoute(p, "image-seed"):
+		return RelayModeMidjourneyTaskImageSeed
+	case p == "/task/list-by-condition":
+		return RelayModeMidjourneyTaskFetchByCondition
+	default:
+		return RelayModeUnknown
+	}
+}
+
+func canonicalMidjourneyRoutePath(path string) (string, bool) {
+	p := strings.TrimSuffix(path, "/")
+	if strings.HasPrefix(p, "/mj/") {
+		return strings.TrimPrefix(p, "/mj"), true
+	}
+	parts := strings.Split(strings.TrimPrefix(p, "/"), "/")
+	if len(parts) < 3 || parts[0] == "" || parts[1] != "mj" {
+		return "", false
+	}
+	return "/" + strings.Join(parts[2:], "/"), true
+}
+
+func exactMidjourneyTaskRoute(path, operation string) bool {
+	parts := strings.Split(strings.TrimPrefix(path, "/"), "/")
+	return len(parts) == 3 && parts[0] == "task" && parts[1] != "" && parts[2] == operation
 }

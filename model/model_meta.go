@@ -108,7 +108,21 @@ func CreateModelMetadata(metadata *Model) error {
 	metadata.Id = 0
 	metadata.CreatedTime = now
 	metadata.UpdatedTime = now
-	err := DB.Create(metadata).Error
+	// The reference schema defaults raw inserts to enabled/official, while its
+	// model creation contract still permits callers to persist explicit zeroes.
+	// GORM applies declared defaults to zero-valued struct fields, so restore the
+	// caller's values inside the same transaction before the row is visible.
+	status, syncOfficial := metadata.Status, metadata.SyncOfficial
+	err := DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(metadata).Error; err != nil {
+			return err
+		}
+		return tx.Model(&Model{}).Where("id = ?", metadata.Id).Updates(map[string]any{
+			"status": status, "sync_official": syncOfficial,
+		}).Error
+	})
+	metadata.Status = status
+	metadata.SyncOfficial = syncOfficial
 	if err != nil && modelNameExists(DB, metadata.ModelName, 0) {
 		return ErrModelNameExists
 	}

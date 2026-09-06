@@ -1,12 +1,16 @@
 package controller
 
 import (
-	"io"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 
 	"github.com/tokenrouter/tokenrouter/common"
 	"github.com/tokenrouter/tokenrouter/constant"
@@ -15,6 +19,18 @@ import (
 	"github.com/tokenrouter/tokenrouter/service"
 )
 
+const (
+	maxChannelUpdateBodyBytes int64 = 1 << 20
+	maxChannelCreateBatch           = 1_000
+)
+
+type channelCreateEnvelope struct {
+	Mode                      string              `json:"mode"`
+	MultiKeyMode              string              `json:"multi_key_mode"`
+	BatchAddSetKeyPrefix2Name bool                `json:"batch_add_set_key_prefix_2_name"`
+	Channel                   *dto.ChannelRequest `json:"channel"`
+}
+
 // GetChannels lists channels with pagination.
 func GetChannels(c *gin.Context) {
 	var p dto.Pagination
@@ -22,12 +38,19 @@ func GetChannels(c *gin.Context) {
 	p.Normalize()
 	var channels []model.Channel
 	var total int64
-	model.DB.Model(&model.Channel{}).Count(&total)
-	model.DB.Order("id desc").Limit(p.PageSize).Offset(p.Offset()).Find(&channels)
+	if err := model.DB.Model(&model.Channel{}).Count(&total).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, dto.Fail("查询渠道失败"))
+		return
+	}
+	if err := model.DB.Order("id desc").Limit(p.PageSize).Offset(p.Offset()).Find(&channels).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, dto.Fail("查询渠道失败"))
+		return
+	}
 	// Upstream keys are never returned by list/get; disclosure goes through
 	// the step-up-guarded POST /api/channel/:id/key endpoint.
 	for i := range channels {
-		channels[i].Key = ""
+		service.MaskChannelSensitiveFieldsForResponse(&channels[i])
+		clearChannelInfo(&channels[i])
 	}
 	p.Total = total
 	p.TotalPages = int((total + int64(p.PageSize) - 1) / int64(p.PageSize))
@@ -41,7 +64,12 @@ func GetChannel(c *gin.Context) {
 		c.JSON(http.StatusNotFound, dto.Fail("渠道不存在"))
 		return
 	}
-	ch.Key = "" // masked; see GetChannelKey
+	if service.Can(common.GetUserId(c), common.GetRole(c), service.ChannelSensitiveWrite) {
+		service.MaskChannelCredentialsForResponse(ch)
+	} else {
+		service.MaskChannelSensitiveFieldsForResponse(ch)
+	}
+	clearChannelInfo(ch)
 	c.JSON(http.StatusOK, dto.Ok(ch))
 }
 
@@ -55,50 +83,230 @@ func GetChannelKey(c *gin.Context) {
 	}
 	service.RecordSystemLog(common.GetUserId(c), service.LogTypeManage,
 		"channel.key_view id="+common.Int2Str(ch.Id)+" name="+ch.Name)
-	c.JSON(http.StatusOK, dto.Ok(gin.H{"key": ch.Key}))
+	c.JSON(http.StatusOK, dto.Ok(gin.H{"key": service.ChannelCredentialForDisclosure(ch)}))
 }
 
 // AddChannel creates a channel.
 func AddChannel(c *gin.Context) {
-	var req dto.ChannelRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
+	body, err := common.ReadAllLimited(c.Request.Body, maxChannelUpdateBodyBytes)
+	if err != nil {
+		if errors.Is(err, common.ErrBodyTooLarge) {
+			c.JSON(http.StatusRequestEntityTooLarge, dto.Fail("请求体过大"))
+			return
+		}
+		c.JSON(http.StatusBadRequest, dto.Fail("参数错误"))
+		return
+	}
+	var requestObject map[string]any
+	if err := common.Unmarshal(body, &requestObject); err != nil {
 		c.JSON(http.StatusBadRequest, dto.Fail("参数错误: "+err.Error()))
 		return
+	}
+	mode := "single"
+	multiKeyMode := ""
+	batchFingerprintNames := false
+	var req dto.ChannelRequest
+	if _, wrapped := requestObject["channel"]; wrapped {
+		var envelope channelCreateEnvelope
+		if err := common.Unmarshal(body, &envelope); err != nil || envelope.Channel == nil {
+			c.JSON(http.StatusBadRequest, dto.Fail("参数错误: channel 不能为空"))
+			return
+		}
+		mode = strings.TrimSpace(envelope.Mode)
+		multiKeyMode = strings.TrimSpace(envelope.MultiKeyMode)
+		batchFingerprintNames = envelope.BatchAddSetKeyPrefix2Name
+		req = *envelope.Channel
+	} else if err := common.Unmarshal(body, &req); err != nil {
+		c.JSON(http.StatusBadRequest, dto.Fail("参数错误: "+err.Error()))
+		return
+	}
+	if err := service.ValidateChannelOtherSettingsForType(req.Settings, req.Type); err != nil {
+		c.JSON(http.StatusBadRequest, dto.Fail("参数错误: "+err.Error()))
+		return
+	}
+	channel, err := channelFromRequest(req)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, dto.Fail("参数错误: "+err.Error()))
+		return
+	}
+	keys, err := channelCreateKeys(mode, channel)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, dto.Fail(err.Error()))
+		return
+	}
+	channels := make([]*model.Channel, 0, len(keys))
+	for _, key := range keys {
+		candidate := *channel
+		candidate.Key = key
+		if batchFingerprintNames && len(keys) > 1 {
+			candidate.Name = fmt.Sprintf("%s %s", channel.Name, channelKeyFingerprint(key))
+		}
+		if mode == "multi_to_single" {
+			candidate.Key = strings.Join(keys, "\n")
+			if err := setMultiKeyCreateInfo(&candidate, len(keys), multiKeyMode); err != nil {
+				c.JSON(http.StatusBadRequest, dto.Fail(err.Error()))
+				return
+			}
+		}
+		candidate.CreatedTime = common.NowTimestamp()
+		channels = append(channels, &candidate)
+		if mode == "multi_to_single" {
+			break
+		}
+	}
+	var createErr error
+	if len(channels) == 1 {
+		createErr = service.CreateChannelWithAbilities(channels[0])
+	} else {
+		createErr = service.CreateChannelsWithAbilities(channels)
+	}
+	if err := createErr; err != nil {
+		if errors.Is(err, service.ErrInvalidChannelInput) {
+			c.JSON(http.StatusBadRequest, dto.Fail(err.Error()))
+			return
+		}
+		c.JSON(http.StatusInternalServerError, dto.Fail("创建失败: "+err.Error()))
+		return
+	}
+	// Creation proves that the submitted key was accepted; it must not become
+	// an alternate secret-disclosure endpoint. Reading it back requires the
+	// root-only, step-up-guarded channel-key route.
+	c.JSON(http.StatusOK, gin.H{"success": true, "message": ""})
+}
+
+func channelFromRequest(req dto.ChannelRequest) (*model.Channel, error) {
+	channelInfo, err := channelJSONText(req.ChannelInfo)
+	if err != nil {
+		return nil, fmt.Errorf("channel_info 必须是 JSON 对象: %w", err)
 	}
 	weight := uint(constant.DefaultChannelWeight)
 	if req.Weight != nil {
 		weight = *req.Weight
 	}
-	channel := model.Channel{
-		Type:              req.Type,
-		Key:               req.Key,
-		Name:              req.Name,
-		BaseURL:           req.BaseURL,
-		Models:            req.Models,
-		Group:             req.Group,
-		Weight:            &weight,
-		Priority:          req.Priority,
-		ModelMapping:      req.ModelMapping,
-		StatusCodeMapping: req.StatusCodeMapping,
-		Tag:               req.Tag,
-		Remark:            req.Remark,
-		Setting:           req.Setting,
-		Status:            constant.ChannelStatusEnabled,
-		CreatedTime:       common.NowTimestamp(),
+	status := constant.ChannelStatusEnabled
+	if req.Status != nil {
+		if *req.Status != constant.ChannelStatusEnabled &&
+			*req.Status != constant.ChannelStatusAutoDisabled &&
+			*req.Status != constant.ChannelStatusManuallyDisabled {
+			return nil, errors.New("status 超出范围")
+		}
+		status = *req.Status
 	}
-	if err := model.DB.Create(&channel).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, dto.Fail("创建失败: "+err.Error()))
-		return
+	autoBan := 1
+	if req.AutoBan != nil {
+		autoBan = *req.AutoBan
 	}
-	c.JSON(http.StatusOK, dto.Ok(channel))
+	return &model.Channel{
+		Type: req.Type, Key: req.Key, OpenAIOrganization: req.OpenAIOrganization,
+		TestModel: req.TestModel, Status: status, Name: req.Name, Weight: &weight,
+		BaseURL: req.BaseURL, Other: req.Other, Models: req.Models, Group: req.Group,
+		ModelMapping: req.ModelMapping, StatusCodeMapping: req.StatusCodeMapping,
+		Priority: req.Priority, AutoBan: &autoBan, OtherInfo: req.OtherInfo, Tag: req.Tag,
+		Setting: req.Setting, ParamOverride: req.ParamOverride, HeaderOverride: req.HeaderOverride,
+		Remark: req.Remark, ChannelInfo: channelInfo, OtherSettings: req.Settings,
+	}, nil
+}
+
+func channelJSONText(value any) (string, error) {
+	if value == nil {
+		return "", nil
+	}
+	if text, ok := value.(string); ok {
+		return strings.TrimSpace(text), nil
+	}
+	encoded, err := common.Marshal(value)
+	if err != nil {
+		return "", err
+	}
+	return string(encoded), nil
+}
+
+func channelCreateKeys(mode string, channel *model.Channel) ([]string, error) {
+	if channel == nil {
+		return nil, errors.New("channel 不能为空")
+	}
+	if mode != "single" && mode != "batch" && mode != "multi_to_single" {
+		return nil, errors.New("不支持的添加模式")
+	}
+	if mode == "single" {
+		return []string{channel.Key}, nil
+	}
+	keys := make([]string, 0)
+	if channel.Type == int(constant.ChannelTypeVertexAi) && strings.HasPrefix(strings.TrimSpace(channel.Key), "[") {
+		var vertexKeys []any
+		if err := common.UnmarshalJsonStr(channel.Key, &vertexKeys); err != nil {
+			return nil, errors.New("Vertex AI 批量密钥必须是 JSON 数组")
+		}
+		for _, value := range vertexKeys {
+			var key string
+			if text, ok := value.(string); ok {
+				key = strings.TrimSpace(text)
+			} else if encoded, err := common.Marshal(value); err == nil {
+				key = string(encoded)
+			}
+			if key != "" {
+				keys = append(keys, key)
+			}
+		}
+	} else {
+		for _, value := range strings.Split(channel.Key, "\n") {
+			if key := strings.TrimSpace(value); key != "" {
+				keys = append(keys, key)
+			}
+		}
+	}
+	if len(keys) == 0 {
+		return nil, errors.New("密钥不能为空")
+	}
+	if len(keys) > maxChannelCreateBatch {
+		return nil, errors.New("批量渠道数量超过限制")
+	}
+	return keys, nil
+}
+
+func setMultiKeyCreateInfo(channel *model.Channel, size int, mode string) error {
+	if mode == "" {
+		mode = "random"
+	}
+	if mode != "random" && mode != "polling" {
+		return errors.New("不支持的多密钥策略")
+	}
+	info := map[string]any{}
+	if channel.ChannelInfo != "" {
+		if err := common.UnmarshalJsonStr(channel.ChannelInfo, &info); err != nil || info == nil {
+			return errors.New("channel_info 必须是 JSON 对象")
+		}
+	}
+	info["is_multi_key"] = true
+	info["multi_key_size"] = size
+	info["multi_key_status_list"] = map[string]int{}
+	info["multi_key_polling_index"] = 0
+	info["multi_key_mode"] = mode
+	delete(info, "multi_key_disabled_reason")
+	delete(info, "multi_key_disabled_time")
+	encoded, err := common.Marshal(info)
+	if err != nil {
+		return errors.New("channel_info 无法编码")
+	}
+	channel.ChannelInfo = string(encoded)
+	return nil
+}
+
+func channelKeyFingerprint(key string) string {
+	digest := sha256.Sum256([]byte(key))
+	return hex.EncodeToString(digest[:4])
 }
 
 // UpdateChannel updates a channel (reference contract: id comes from the
 // body, sensitive fields require ChannelSensitiveWrite via the fail-closed
 // classifier, unknown request fields are treated as sensitive).
 func UpdateChannel(c *gin.Context) {
-	body, err := io.ReadAll(c.Request.Body)
+	body, err := common.ReadAllLimited(c.Request.Body, maxChannelUpdateBodyBytes)
 	if err != nil {
+		if errors.Is(err, common.ErrBodyTooLarge) {
+			c.JSON(http.StatusRequestEntityTooLarge, dto.Fail("请求体过大"))
+			return
+		}
 		c.JSON(http.StatusBadRequest, dto.Fail("参数错误"))
 		return
 	}
@@ -115,7 +323,11 @@ func UpdateChannel(c *gin.Context) {
 	}
 	var origin model.Channel
 	if err := model.DB.First(&origin, "id = ?", req.Id).Error; err != nil {
-		c.JSON(http.StatusOK, gin.H{"success": false, "message": "渠道不存在"})
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusOK, gin.H{"success": false, "message": "渠道不存在"})
+		} else {
+			c.JSON(http.StatusInternalServerError, dto.Fail("读取渠道失败: "+err.Error()))
+		}
 		return
 	}
 	if channelHasSensitiveChanges(&req, &origin, requestData) &&
@@ -123,27 +335,57 @@ func UpdateChannel(c *gin.Context) {
 		c.JSON(http.StatusForbidden, gin.H{"success": false, "message": "无权限"})
 		return
 	}
+	_, settingsSupplied := requestData["settings"]
+	_, typeSupplied := requestData["type"]
+	if settingsSupplied || typeSupplied {
+		finalSettings := origin.OtherSettings
+		if settingsSupplied {
+			finalSettings = req.Settings
+		}
+		finalType := origin.Type
+		if typeSupplied {
+			finalType = req.Type
+		}
+		if err := service.ValidateChannelOtherSettingsForType(finalSettings, finalType); err != nil {
+			c.JSON(http.StatusBadRequest, dto.Fail("参数错误: "+err.Error()))
+			return
+		}
+	}
 	updates := map[string]any{}
 	stringFields := map[string]string{
-		"name":                req.Name,
-		"base_url":            req.BaseURL,
-		"models":              req.Models,
-		"group":               req.Group,
-		"model_mapping":       req.ModelMapping,
-		"status_code_mapping": req.StatusCodeMapping,
-		"tag":                 req.Tag,
-		"remark":              req.Remark,
-		"setting":             req.Setting,
+		"name":                 req.Name,
+		"base_url":             req.BaseURL,
+		"open_ai_organization": req.OpenAIOrganization,
+		"test_model":           req.TestModel,
+		"other":                req.Other,
+		"models":               req.Models,
+		"group":                req.Group,
+		"model_mapping":        req.ModelMapping,
+		"status_code_mapping":  req.StatusCodeMapping,
+		"other_info":           req.OtherInfo,
+		"tag":                  req.Tag,
+		"remark":               req.Remark,
+		"setting":              req.Setting,
+		"param_override":       req.ParamOverride,
+		"header_override":      req.HeaderOverride,
+		"settings":             req.Settings,
 	}
 	for field, value := range stringFields {
-		if _, ok := requestData[field]; ok {
+		requestField := field
+		if field == "open_ai_organization" {
+			requestField = "openai_organization"
+		}
+		if _, ok := requestData[requestField]; ok {
 			updates[field] = value
 		}
 	}
 	if _, ok := requestData["type"]; ok {
 		updates["type"] = req.Type
 	}
-	if _, ok := requestData["key"]; ok {
+	// An empty key is the dashboard's masked/unchanged sentinel. Persisting it
+	// would let a ChannelWrite-only operator erase a credential even though the
+	// sensitive-change classifier correctly treats the sentinel as a no-op.
+	if _, ok := requestData["key"]; ok && req.Key != "" {
 		updates["key"] = req.Key
 	}
 	if req.Weight != nil {
@@ -152,23 +394,61 @@ func UpdateChannel(c *gin.Context) {
 	if req.Priority != nil {
 		updates["priority"] = *req.Priority
 	}
-	if err := model.DB.Model(&model.Channel{}).Where("id = ?", req.Id).Updates(updates).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, dto.Fail("更新失败"))
+	if req.AutoBan != nil {
+		updates["auto_ban"] = *req.AutoBan
+	}
+	if _, ok := requestData["channel_info"]; ok {
+		channelInfo, err := channelJSONText(req.ChannelInfo)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, dto.Fail("参数错误: channel_info 必须是 JSON 对象"))
+			return
+		}
+		updates["channel_info"] = channelInfo
+	}
+	if _, ok := requestData["multi_key_mode"]; ok {
+		if req.MultiKeyMode != "random" && req.MultiKeyMode != "polling" {
+			c.JSON(http.StatusBadRequest, dto.Fail("参数错误: 不支持的多密钥策略"))
+			return
+		}
+		rawInfo := origin.ChannelInfo
+		if supplied, ok := updates["channel_info"].(string); ok {
+			rawInfo = supplied
+		}
+		info := map[string]any{}
+		if err := common.UnmarshalJsonStr(rawInfo, &info); err != nil || info == nil {
+			c.JSON(http.StatusBadRequest, dto.Fail("参数错误: channel_info 必须是 JSON 对象"))
+			return
+		}
+		info["multi_key_mode"] = req.MultiKeyMode
+		encoded, err := common.Marshal(info)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, dto.Fail("参数错误: channel_info 无法编码"))
+			return
+		}
+		updates["channel_info"] = string(encoded)
+	}
+	if err := service.UpdateChannelWithAbilities(req.Id, updates); err != nil {
+		if errors.Is(err, service.ErrInvalidChannelInput) {
+			c.JSON(http.StatusBadRequest, dto.Fail(err.Error()))
+			return
+		}
+		c.JSON(http.StatusInternalServerError, dto.Fail("更新失败: "+err.Error()))
 		return
 	}
-	_ = service.SyncAbilityCache()
 	c.JSON(http.StatusOK, dto.OkMessage("更新成功"))
 }
 
 // DeleteChannel deletes a channel.
 func DeleteChannel(c *gin.Context) {
 	id := common.Str2Int(c.Param("id"))
-	if err := model.DB.Delete(&model.Channel{}, id).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, dto.Fail("删除失败"))
+	if id <= 0 {
+		c.JSON(http.StatusBadRequest, dto.Fail("参数错误"))
 		return
 	}
-	_ = model.DB.Where("channel_id = ?", id).Delete(&model.Ability{}).Error
-	_ = service.SyncAbilityCache()
+	if err := service.DeleteChannelWithAbilities(id); err != nil {
+		c.JSON(http.StatusInternalServerError, dto.Fail("删除失败: "+err.Error()))
+		return
+	}
 	c.JSON(http.StatusOK, dto.OkMessage("删除成功"))
 }
 
@@ -193,7 +473,10 @@ func TestChannel(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"success": false, "message": errMsg, "time": 0.0})
 		return
 	}
-	_ = model.DB.Model(channel).Update("response_time", latencyMs).Error
+	if err := model.DB.Model(channel).Update("response_time", latencyMs).Error; err != nil {
+		c.JSON(http.StatusOK, gin.H{"success": false, "message": "保存渠道测试结果失败: " + err.Error(), "time": 0.0})
+		return
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
@@ -292,10 +575,11 @@ func SearchChannels(c *gin.Context) {
 	idSort, _ := strconv.ParseBool(c.Query("id_sort"))
 	sortOptions := service.NewChannelSortOptions(c.Query("sort_by"), c.Query("sort_order"), idSort)
 	enableTagMode, _ := strconv.ParseBool(c.Query("tag_mode"))
+	includeKey := service.Can(common.GetUserId(c), common.GetRole(c), service.ChannelSensitiveWrite)
 
 	channelData := make([]*model.Channel, 0)
 	if enableTagMode {
-		tags, err := service.SearchChannelTags(keyword, group, modelKeyword, idSort)
+		tags, err := service.SearchChannelTags(keyword, group, modelKeyword, idSort, includeKey)
 		if err != nil {
 			c.JSON(http.StatusOK, gin.H{"success": false, "message": err.Error()})
 			return
@@ -313,7 +597,7 @@ func SearchChannels(c *gin.Context) {
 			channelData = append(channelData, tagChannels...)
 		}
 	} else {
-		channels, err := service.SearchChannels(keyword, group, modelKeyword, sortOptions)
+		channels, err := service.SearchChannels(keyword, group, modelKeyword, sortOptions, includeKey)
 		if err != nil {
 			c.JSON(http.StatusOK, gin.H{"success": false, "message": err.Error()})
 			return
@@ -359,16 +643,10 @@ func SearchChannels(c *gin.Context) {
 		channelData = filtered
 	}
 
-	page, _ := strconv.Atoi(c.DefaultQuery("p", "1"))
-	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
-	if page < 1 {
-		page = 1
-	}
-	if pageSize <= 0 {
-		pageSize = 20
-	}
+	pageInfo := getPageQuery(c)
+	pageSize := pageInfo.PageSize
 	total := len(channelData)
-	startIdx := (page - 1) * pageSize
+	startIdx := pageInfo.Offset()
 	if startIdx > total {
 		startIdx = total
 	}
@@ -378,6 +656,7 @@ func SearchChannels(c *gin.Context) {
 	}
 	pagedData := channelData[startIdx:endIdx]
 	for _, datum := range pagedData {
+		service.MaskChannelSensitiveFieldsForResponse(datum)
 		clearChannelInfo(datum)
 	}
 
@@ -395,7 +674,10 @@ func SearchChannels(c *gin.Context) {
 // ChannelListModels returns the model catalog for channel administration.
 func ChannelListModels(c *gin.Context) {
 	var models []model.Model
-	model.DB.Order("id desc").Find(&models)
+	if err := model.DB.Order("id desc").Find(&models).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "查询模型失败"})
+		return
+	}
 	c.JSON(http.StatusOK, gin.H{"success": true, "data": models})
 }
 

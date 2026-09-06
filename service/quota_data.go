@@ -1,7 +1,9 @@
 package service
 
 import (
+	"errors"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -27,6 +29,7 @@ const (
 const (
 	defaultDataExportEnabled  = true
 	defaultDataExportInterval = 5 // minutes
+	maxDataExportInterval     = 24 * 60
 )
 
 // DataExportEnabled reports whether the per-hour usage histogram is recorded
@@ -38,7 +41,11 @@ func DataExportEnabled() bool {
 // DataExportIntervalMinutes is the histogram flush interval in minutes
 // (reference option DataExportInterval, default 5).
 func DataExportIntervalMinutes() int {
-	return setting.GetOptionIntOrDefault(DataExportIntervalOption, defaultDataExportInterval)
+	interval := setting.GetOptionIntOrDefault(DataExportIntervalOption, defaultDataExportInterval)
+	if interval < 1 || interval > maxDataExportInterval {
+		return defaultDataExportInterval
+	}
+	return interval
 }
 
 // quotaDataCache aggregates per-hour usage histogram rows in memory between
@@ -47,6 +54,11 @@ var (
 	quotaDataCache     = make(map[string]*model.QuotaData)
 	quotaDataCacheLock sync.Mutex
 )
+
+// ErrQuotaDataOverflow reports an invalid or overflowing in-memory/durable
+// histogram counter. Quota data uses the same persisted integer bounds as the
+// rest of the accounting system.
+var ErrQuotaDataOverflow = errors.New("quota data counter overflow")
 
 // ResetQuotaDataCache clears the in-memory histogram cache (test isolation).
 func ResetQuotaDataCache() {
@@ -65,6 +77,24 @@ func quotaDataCacheKey(qd *model.QuotaData) string {
 // (hour-bucketed; the flush loop persists it to quota_data).
 func LogQuotaData(userId int, username, modelName, group string, tokenId, channelId int,
 	quota, tokenUsed int, createdAt int64) {
+	if err := LogQuotaDataChecked(userId, username, modelName, group, tokenId, channelId, quota, tokenUsed, createdAt); err != nil {
+		common.SysError("cache quota data failed: " + err.Error())
+	}
+}
+
+// LogQuotaDataChecked aggregates one consumption and reports invalid or
+// overflowing counters instead of wrapping them in memory.
+func LogQuotaDataChecked(userId int, username, modelName, group string, tokenId, channelId int,
+	quota, tokenUsed int, createdAt int64) error {
+	if userId <= 0 {
+		return fmt.Errorf("%w: invalid user id %d", ErrQuotaDataOverflow, userId)
+	}
+	if err := validateQuotaAmount(quota); err != nil {
+		return fmt.Errorf("%w: quota: %v", ErrQuotaDataOverflow, err)
+	}
+	if err := validateQuotaAmount(tokenUsed); err != nil {
+		return fmt.Errorf("%w: token usage: %v", ErrQuotaDataOverflow, err)
+	}
 	// Bucket to the hour (reference: only precise to the hour).
 	createdAt -= createdAt % 3600
 	qd := &model.QuotaData{
@@ -84,42 +114,110 @@ func LogQuotaData(userId int, username, modelName, group string, tokenId, channe
 	defer quotaDataCacheLock.Unlock()
 	key := quotaDataCacheKey(qd)
 	if cached, ok := quotaDataCache[key]; ok {
-		cached.Count += qd.Count
-		cached.Quota += qd.Quota
-		cached.TokenUsed += qd.TokenUsed
-		return
+		newCount, countOK := common.AddQuotaWithinBounds(cached.Count, qd.Count)
+		newQuota, quotaOK := common.AddQuotaWithinBounds(cached.Quota, qd.Quota)
+		newTokenUsed, tokenOK := common.AddQuotaWithinBounds(cached.TokenUsed, qd.TokenUsed)
+		if !countOK || !quotaOK || !tokenOK {
+			return fmt.Errorf("%w for key %q", ErrQuotaDataOverflow, key)
+		}
+		cached.Count = newCount
+		cached.Quota = newQuota
+		cached.TokenUsed = newTokenUsed
+		return nil
 	}
 	quotaDataCache[key] = qd
+	return nil
 }
 
 // SaveQuotaDataCache flushes the in-memory histogram into the quota_data
-// table: existing hour-rows are incremented, new rows are inserted, and the
-// cache is reset (reference semantics).
+// table. Failed entries remain cached for a later retry, and every persistence
+// failure is reported instead of being silently discarded.
 func SaveQuotaDataCache() {
+	if err := SaveQuotaDataCacheChecked(); err != nil {
+		common.SysError("save quota data cache failed: " + err.Error())
+	}
+}
+
+// SaveQuotaDataCacheChecked persists every cached histogram entry it can.
+// Successful entries are removed; failed entries stay in memory and their
+// errors are joined so callers can observe partial flushes.
+func SaveQuotaDataCacheChecked() error {
 	quotaDataCacheLock.Lock()
 	defer quotaDataCacheLock.Unlock()
-	size := len(quotaDataCache)
-	for _, qd := range quotaDataCache {
-		where := "user_id = ? and username = ? and model_name = ? and created_at = ? and use_group = ? and token_id = ? and channel_id = ? and node_name = ?"
-		args := []any{qd.UserID, qd.Username, qd.ModelName, qd.CreatedAt, qd.UseGroup, qd.TokenID, qd.ChannelID, qd.NodeName}
+	if len(quotaDataCache) == 0 {
+		return nil
+	}
+	if model.DB == nil {
+		return errors.New("quota data database is nil")
+	}
+	keys := make([]string, 0, len(quotaDataCache))
+	for key := range quotaDataCache {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	flushed := 0
+	flushErrors := make([]error, 0)
+	for _, key := range keys {
+		qd := quotaDataCache[key]
+		if err := flushQuotaDataEntry(qd); err != nil {
+			flushErrors = append(flushErrors, fmt.Errorf("quota data key %q: %w", key, err))
+			continue
+		}
+		delete(quotaDataCache, key)
+		flushed++
+	}
+	if flushed > 0 {
+		common.SysLog(fmt.Sprintf("保存数据看板数据成功，共保存%d条数据", flushed))
+	}
+	return errors.Join(flushErrors...)
+}
+
+func flushQuotaDataEntry(qd *model.QuotaData) error {
+	if qd == nil || qd.Count <= 0 || int64(qd.Count) > common.MaxQuota ||
+		qd.Quota < 0 || int64(qd.Quota) > common.MaxQuota ||
+		qd.TokenUsed < 0 || int64(qd.TokenUsed) > common.MaxQuota {
+		return ErrQuotaDataOverflow
+	}
+	where := "user_id = ? and username = ? and model_name = ? and created_at = ? and use_group = ? and token_id = ? and channel_id = ? and node_name = ?"
+	args := []any{qd.UserID, qd.Username, qd.ModelName, qd.CreatedAt, qd.UseGroup, qd.TokenID, qd.ChannelID, qd.NodeName}
+	return model.DB.Transaction(func(tx *gorm.DB) error {
 		var existing model.QuotaData
-		err := model.DB.Table(model.QuotaData{}.TableName()).Where(where, args...).First(&existing).Error
-		if err == nil {
-			// Atomic increments: concurrent flushes (multi-node) and direct
-			// writers must not lose counts.
-			_ = model.DB.Table(model.QuotaData{}.TableName()).Where(where, args...).Updates(map[string]any{
+		err := subscriptionLockForUpdate(tx.Table(model.QuotaData{}.TableName())).Where(where, args...).First(&existing).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			if err := tx.Table(model.QuotaData{}.TableName()).Create(qd).Error; err != nil {
+				return fmt.Errorf("create histogram row: %w", err)
+			}
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("load histogram row: %w", err)
+		}
+		if _, ok := common.AddQuotaWithinBounds(existing.Count, qd.Count); !ok {
+			return ErrQuotaDataOverflow
+		}
+		if _, ok := common.AddQuotaWithinBounds(existing.Quota, qd.Quota); !ok {
+			return ErrQuotaDataOverflow
+		}
+		if _, ok := common.AddQuotaWithinBounds(existing.TokenUsed, qd.TokenUsed); !ok {
+			return ErrQuotaDataOverflow
+		}
+		result := tx.Table(model.QuotaData{}.TableName()).Where(where, args...).
+			Where("count >= 0 and count <= ? and quota >= 0 and quota <= ? and token_used >= 0 and token_used <= ?",
+				common.MaxQuota-int64(qd.Count), common.MaxQuota-int64(qd.Quota), common.MaxQuota-int64(qd.TokenUsed)).
+			Updates(map[string]any{
 				"count":      gormExprAdd("count", qd.Count),
 				"quota":      gormExprAdd("quota", qd.Quota),
 				"token_used": gormExprAdd("token_used", qd.TokenUsed),
 			})
-			continue
+		if result.Error != nil {
+			return fmt.Errorf("update histogram row: %w", result.Error)
 		}
-		_ = model.DB.Table(model.QuotaData{}.TableName()).Create(qd)
-	}
-	quotaDataCache = make(map[string]*model.QuotaData)
-	if size > 0 {
-		common.SysLog(fmt.Sprintf("保存数据看板数据成功，共保存%d条数据", size))
-	}
+		if result.RowsAffected != 1 {
+			return ErrQuotaDataOverflow
+		}
+		return nil
+	})
 }
 
 // StartQuotaDataFlusher launches the periodic histogram flush loop (reference

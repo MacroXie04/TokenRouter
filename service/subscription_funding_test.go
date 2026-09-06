@@ -2,6 +2,7 @@ package service
 
 import (
 	"fmt"
+	"math"
 	"sync"
 	"testing"
 
@@ -55,6 +56,8 @@ func TestPreConsumeSubscriptionValidationAndLedger(t *testing.T) {
 	assert.EqualError(t, err, "requestId is empty")
 	_, err = PreConsumeUserSubscription("req-1", u.Id, 0)
 	assert.EqualError(t, err, "amount must be > 0")
+	_, err = PreConsumeUserSubscription("req-overflow", u.Id, common.MaxQuota+1)
+	assert.ErrorIs(t, err, ErrSubscriptionQuotaOverflow)
 
 	// No subscription at all.
 	_, err = PreConsumeUserSubscription("req-1", u.Id, 5)
@@ -88,6 +91,36 @@ func TestPreConsumeSubscriptionValidationAndLedger(t *testing.T) {
 	assert.Equal(t, int64(0), loadSub(t, sub.Id).AmountUsed)
 	_, err = PreConsumeUserSubscription("req-1", u.Id, 5)
 	assert.EqualError(t, err, "subscription pre-consume already refunded")
+}
+
+func TestPreConsumeSubscriptionRejectsCrossUserReplayAndCorruptCounters(t *testing.T) {
+	initSubDB(t)
+	first := subUser(t, "ledger-owner", 0, "default")
+	second := subUser(t, "ledger-attacker", 0, "default")
+	plan := seedRawPlan(t, nil)
+	seedSub(t, first.Id, plan.Id, 100, 0, nil)
+	seedSub(t, second.Id, plan.Id, 100, 0, nil)
+
+	_, err := PreConsumeUserSubscription("owned-request", first.Id, 5)
+	require.NoError(t, err)
+	_, err = PreConsumeUserSubscription("owned-request", second.Id, 5)
+	require.ErrorContains(t, err, "does not belong to user")
+
+	for name, values := range map[string]struct{ total, used int64 }{
+		"machine maximum":  {total: math.MaxInt64, used: math.MaxInt64},
+		"negative usage":   {total: 100, used: -1},
+		"usage over total": {total: 100, used: 101},
+	} {
+		t.Run(name, func(t *testing.T) {
+			corrupt := seedSub(t, second.Id, plan.Id, values.total, values.used, func(sub *model.UserSubscription) {
+				sub.EndTime = common.NowTimestamp() + 10
+			})
+			_, err := PreConsumeUserSubscription("corrupt-"+name, second.Id, 1)
+			require.ErrorIs(t, err, ErrSubscriptionQuotaOverflow)
+			assert.Equal(t, values.used, loadSub(t, corrupt.Id).AmountUsed)
+			require.NoError(t, model.DB.Delete(corrupt).Error)
+		})
+	}
 }
 
 func TestPreConsumeSubscriptionCandidateSelection(t *testing.T) {
@@ -198,6 +231,41 @@ func TestPostConsumeUserSubscriptionDelta(t *testing.T) {
 	err := PostConsumeUserSubscriptionDelta(sub.Id, 150)
 	assert.EqualError(t, err, "subscription used exceeds total, used=150 total=100")
 	assert.Equal(t, int64(0), loadSub(t, sub.Id).AmountUsed)
+
+	for name, delta := range map[string]int64{
+		"maximum delta": math.MaxInt64,
+		"minimum delta": math.MinInt64,
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := PostConsumeUserSubscriptionDelta(sub.Id, delta)
+			require.ErrorIs(t, err, ErrSubscriptionQuotaOverflow)
+			assert.Equal(t, int64(0), loadSub(t, sub.Id).AmountUsed)
+		})
+	}
+	require.NoError(t, model.DB.Model(sub).Update("amount_used", math.MaxInt64).Error)
+	err = PostConsumeUserSubscriptionDelta(sub.Id, 1)
+	require.ErrorIs(t, err, ErrSubscriptionQuotaOverflow)
+	assert.Equal(t, int64(math.MaxInt64), loadSub(t, sub.Id).AmountUsed)
+}
+
+func TestRefundSubscriptionPreConsumeRejectsCorruptLedgerWithoutTransition(t *testing.T) {
+	initSubDB(t)
+	u := subUser(t, "corrupt-refund-ledger", 0, "default")
+	plan := seedRawPlan(t, nil)
+	sub := seedSub(t, u.Id, plan.Id, 100, 20, nil)
+	record := model.SubscriptionPreConsumeRecord{
+		RequestId: "corrupt-refund", UserId: u.Id, UserSubscriptionId: sub.Id,
+		PreConsumed: math.MaxInt64, Status: SubscriptionPreConsumeStatusConsumed,
+		CreatedAt: common.NowTimestamp(), UpdatedAt: common.NowTimestamp(),
+	}
+	require.NoError(t, model.DB.Create(&record).Error)
+
+	err := RefundSubscriptionPreConsume(record.RequestId)
+	require.ErrorIs(t, err, ErrSubscriptionQuotaOverflow)
+	assert.Equal(t, int64(20), loadSub(t, sub.Id).AmountUsed)
+	var got model.SubscriptionPreConsumeRecord
+	require.NoError(t, model.DB.First(&got, record.Id).Error)
+	assert.Equal(t, SubscriptionPreConsumeStatusConsumed, got.Status)
 }
 
 func TestFundingSessionPreferenceDispatch(t *testing.T) {
@@ -473,6 +541,62 @@ func TestCleanupSubscriptionPreConsumeRecords(t *testing.T) {
 	require.NoError(t, model.DB.Find(&remaining).Error)
 	require.Len(t, remaining, 1)
 	assert.Equal(t, "new-req", remaining[0].RequestId)
+}
+
+func TestCleanupSubscriptionPreConsumeRecordsPreservesNonterminalRelayReservations(t *testing.T) {
+	initSubDB(t)
+	user := subUser(t, "durable-cleaner", 0, "default")
+	plan := seedRawPlan(t, nil)
+	subscription := seedSub(t, user.Id, plan.Id, 100, 0, nil)
+	now := common.NowTimestamp()
+	protectedStatuses := []string{
+		model.RelayQuotaReservationStatusHeld,
+		model.RelayQuotaReservationStatusDispatched,
+		model.RelayQuotaReservationStatusPendingSettlement,
+		model.RelayQuotaReservationStatusPendingRefund,
+		model.RelayQuotaReservationStatusManualReview,
+	}
+	protectedIds := make(map[string]struct{}, len(protectedStatuses))
+	for index, status := range protectedStatuses {
+		requestId := fmt.Sprintf("cleanup-protected-%d", index)
+		_, err := PreConsumeUserSubscription(requestId, user.Id, 1)
+		require.NoError(t, err)
+		protectedIds[requestId] = struct{}{}
+		require.NoError(t, model.DB.Create(&model.RelayQuotaReservationRecord{
+			ReservationID: requestId, UserID: user.Id,
+			FundingSource: BillingSourceSubscription, RequestedQuota: 1, ReservedQuota: 1,
+			SubscriptionID: subscription.Id, Status: status, CreatedAt: now, UpdatedAt: now,
+		}).Error)
+	}
+	for index, status := range []string{
+		model.RelayQuotaReservationStatusSettled,
+		model.RelayQuotaReservationStatusRefunded,
+	} {
+		requestId := fmt.Sprintf("cleanup-terminal-%d", index)
+		_, err := PreConsumeUserSubscription(requestId, user.Id, 1)
+		require.NoError(t, err)
+		require.NoError(t, model.DB.Create(&model.RelayQuotaReservationRecord{
+			ReservationID: requestId, UserID: user.Id,
+			FundingSource: BillingSourceSubscription, RequestedQuota: 1, ReservedQuota: 1,
+			SubscriptionID: subscription.Id, Status: status, CreatedAt: now, UpdatedAt: now,
+		}).Error)
+	}
+	_, err := PreConsumeUserSubscription("cleanup-unreferenced", user.Id, 1)
+	require.NoError(t, err)
+	require.NoError(t, model.DB.Model(&model.SubscriptionPreConsumeRecord{}).
+		Where("request_id LIKE ?", "cleanup-%").
+		Update("updated_at", now-8*24*3600).Error)
+
+	removed, err := CleanupSubscriptionPreConsumeRecords(0)
+	require.NoError(t, err)
+	assert.Equal(t, int64(3), removed, "terminal and unreferenced ledgers may be pruned")
+	var remaining []model.SubscriptionPreConsumeRecord
+	require.NoError(t, model.DB.Where("request_id LIKE ?", "cleanup-%").Find(&remaining).Error)
+	require.Len(t, remaining, len(protectedStatuses))
+	for _, record := range remaining {
+		_, protected := protectedIds[record.RequestId]
+		assert.True(t, protected, "unexpected retained request %q", record.RequestId)
+	}
 }
 
 func TestUserSettingsMergePreservesFields(t *testing.T) {

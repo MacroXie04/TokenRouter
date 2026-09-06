@@ -6,6 +6,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
 
@@ -25,6 +27,150 @@ const (
 // oauthAuthFlowTTL is the lifetime of an OAuth state flow.
 const oauthAuthFlowTTL = 10 * time.Minute
 
+const (
+	maxIdentityQueryBytes      = 32 << 10
+	maxIdentityQueryPairs      = 16
+	maxIdentityQueryKeyBytes   = 64
+	maxIdentityQueryValueBytes = 4096
+	maxOAuthProviderBytes      = 64
+	maxOAuthReturnTargetBytes  = 2048
+)
+
+type oauthFlowPayload struct {
+	AffiliateCode string `json:"affiliate_code,omitempty"`
+	ReturnTo      string `json:"return_to,omitempty"`
+}
+
+// safeOAuthReturnTarget accepts one same-origin browser path. Keeping the
+// value in the server-side flow payload binds it to the unguessable state
+// token instead of trusting a callback query supplied after authentication.
+func safeOAuthReturnTarget(value string) (string, bool) {
+	if value == "" {
+		return "", true
+	}
+	if value != strings.TrimSpace(value) || !boundedIdentityText(value, maxOAuthReturnTargetBytes, false) ||
+		!strings.HasPrefix(value, "/") || strings.HasPrefix(value, "//") || strings.Contains(value, `\`) {
+		return "", false
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.IsAbs() || parsed.Opaque != "" || parsed.Host != "" || parsed.User != nil ||
+		parsed.Path == "" || !strings.HasPrefix(parsed.Path, "/") || strings.HasPrefix(parsed.Path, "//") ||
+		strings.Contains(parsed.Path, `\`) {
+		return "", false
+	}
+	for _, segment := range strings.Split(parsed.Path, "/") {
+		if segment == "." || segment == ".." {
+			return "", false
+		}
+	}
+	authPath := strings.TrimSuffix(parsed.Path, "/")
+	if authPath == "" {
+		authPath = "/"
+	}
+	switch authPath {
+	case "/login", "/sign-in", "/sign-up", "/register", "/forgot-password", "/reset", "/user/reset", "/otp", "/oauth":
+		return "", false
+	}
+	if strings.HasPrefix(authPath, "/oauth/") {
+		return "", false
+	}
+	return value, true
+}
+
+func encodeOAuthFlowPayload(affiliateCode, returnTo string) (string, error) {
+	payload, err := common.Marshal(oauthFlowPayload{AffiliateCode: affiliateCode, ReturnTo: returnTo})
+	if err != nil {
+		return "", err
+	}
+	return string(payload), nil
+}
+
+func decodeOAuthFlowPayload(raw string) (oauthFlowPayload, bool) {
+	if raw == "" {
+		return oauthFlowPayload{}, true
+	}
+	var payload oauthFlowPayload
+	if err := common.UnmarshalJsonStr(raw, &payload); err != nil ||
+		payload.AffiliateCode != strings.TrimSpace(payload.AffiliateCode) ||
+		!boundedIdentityText(payload.AffiliateCode, 32, true) {
+		return oauthFlowPayload{}, false
+	}
+	returnTo, ok := safeOAuthReturnTarget(payload.ReturnTo)
+	if !ok {
+		return oauthFlowPayload{}, false
+	}
+	payload.ReturnTo = returnTo
+	return payload, true
+}
+
+func oauthLoginRedirect(errorCode, message, returnTo string) string {
+	query := url.Values{"error": {errorCode}}
+	if message != "" {
+		query.Set("message", message)
+	}
+	if returnTo != "" {
+		query.Set("redirect", returnTo)
+	}
+	return "/login?" + query.Encode()
+}
+
+func oauthBoundRedirect(returnTo, result string) string {
+	if returnTo == "" {
+		returnTo = "/"
+	}
+	parsed, err := url.Parse(returnTo)
+	if err != nil {
+		return "/?oauth_bound=error"
+	}
+	query := parsed.Query()
+	query.Set("oauth_bound", result)
+	parsed.RawQuery = query.Encode()
+	return parsed.String()
+}
+
+func oauthFlowFailureRedirect(intent, errorCode, message, returnTo string) string {
+	if intent == oauthIntentBind {
+		return oauthBoundRedirect(returnTo, "error")
+	}
+	return oauthLoginRedirect(errorCode, message, returnTo)
+}
+
+// boundedIdentityQuery parses callback parameters once, rejects ambiguous
+// duplicates, and places independent ceilings on cardinality, keys, values,
+// and the aggregate query string.
+func boundedIdentityQuery(c *gin.Context) (url.Values, bool) {
+	if c == nil || c.Request == nil || c.Request.URL == nil || len(c.Request.URL.RawQuery) > maxIdentityQueryBytes {
+		return nil, false
+	}
+	values, err := url.ParseQuery(c.Request.URL.RawQuery)
+	if err != nil || len(values) > maxIdentityQueryPairs {
+		return nil, false
+	}
+	pairs := 0
+	for key, items := range values {
+		pairs += len(items)
+		if key == "" || len(items) != 1 || !boundedIdentityText(key, maxIdentityQueryKeyBytes, false) ||
+			!boundedIdentityText(items[0], maxIdentityQueryValueBytes, true) {
+			return nil, false
+		}
+	}
+	return values, pairs <= maxIdentityQueryPairs
+}
+
+func boundedIdentityText(value string, maximumBytes int, allowEmpty bool) bool {
+	if (!allowEmpty && value == "") || len(value) > maximumBytes || !utf8.ValidString(value) {
+		return false
+	}
+	for _, character := range value {
+		if unicode.IsControl(character) ||
+			(character >= 0x202a && character <= 0x202e) ||
+			(character >= 0x2066 && character <= 0x2069) {
+			return false
+		}
+	}
+	return true
+}
+
 // GenerateOAuthCode creates a one-time OAuth state (flow token) for a
 // provider + intent. Login flows may carry an affiliate code; bind flows are
 // bound to the signed-in user's session and must not carry one.
@@ -33,6 +179,7 @@ func GenerateOAuthCode(c *gin.Context) {
 		Provider string `json:"provider"`
 		Intent   string `json:"intent"`
 		Aff      string `json:"aff"`
+		Redirect string `json:"redirect"`
 	}
 	if err := c.ShouldBindJSON(&request); err != nil {
 		c.JSON(http.StatusBadRequest, dto.Fail("参数错误"))
@@ -41,9 +188,13 @@ func GenerateOAuthCode(c *gin.Context) {
 	request.Provider = strings.TrimSpace(request.Provider)
 	request.Intent = strings.TrimSpace(request.Intent)
 	request.Aff = strings.TrimSpace(request.Aff)
+	returnTo, validReturnTo := safeOAuthReturnTarget(request.Redirect)
 	cfg := service.GetOAuthConfig(request.Provider)
-	if !cfg.Known || (request.Intent != oauthIntentLogin && request.Intent != oauthIntentBind) ||
-		len(request.Aff) > 32 || (request.Intent == oauthIntentBind && request.Aff != "") {
+	knownProvider := cfg.Known || request.Provider == "telegram" && service.TelegramOAuthEnabled()
+	if !knownProvider || !boundedIdentityText(request.Provider, maxOAuthProviderBytes, false) ||
+		(request.Intent != oauthIntentLogin && request.Intent != oauthIntentBind) ||
+		!boundedIdentityText(request.Aff, 32, true) || !validReturnTo ||
+		(request.Intent == oauthIntentBind && request.Aff != "") {
 		c.JSON(http.StatusBadRequest, dto.Fail("参数错误"))
 		return
 	}
@@ -58,12 +209,14 @@ func GenerateOAuthCode(c *gin.Context) {
 		userId = identity.UserID
 		sessionId = identity.SessionID
 	}
-	payload, err := common.Marshal(map[string]string{"affiliate_code": request.Aff})
+	payload, err := encodeOAuthFlowPayload(request.Aff, returnTo)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, dto.Fail("登录失败"))
 		return
 	}
-	state, err := service.CreateAuthFlow(service.AuthFlowPurposeOAuth, request.Provider, request.Intent, userId, sessionId, string(payload), oauthAuthFlowTTL)
+	state, expiresAt, err := service.CreateAuthFlowWithExpiry(
+		service.AuthFlowPurposeOAuth, request.Provider, request.Intent, userId, sessionId, payload, oauthAuthFlowTTL,
+	)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, dto.Fail("登录失败"))
 		return
@@ -73,35 +226,76 @@ func GenerateOAuthCode(c *gin.Context) {
 		"message": "",
 		"data": gin.H{
 			"flow_token": state,
-			"expires_at": time.Now().Add(oauthAuthFlowTTL).Unix(),
+			"expires_at": expiresAt,
 		},
 	})
 }
 
 // oauthRedirectURI builds the callback URL for a provider.
-func oauthRedirectURI(c *gin.Context, provider string) string {
+func oauthRedirectURI(provider string) (string, error) {
 	base := common.GetEnv("FRONTEND_BASE_URL", "http://localhost:3000")
-	return base + "/api/oauth/" + provider + "/callback"
+	return service.BuildOAuthRedirectURI(base, provider)
 }
 
 // HandleOAuth starts an OAuth login: it stores a one-time state and redirects
 // the browser to the provider's authorization endpoint.
 func HandleOAuth(c *gin.Context) {
 	provider := c.Param("provider")
+	if !boundedIdentityText(provider, maxOAuthProviderBytes, false) {
+		c.JSON(http.StatusBadRequest, dto.Fail("该登录方式未启用"))
+		return
+	}
 	cfg := service.GetOAuthConfig(provider)
 	if !cfg.Enabled {
 		c.JSON(http.StatusBadRequest, dto.Fail("该登录方式未启用"))
 		return
 	}
-	state, err := service.CreateAuthFlow(service.AuthFlowPurposeOAuth, provider, oauthIntentLogin, 0, "", "", 10*time.Minute)
+	query, ok := boundedIdentityQuery(c)
+	if !ok || len(query) > 2 {
+		c.JSON(http.StatusBadRequest, dto.Fail("参数错误"))
+		return
+	}
+	affCode := ""
+	returnTo := ""
+	for key, values := range query {
+		switch key {
+		case "aff":
+			if len(values) != 1 || values[0] != strings.TrimSpace(values[0]) ||
+				!boundedIdentityText(values[0], 32, true) {
+				c.JSON(http.StatusBadRequest, dto.Fail("参数错误"))
+				return
+			}
+			affCode = values[0]
+		case "redirect":
+			var valid bool
+			returnTo, valid = safeOAuthReturnTarget(values[0])
+			if !valid || returnTo == "" {
+				c.JSON(http.StatusBadRequest, dto.Fail("参数错误"))
+				return
+			}
+		default:
+			c.JSON(http.StatusBadRequest, dto.Fail("参数错误"))
+			return
+		}
+	}
+	redirectURI, err := oauthRedirectURI(provider)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, dto.Fail("OAuth 回调地址配置无效"))
+		return
+	}
+	payload, err := encodeOAuthFlowPayload(affCode, returnTo)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, dto.Fail("登录失败"))
 		return
 	}
-	redirectURI := oauthRedirectURI(c, provider)
+	state, err := service.CreateAuthFlow(service.AuthFlowPurposeOAuth, provider, oauthIntentLogin, 0, "", payload, 10*time.Minute)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, dto.Fail("登录失败"))
+		return
+	}
 	authURL, err := service.BuildAuthorizationURL(cfg, state, redirectURI)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, dto.Fail(err.Error()))
+		c.JSON(http.StatusBadRequest, dto.Fail("OAuth 登录配置无效"))
 		return
 	}
 	c.Redirect(http.StatusFound, authURL)
@@ -110,14 +304,34 @@ func HandleOAuth(c *gin.Context) {
 // TelegramLogin completes a Telegram Login Widget authentication: it verifies
 // the hash and signs the user in (or binds the identity).
 func TelegramLogin(c *gin.Context) {
-	data := map[string]string{}
-	for k, v := range c.Request.URL.Query() {
-		if len(v) > 0 {
-			data[k] = v[0]
-		}
+	if !service.TelegramOAuthEnabled() {
+		c.Redirect(http.StatusFound, oauthLoginRedirect("telegram", "", ""))
+		return
+	}
+	query, ok := boundedIdentityQuery(c)
+	if !ok {
+		c.Redirect(http.StatusFound, oauthLoginRedirect("telegram", "", ""))
+		return
+	}
+	flowToken := query.Get("flow_token")
+	pendingFlow, err := service.PeekAuthFlow(flowToken, service.AuthFlowPurposeOAuth)
+	if err != nil || pendingFlow.Provider != "telegram" || pendingFlow.Intent != oauthIntentLogin ||
+		pendingFlow.UserId != 0 || pendingFlow.SessionId != "" {
+		c.Redirect(http.StatusFound, oauthLoginRedirect("oauth_state", "", ""))
+		return
+	}
+	payload, validPayload := decodeOAuthFlowPayload(pendingFlow.Payload)
+	if !validPayload {
+		c.Redirect(http.StatusFound, oauthLoginRedirect("oauth_state", "", ""))
+		return
+	}
+	delete(query, "flow_token")
+	data := make(map[string]string, len(query))
+	for key, values := range query {
+		data[key] = values[0]
 	}
 	if !service.VerifyTelegramLogin(data) {
-		c.Redirect(http.StatusFound, "/login?error=telegram")
+		c.Redirect(http.StatusFound, oauthLoginRedirect("telegram", "", payload.ReturnTo))
 		return
 	}
 	pu := &service.ProviderUser{
@@ -126,21 +340,31 @@ func TelegramLogin(c *gin.Context) {
 		DisplayName: firstNonEmpty(data["first_name"], data["username"]),
 	}
 	if pu.ProviderID == "" {
-		c.Redirect(http.StatusFound, "/login?error=telegram")
+		c.Redirect(http.StatusFound, oauthLoginRedirect("telegram", "", payload.ReturnTo))
 		return
 	}
-	user, _, err := service.LoginOrBindUser("telegram", pu)
-	if err != nil {
-		c.Redirect(http.StatusFound, "/login?error=telegram")
+	match := service.AuthFlowMatch{
+		Purpose: service.AuthFlowPurposeOAuth, Provider: "telegram", Intent: oauthIntentLogin,
+	}
+	_, user, _, err := service.ConsumeProviderLoginFlow(flowToken, match, "telegram", pu, payload.AffiliateCode)
+	if errors.Is(err, service.ErrRegistrationDisabled) {
+		c.Redirect(http.StatusFound, oauthLoginRedirect("register_disabled", "", payload.ReturnTo))
+		return
+	}
+	if err != nil || user.Status != model.UserStatusEnabled {
+		c.Redirect(http.StatusFound, oauthLoginRedirect("telegram", "", payload.ReturnTo))
 		return
 	}
 	sid, access, refresh, err := service.CompleteLogin(user, c.ClientIP(), c.GetHeader("User-Agent"), "telegram")
 	if err != nil {
-		c.Redirect(http.StatusFound, "/login?error=telegram")
+		c.Redirect(http.StatusFound, oauthLoginRedirect(oauthSessionFailureCode(err, "telegram"), "", payload.ReturnTo))
 		return
 	}
 	setAuthCookies(c, sid, access, refresh)
-	c.Redirect(http.StatusFound, "/")
+	if payload.ReturnTo == "" {
+		payload.ReturnTo = "/"
+	}
+	c.Redirect(http.StatusFound, payload.ReturnTo)
 }
 
 func firstNonEmpty(a, b string) string {
@@ -153,8 +377,16 @@ func firstNonEmpty(a, b string) string {
 // TelegramBindStart begins a Telegram bind ceremony for the signed-in user and
 // returns the one-time flow token.
 func TelegramBindStart(c *gin.Context) {
+	identity, ok := requireLoginSession(c)
+	if !ok {
+		return
+	}
+	if !service.TelegramOAuthEnabled() {
+		c.JSON(http.StatusBadRequest, dto.Fail("该登录方式未启用"))
+		return
+	}
 	token, err := service.CreateAuthFlow(service.AuthFlowPurposeTelegramBind, "telegram", "",
-		common.GetUserId(c), "", "", 10*time.Minute)
+		identity.UserID, identity.SessionID, "", 10*time.Minute)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, dto.Fail("发起失败"))
 		return
@@ -168,57 +400,122 @@ func TelegramBindFinish(c *gin.Context) {
 	fail := func() {
 		c.Redirect(http.StatusFound, "/?telegram_bound=error")
 	}
-	flow, err := service.ConsumeAuthFlow(c.Param("flow_token"), service.AuthFlowPurposeTelegramBind)
-	if err != nil || flow.UserId == 0 {
+	if !service.TelegramOAuthEnabled() {
 		fail()
 		return
 	}
-	data := map[string]string{}
-	for k, v := range c.Request.URL.Query() {
-		if len(v) > 0 {
-			data[k] = v[0]
-		}
+	flowToken := c.Param("flow_token")
+	flow, err := service.PeekAuthFlow(flowToken, service.AuthFlowPurposeTelegramBind)
+	if err != nil || flow.UserId == 0 || flow.Provider != "telegram" || flow.Intent != "" {
+		fail()
+		return
+	}
+	identity, ok := middleware.GetSessionAuthIdentity(c)
+	if !ok || identity.UserID != flow.UserId || identity.SessionID != flow.SessionId {
+		fail()
+		return
+	}
+	query, ok := boundedIdentityQuery(c)
+	if !ok {
+		fail()
+		return
+	}
+	data := make(map[string]string, len(query))
+	for key, values := range query {
+		data[key] = values[0]
 	}
 	if !service.VerifyTelegramLogin(data) || data["id"] == "" {
 		fail()
 		return
 	}
-	if service.FindUserByTelegramId(data["id"]) != nil {
-		c.Redirect(http.StatusFound, "/?telegram_bound=taken")
-		return
+	match := service.AuthFlowMatch{
+		Purpose: service.AuthFlowPurposeTelegramBind, Provider: "telegram",
+		UserId: flow.UserId, SessionId: flow.SessionId,
 	}
-	if err := model.DB.Model(&model.User{}).Where("id = ?", flow.UserId).
-		Update("telegram_id", data["id"]).Error; err != nil {
+	if _, err := service.ConsumeProviderBindFlow(flowToken, match, "telegram", &service.ProviderUser{ProviderID: data["id"]}); err != nil {
+		if errors.Is(err, service.ErrBindingTaken) {
+			c.Redirect(http.StatusFound, "/?telegram_bound=taken")
+			return
+		}
 		fail()
 		return
 	}
 	c.Redirect(http.StatusFound, "/?telegram_bound=1")
 }
 
-// OAuthCallback completes the OAuth2 code flow: it consumes the one-time
-// state, exchanges the code for a token, fetches the provider identity, and
-// signs the bound user in.
+// OAuthCallback completes the OAuth2 code flow. State is first validated
+// without consumption so transient provider failures remain retryable. Once
+// provider identity is available, an exact atomic consume selects the single
+// callback allowed to apply that identity.
 func OAuthCallback(c *gin.Context) {
 	provider := c.Param("provider")
+	if !boundedIdentityText(provider, maxOAuthProviderBytes, false) {
+		c.Redirect(http.StatusFound, "/login?error=oauth_disabled")
+		return
+	}
 	cfg := service.GetOAuthConfig(provider)
 	if !cfg.Enabled {
 		c.Redirect(http.StatusFound, "/login?error=oauth_disabled")
 		return
 	}
-	state := c.Query("state")
-	code := c.Query("code")
-	if state == "" || code == "" {
+	query, ok := boundedIdentityQuery(c)
+	if !ok {
 		c.Redirect(http.StatusFound, "/login?error=invalid_oauth")
 		return
 	}
-	flow, err := service.ConsumeAuthFlow(state, service.AuthFlowPurposeOAuth)
-	if err != nil || flow.Provider != provider {
+	state := query.Get("state")
+	code := query.Get("code")
+	providerError := query.Get("error")
+	if state == "" || (code == "") == (providerError == "") {
+		c.Redirect(http.StatusFound, "/login?error=invalid_oauth")
+		return
+	}
+	pendingFlow, err := service.PeekAuthFlow(state, service.AuthFlowPurposeOAuth)
+	if err != nil || pendingFlow.Provider != provider {
 		c.Redirect(http.StatusFound, "/login?error=oauth_state")
 		return
 	}
-	token, err := service.ExchangeCode(cfg, code, oauthRedirectURI(c, provider))
+	payload, validPayload := decodeOAuthFlowPayload(pendingFlow.Payload)
+	if !validPayload {
+		c.Redirect(http.StatusFound, oauthLoginRedirect("oauth_state", "", ""))
+		return
+	}
+	match := service.AuthFlowMatch{
+		Purpose:   service.AuthFlowPurposeOAuth,
+		Provider:  provider,
+		Intent:    pendingFlow.Intent,
+		UserId:    pendingFlow.UserId,
+		SessionId: pendingFlow.SessionId,
+	}
+	if pendingFlow.Intent == oauthIntentBind {
+		identity, ok := middleware.GetSessionAuthIdentity(c)
+		if !ok || identity.UserID != pendingFlow.UserId || identity.SessionID != pendingFlow.SessionId {
+			c.Redirect(http.StatusFound, oauthLoginRedirect("oauth_state", "", payload.ReturnTo))
+			return
+		}
+	} else if pendingFlow.Intent != oauthIntentLogin || pendingFlow.UserId != 0 || pendingFlow.SessionId != "" {
+		c.Redirect(http.StatusFound, oauthLoginRedirect("oauth_state", "", payload.ReturnTo))
+		return
+	}
+	if providerError != "" {
+		if _, err := service.ConsumeAuthFlowExact(state, match); err != nil {
+			c.Redirect(http.StatusFound, oauthLoginRedirect("oauth_state", "", payload.ReturnTo))
+			return
+		}
+		c.Redirect(http.StatusFound,
+			oauthFlowFailureRedirect(pendingFlow.Intent, "oauth_denied", "", payload.ReturnTo))
+		return
+	}
+	redirectURI, err := oauthRedirectURI(provider)
 	if err != nil {
-		c.Redirect(http.StatusFound, "/login?error=oauth_token")
+		c.Redirect(http.StatusFound,
+			oauthFlowFailureRedirect(pendingFlow.Intent, "oauth_config", "", payload.ReturnTo))
+		return
+	}
+	token, err := service.ExchangeCode(cfg, code, redirectURI)
+	if err != nil {
+		c.Redirect(http.StatusFound,
+			oauthFlowFailureRedirect(pendingFlow.Intent, "oauth_token", "", payload.ReturnTo))
 		return
 	}
 	pu, err := service.FetchUserInfo(cfg, provider, token)
@@ -227,46 +524,61 @@ func OAuthCallback(c *gin.Context) {
 		// to the login page instead of the generic userinfo failure.
 		var denied *service.OAuthAccessDeniedError
 		if errors.As(err, &denied) {
-			c.Redirect(http.StatusFound, "/login?error=oauth_access_denied&message="+url.QueryEscape(denied.Message))
+			c.Redirect(http.StatusFound,
+				oauthFlowFailureRedirect(pendingFlow.Intent, "oauth_access_denied", denied.Message, payload.ReturnTo))
 			return
 		}
-		c.Redirect(http.StatusFound, "/login?error=oauth_userinfo")
+		c.Redirect(http.StatusFound,
+			oauthFlowFailureRedirect(pendingFlow.Intent, "oauth_userinfo", "", payload.ReturnTo))
 		return
 	}
-	// Bind intent: attach the provider identity to the user who created the
-	// state flow (the flow itself carries the user, so no session is needed).
-	if flow.Intent == oauthIntentBind {
-		if flow.UserId == 0 {
-			c.Redirect(http.StatusFound, "/login?error=oauth_state")
+	// Bind intent: attach the provider identity to the exact live dashboard
+	// session that created the state flow.
+	if pendingFlow.Intent == oauthIntentBind {
+		if _, err := service.ConsumeProviderBindFlow(state, match, provider, pu); err != nil {
+			if errors.Is(err, service.ErrBindingTaken) {
+				c.Redirect(http.StatusFound, oauthBoundRedirect(payload.ReturnTo, "taken"))
+				return
+			}
+			c.Redirect(http.StatusFound, oauthBoundRedirect(payload.ReturnTo, "error"))
 			return
 		}
-		if err := service.BindProviderToUser(provider, pu, flow.UserId); err != nil {
-			c.Redirect(http.StatusFound, "/?oauth_bound=taken")
-			return
-		}
-		c.Redirect(http.StatusFound, "/?oauth_bound=1")
+		c.Redirect(http.StatusFound, oauthBoundRedirect(payload.ReturnTo, "1"))
 		return
 	}
 
-	var affCode string
-	if flow.Payload != "" {
-		var payload struct {
-			AffiliateCode string `json:"affiliate_code"`
-		}
-		if err := common.UnmarshalJsonStr(flow.Payload, &payload); err == nil {
-			affCode = payload.AffiliateCode
-		}
-	}
-	user, _, err := service.LoginOrBindUserWithAff(provider, pu, affCode)
-	if err != nil {
-		c.Redirect(http.StatusFound, "/login?error=oauth_user")
+	_, user, _, err := service.ConsumeProviderLoginFlow(state, match, provider, pu, payload.AffiliateCode)
+	if errors.Is(err, service.ErrRegistrationDisabled) {
+		c.Redirect(http.StatusFound, oauthLoginRedirect("register_disabled", "", payload.ReturnTo))
 		return
 	}
-	sid, access, refresh, err := service.CompleteLogin(user, c.ClientIP(), c.GetHeader("User-Agent"), "oauth:"+provider)
+	if err != nil || user.Status != model.UserStatusEnabled {
+		c.Redirect(http.StatusFound, oauthLoginRedirect("oauth_user", "", payload.ReturnTo))
+		return
+	}
+	loginMethod := "oauth:" + provider
+	if len(loginMethod) > 32 {
+		loginMethod = loginMethod[:32]
+	}
+	sid, access, refresh, err := service.CompleteLogin(user, c.ClientIP(), c.GetHeader("User-Agent"), loginMethod)
 	if err != nil {
-		c.Redirect(http.StatusFound, "/login?error=oauth_session")
+		c.Redirect(http.StatusFound, oauthLoginRedirect(oauthSessionFailureCode(err, "oauth_session"), "", payload.ReturnTo))
 		return
 	}
 	setAuthCookies(c, sid, access, refresh)
-	c.Redirect(http.StatusFound, "/")
+	if payload.ReturnTo == "" {
+		payload.ReturnTo = "/"
+	}
+	c.Redirect(http.StatusFound, payload.ReturnTo)
+}
+
+func oauthSessionFailureCode(err error, fallback string) string {
+	switch {
+	case errors.Is(err, service.ErrSessionLimit):
+		return "auth_session_limit"
+	case errors.Is(err, service.ErrSessionIssuanceLimit):
+		return "auth_session_issuance_limit"
+	default:
+		return fallback
+	}
 }

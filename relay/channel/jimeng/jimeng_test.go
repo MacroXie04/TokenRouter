@@ -12,12 +12,44 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/tokenrouter/tokenrouter/common"
+	relaycommon "github.com/tokenrouter/tokenrouter/relay/common"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (fn roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
 	return fn(request)
+}
+
+type closeErrorBody struct {
+	io.Reader
+}
+
+func (closeErrorBody) Close() error {
+	return assert.AnError
+}
+
+func TestJimengCredentialTransportRequiresSafeHTTPSBase(t *testing.T) {
+	t.Cleanup(common.InitSSRF)
+	t.Setenv("SSRF_DISABLE", "false")
+	common.InitSSRF()
+	client := &Client{}
+
+	for _, baseURL := range []string{
+		"http://provider.example",
+		"https://user:password@provider.example",
+		"https://provider.example?secret=in-url",
+		"https://provider.example#fragment",
+	} {
+		_, err := client.newRequest(t.Context(), baseURL, "access-key|secret-key", SubmitAction, []byte(`{}`))
+		require.Error(t, err, baseURL)
+	}
+
+	request, err := client.newRequest(t.Context(), "https://provider.example/base", "access-key|secret-key", SubmitAction, []byte(`{}`))
+	require.NoError(t, err)
+	require.Equal(t, "https", request.URL.Scheme)
 }
 
 func TestPrepareSubmitRequest(t *testing.T) {
@@ -118,6 +150,77 @@ func TestSubmitOutcomeClassification(t *testing.T) {
 			assert.Equal(t, test.mayHaveAccepted, SubmitMayHaveBeenAccepted(err))
 		})
 	}
+}
+
+func TestSubmitPreservesAcceptedResponseWhenCloseFailsAfterFullRead(t *testing.T) {
+	payload := Request{ReqKey: "jimeng-model", Prompt: "animate", Frames: DefaultFrames}
+	client := &Client{HTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body: closeErrorBody{Reader: strings.NewReader(
+				`{"code":10000,"message":"success","data":{"task_id":"accepted-before-close-error"}}`,
+			)},
+		}, nil
+	})}}
+
+	result, raw, err := client.Submit(t.Context(), "https://visual.example.test", "access|secret", payload)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, "accepted-before-close-error", result.Data.TaskID)
+	assert.Contains(t, string(raw), "accepted-before-close-error")
+}
+
+func TestSubmitAcceptsSuccessfulNon200TwoXXResponses(t *testing.T) {
+	for _, status := range []int{http.StatusCreated, http.StatusAccepted} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			payload := Request{ReqKey: "jimeng-model", Prompt: "animate", Frames: DefaultFrames}
+			client := &Client{HTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return jsonResponse(status, `{"code":10000,"data":{"task_id":"accepted-two-xx"}}`), nil
+			})}}
+			result, _, err := client.Submit(t.Context(), "https://visual.example.test", "access|secret", payload)
+			require.NoError(t, err)
+			assert.Equal(t, "accepted-two-xx", result.Data.TaskID)
+		})
+	}
+}
+
+func TestJimengResponseAndProviderIDRespectDurableTextLimits(t *testing.T) {
+	payload := Request{ReqKey: "jimeng-model", Prompt: "animate", Frames: DefaultFrames}
+	t.Run("response body", func(t *testing.T) {
+		client := &Client{HTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return jsonResponse(http.StatusOK, strings.Repeat("x", MaxDurableResponseBytes+1)), nil
+		})}}
+		_, _, err := client.Submit(t.Context(), "https://visual.example.test", "access|secret", payload)
+		require.ErrorContains(t, err, "durable storage limit")
+		assert.True(t, SubmitWasDispatched(err))
+		assert.True(t, SubmitMayHaveBeenAccepted(err),
+			"an oversized response must never make a dispatched submit retryable")
+	})
+
+	t.Run("oversized server error preserves retryable status", func(t *testing.T) {
+		client := &Client{HTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return jsonResponse(http.StatusServiceUnavailable, strings.Repeat("x", MaxDurableResponseBytes+1)), nil
+		})}}
+		_, _, err := client.Fetch(t.Context(), "https://visual.example.test", "access|secret", "jimeng-model", "provider-id")
+		var upstream *relaycommon.UpstreamError
+		require.ErrorAs(t, err, &upstream)
+		assert.Equal(t, http.StatusServiceUnavailable, upstream.StatusCode)
+		assert.False(t, IsDurableResponseError(err), "an oversized 5xx is still an HTTP retry outcome")
+	})
+
+	t.Run("provider task id", func(t *testing.T) {
+		body := `{"code":10000,"message":"success","data":{"task_id":"` +
+			strings.Repeat("i", MaxProviderTaskIDBytes+1) + `"}}`
+		client := &Client{HTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return jsonResponse(http.StatusOK, body), nil
+		})}}
+		_, _, err := client.Submit(t.Context(), "https://visual.example.test", "access|secret", payload)
+		require.ErrorContains(t, err, "task_id exceeds durable storage limit")
+		assert.True(t, SubmitWasDispatched(err))
+		assert.True(t, SubmitMayHaveBeenAccepted(err),
+			"a successful response with an unusable id must terminate submit retries")
+	})
 }
 
 func assertValidAuthorization(t *testing.T, request *http.Request, accessKey, secretKey string, now time.Time) {

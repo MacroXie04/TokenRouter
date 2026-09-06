@@ -2,6 +2,7 @@ package service
 
 import (
 	"path/filepath"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -14,6 +15,34 @@ import (
 	"github.com/tokenrouter/tokenrouter/model"
 	"github.com/tokenrouter/tokenrouter/setting"
 )
+
+func TestPerfMetricSchedulerOptionsAreBounded(t *testing.T) {
+	setupPerfMetricTest(t)
+
+	for _, invalid := range []string{"0", "-1", "1441", strconv.FormatInt(int64(^uint(0)>>1), 10), "invalid"} {
+		require.NoError(t, setting.UpdateOption(setting.PerfMetricsFlushIntervalOption, invalid))
+		assert.Equal(t, 5, perfMetricFlushIntervalMinutes(), invalid)
+	}
+	for _, boundary := range []struct {
+		value string
+		want  int
+	}{{"1", 1}, {"1440", 1440}} {
+		require.NoError(t, setting.UpdateOption(setting.PerfMetricsFlushIntervalOption, boundary.value))
+		assert.Equal(t, boundary.want, perfMetricFlushIntervalMinutes())
+	}
+
+	for _, invalid := range []string{"-1", "36501", strconv.FormatInt(int64(^uint(0)>>1), 10), "invalid"} {
+		require.NoError(t, setting.UpdateOption(setting.PerfMetricsRetentionDaysOption, invalid))
+		assert.Equal(t, invalidPerfMetricRetentionFallback, perfMetricRetentionDays(), invalid)
+	}
+	for _, boundary := range []struct {
+		value string
+		want  int
+	}{{"0", 0}, {"36500", 36500}} {
+		require.NoError(t, setting.UpdateOption(setting.PerfMetricsRetentionDaysOption, boundary.value))
+		assert.Equal(t, boundary.want, perfMetricRetentionDays())
+	}
+}
 
 func setupPerfMetricTest(t *testing.T) {
 	t.Helper()

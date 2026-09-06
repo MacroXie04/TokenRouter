@@ -1,10 +1,11 @@
 package service
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"strconv"
+	"unicode/utf8"
+
+	"gorm.io/gorm"
 
 	"github.com/tokenrouter/tokenrouter/common"
 	"github.com/tokenrouter/tokenrouter/model"
@@ -20,34 +21,48 @@ const (
 // ErrInvalidRedemption is returned when a redemption key is unknown/unusable.
 var ErrInvalidRedemption = errors.New("无效的兑换码")
 
-// randomRedemptionKey returns a 32-char hex key (the reference key width).
-func randomRedemptionKey() string {
-	buf := make([]byte, 16)
-	if _, err := rand.Read(buf); err != nil {
-		return hex.EncodeToString([]byte(common.GenerateUUID()[:16]))
-	}
-	return hex.EncodeToString(buf)
+const maxRedemptionBatchSize = 100
+
+// randomRedemptionKey returns a cryptographically random 32-char hex key (the
+// reference key width). Entropy failure is propagated so no redeemable value
+// is created from predictable fallback material.
+func randomRedemptionKey() (string, error) {
+	return common.GenerateKey(16)
 }
 
 // CreateRedemptionBatch creates count redemption codes owned by userId with
 // random 32-hex keys and returns the generated keys (reference contract).
 func CreateRedemptionBatch(userId int, name string, quota int, expiredTime int64, count int) ([]string, error) {
+	if userId <= 0 || !validRedemptionPayload(name, quota, expiredTime) ||
+		count <= 0 || count > maxRedemptionBatchSize {
+		return nil, errors.New("invalid redemption batch")
+	}
 	keys := make([]string, 0, count)
-	for i := 0; i < count; i++ {
-		key := randomRedemptionKey()
-		r := model.Redemption{
-			UserId:      userId,
-			Key:         key,
-			Status:      RedemptionStatusEnabled,
-			Name:        name,
-			Quota:       quota,
-			CreatedTime: common.NowTimestamp(),
-			ExpiredTime: expiredTime,
+	err := model.DB.Transaction(func(tx *gorm.DB) error {
+		createdAt := common.NowTimestamp()
+		for i := 0; i < count; i++ {
+			key, err := randomRedemptionKey()
+			if err != nil {
+				return err
+			}
+			r := model.Redemption{
+				UserId:      userId,
+				Key:         key,
+				Status:      RedemptionStatusEnabled,
+				Name:        name,
+				Quota:       quota,
+				CreatedTime: createdAt,
+				ExpiredTime: expiredTime,
+			}
+			if err := tx.Create(&r).Error; err != nil {
+				return err
+			}
+			keys = append(keys, key)
 		}
-		if err := model.DB.Create(&r).Error; err != nil {
-			return nil, err
-		}
-		keys = append(keys, key)
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	return keys, nil
 }
@@ -120,6 +135,16 @@ func GetRedemptionByID(id int) (*model.Redemption, error) {
 // changes; otherwise name/quota/expired_time are applied after the caller has
 // validated the expiry.
 func UpdateRedemption(id int, statusOnly bool, name string, quota int, expiredTime int64, status int) (*model.Redemption, error) {
+	if id <= 0 {
+		return nil, errors.New("invalid redemption id")
+	}
+	if statusOnly {
+		if status != RedemptionStatusEnabled && status != RedemptionStatusDisabled && status != RedemptionStatusUsed {
+			return nil, errors.New("invalid redemption status")
+		}
+	} else if !validRedemptionPayload(name, quota, expiredTime) {
+		return nil, errors.New("invalid redemption payload")
+	}
 	r, err := GetRedemptionByID(id)
 	if err != nil {
 		return nil, err
@@ -136,6 +161,12 @@ func UpdateRedemption(id int, statusOnly bool, name string, quota int, expiredTi
 		return nil, err
 	}
 	return r, nil
+}
+
+func validRedemptionPayload(name string, quota int, expiredTime int64) bool {
+	nameLength := utf8.RuneCountInString(name)
+	return nameLength >= 1 && nameLength <= 20 && common.QuotaWithinBounds(quota) && quota > 0 &&
+		(expiredTime == 0 || expiredTime >= common.NowTimestamp())
 }
 
 // DeleteRedemptionByID deletes a redemption code.
@@ -162,38 +193,53 @@ func DeleteInvalidRedemptions() (int64, error) {
 
 // Redeem redeems a code on behalf of the user, crediting quota exactly once.
 func Redeem(userId int, key string) (int, error) {
-	if key == "" {
+	if userId <= 0 || key == "" {
 		return 0, ErrInvalidRedemption
 	}
-	var r model.Redemption
-	if err := model.DB.Where("key = ?", key).First(&r).Error; err != nil {
-		return 0, ErrInvalidRedemption
+	// Redemption converts an administrator-issued instrument into spendable
+	// wallet quota. Enforce the versioned payment gate in the service layer so
+	// alternate or future callers cannot bypass the controller check.
+	if !PaymentComplianceConfirmed() {
+		return 0, ErrPaymentComplianceRequired
 	}
-	if r.Status != RedemptionStatusEnabled {
-		return 0, ErrInvalidRedemption
-	}
-	if r.ExpiredTime > 0 && r.ExpiredTime < common.NowTimestamp() {
-		return 0, ErrInvalidRedemption
-	}
+	redeemedQuota := 0
+	err := model.DB.Transaction(func(tx *gorm.DB) error {
+		var redemption model.Redemption
+		if err := subscriptionLockForUpdate(tx).Where(map[string]any{"key": key}).First(&redemption).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrInvalidRedemption
+			}
+			return err
+		}
+		now := common.NowTimestamp()
+		if redemption.Status != RedemptionStatusEnabled || redemption.Quota <= 0 ||
+			(redemption.ExpiredTime > 0 && redemption.ExpiredTime < now) {
+			return ErrInvalidRedemption
+		}
 
-	now := common.NowTimestamp()
-	// Atomically claim the code so concurrent redemption cannot double-credit.
-	res := model.DB.Model(&model.Redemption{}).
-		Where("id = ? AND status = ?", r.Id, RedemptionStatusEnabled).
-		Updates(map[string]any{
-			"status":        RedemptionStatusUsed,
-			"used_user_id":  userId,
-			"redeemed_time": now,
-		})
-	if res.Error != nil {
-		return 0, res.Error
-	}
-	if res.RowsAffected == 0 {
-		return 0, ErrInvalidRedemption
-	}
-
-	if err := IncreaseUserQuota(userId, r.Quota); err != nil {
+		// The conditional write is needed even with the row lock because SQLite
+		// intentionally treats FOR UPDATE as a no-op.
+		claimed := tx.Model(&model.Redemption{}).
+			Where("id = ? AND status = ?", redemption.Id, RedemptionStatusEnabled).
+			Updates(map[string]any{
+				"status":        RedemptionStatusUsed,
+				"used_user_id":  userId,
+				"redeemed_time": now,
+			})
+		if claimed.Error != nil {
+			return claimed.Error
+		}
+		if claimed.RowsAffected != 1 {
+			return ErrInvalidRedemption
+		}
+		if err := increaseUserQuotaTx(tx, userId, redemption.Quota); err != nil {
+			return err
+		}
+		redeemedQuota = redemption.Quota
+		return nil
+	})
+	if err != nil {
 		return 0, err
 	}
-	return r.Quota, nil
+	return redeemedQuota, nil
 }

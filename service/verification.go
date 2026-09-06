@@ -7,6 +7,8 @@ import (
 
 	"github.com/tokenrouter/tokenrouter/common"
 	"github.com/tokenrouter/tokenrouter/model"
+	"github.com/tokenrouter/tokenrouter/setting"
+	"gorm.io/gorm"
 )
 
 // EmailVerificationPurpose is the auth-flow purpose for email verification.
@@ -25,39 +27,160 @@ func NormalizeEmail(email string) string {
 
 // SendEmailVerificationCode sends a one-time verification code to an email.
 func SendEmailVerificationCode(email string) error {
-	code := common.RandomNumeric(6)
-	// The flow stores the normalized email in Intent so the code can only be
-	// redeemed for the address it was sent to.
-	if _, err := CreateAuthFlow(EmailVerificationPurpose, "email", NormalizeEmail(email), 0, "", code, 15*time.Minute); err != nil {
+	var err error
+	email, _, err = model.NormalizeVerifiedEmail(email)
+	if err != nil {
+		return err
+	}
+	if err := setting.ValidateEmailRegistrationPolicy(email); err != nil {
+		return err
+	}
+	code, err := common.SecureRandomNumeric(6)
+	if err != nil {
+		return err
+	}
+	// Bind the code to a fixed-width digest rather than storing an address in
+	// AuthFlow.Intent (a short generic ceremony discriminator). Legacy flows
+	// remain readable during upgrades.
+	if _, err := CreateAuthFlow(
+		EmailVerificationPurpose, common.SHA256Hex(email), "email", 0, "", code, 15*time.Minute,
+	); err != nil {
 		return err
 	}
 	body := "你的 TokenRouter 邮箱验证码是：" + code + "（15 分钟内有效）。"
 	return Mail.Send(email, "TokenRouter 邮箱验证", body)
 }
 
+func ValidEmailVerificationCode(code string) bool {
+	if len(code) != 6 {
+		return false
+	}
+	for _, character := range code {
+		if character < '0' || character > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func findEmailVerificationFlow(email, code string) (*model.AuthFlow, error) {
+	if !ValidEmailVerificationCode(code) {
+		return nil, ErrInvalidVerificationCode
+	}
+	nowUnix, err := model.DatabaseUnixTimestamp(model.DB)
+	if err != nil {
+		return nil, err
+	}
+	var flow model.AuthFlow
+	err = model.DB.Where(
+		"purpose = ? AND payload = ? AND consumed_at IS NULL AND expires_at > ? AND ((provider = ? AND intent = ?) OR (provider = ? AND intent = ?))",
+		EmailVerificationPurpose, code,
+		time.Unix(nowUnix, 0).UTC(),
+		common.SHA256Hex(email), "email",
+		"email", email,
+	).Order("created_at DESC").First(&flow).Error
+	if err != nil {
+		return nil, ErrInvalidVerificationCode
+	}
+	return &flow, nil
+}
+
 // VerifyAndBindEmail verifies a one-time code sent to the given email and
 // binds the email to the user, marking it verified. The code is keyed to the
 // normalized email address and the email must not belong to another user.
 func VerifyAndBindEmail(userId int, email, code string) error {
-	email = NormalizeEmail(email)
-	var flow model.AuthFlow
-	if err := model.DB.Where("purpose = ? AND intent = ? AND payload = ? AND consumed_at IS NULL",
-		EmailVerificationPurpose, email, code).First(&flow).Error; err != nil {
-		return ErrInvalidVerificationCode
-	}
-	if time.Now().After(flow.ExpiresAt) {
-		return ErrInvalidVerificationCode
-	}
-	var taken model.User
-	if err := model.DB.Where("id <> ? AND LOWER(email) = ?", userId, email).First(&taken).Error; err == nil {
-		return ErrEmailAlreadyTaken
-	}
-	if err := model.DB.Model(&model.User{}).Where("id = ?", userId).
-		Updates(map[string]any{"email": email, "email_verified": true}).Error; err != nil {
+	var emailKey string
+	var err error
+	email, emailKey, err = model.NormalizeVerifiedEmail(email)
+	if err != nil {
 		return err
 	}
-	now := time.Now()
-	_ = model.DB.Model(&flow).Update("consumed_at", &now).Error
+	if err := setting.ValidateEmailRegistrationPolicy(email); err != nil {
+		return err
+	}
+	flow, err := findEmailVerificationFlow(email, code)
+	if err != nil {
+		return err
+	}
+	_, err = consumeAuthFlowRecordWithAction(flow, func(tx *gorm.DB, _ *model.AuthFlow) error {
+		var taken model.User
+		lookup := tx.Unscoped().Where("id <> ? AND verified_email_key = ?", userId, emailKey).First(&taken)
+		if lookup.Error == nil {
+			if normalized, _, normalizeErr := model.NormalizeVerifiedEmail(taken.Email); normalizeErr != nil || normalized != email {
+				return model.ErrAmbiguousPersistentIdentity
+			}
+			return ErrEmailAlreadyTaken
+		}
+		if !errors.Is(lookup.Error, gorm.ErrRecordNotFound) {
+			return lookup.Error
+		}
+		result := tx.Model(&model.User{}).Where("id = ?", userId).
+			Updates(map[string]any{"email": email, "email_verified": true, "verified_email_key": &emailKey})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return gorm.ErrRecordNotFound
+		}
+		return nil
+	})
+	if errors.Is(err, ErrInvalidFlowToken) {
+		return ErrInvalidVerificationCode
+	}
+	return err
+}
+
+// CreateUserWithReferralAndVerifiedEmail consumes an address-bound one-time
+// code, creates the account, and applies referral credits in one transaction.
+// A duplicate/race/downstream failure rolls back both the account and code so
+// a transient failure can be retried safely.
+func CreateUserWithReferralAndVerifiedEmail(user *model.User, email, code string) error {
+	if user == nil {
+		return errors.New("user is required")
+	}
+	normalized, emailKey, err := model.NormalizeVerifiedEmail(email)
+	if err != nil {
+		return err
+	}
+	if err := setting.ValidateEmailRegistrationPolicy(normalized); err != nil {
+		return err
+	}
+	flow, err := findEmailVerificationFlow(normalized, code)
+	if err != nil {
+		return err
+	}
+	plan, err := PlanRegistrationMutationFromEnvironment(user.Username)
+	if err != nil {
+		return err
+	}
+	candidate := *user
+	candidate.Email = normalized
+	candidate.EmailVerified = true
+	candidate.VerifiedEmailKey = &emailKey
+	_, err = consumeAuthFlowRecordWithAction(flow, func(tx *gorm.DB, _ *model.AuthFlow) error {
+		if err := requirePasswordRegistrationEnabledWithTx(tx); err != nil {
+			return err
+		}
+		var taken model.User
+		lookup := tx.Unscoped().Where("verified_email_key = ?", emailKey).First(&taken)
+		if lookup.Error == nil {
+			return ErrEmailAlreadyTaken
+		}
+		if !errors.Is(lookup.Error, gorm.ErrRecordNotFound) {
+			return lookup.Error
+		}
+		if err := InsertPlannedRegistrationUserWithTx(tx, &candidate, plan); err != nil {
+			return err
+		}
+		return creditInviterTx(tx, candidate.InviterId, candidate.Id)
+	})
+	if errors.Is(err, ErrInvalidFlowToken) {
+		return ErrInvalidVerificationCode
+	}
+	if err != nil {
+		return err
+	}
+	*user = candidate
 	return nil
 }
 
@@ -67,5 +190,9 @@ func UserEmailVerified(userId int) bool {
 	if err := model.DB.First(&user, userId).Error; err != nil {
 		return false
 	}
-	return user.EmailVerified
+	if !user.EmailVerified || user.VerifiedEmailKey == nil {
+		return false
+	}
+	_, key, err := model.NormalizeVerifiedEmail(user.Email)
+	return err == nil && key == *user.VerifiedEmailKey
 }

@@ -1,0 +1,103 @@
+.user-admin-dialog {
+  margin-top: 1rem;
+  max-width: 100%;
+}
+
+.user-admin-dialog .user-heading {
+  align-items: flex-start;
+}
+
+.user-dialog-state,
+.user-dialog-actions,
+.user-subscription-grant {
+  align-items: end;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  justify-content: space-between;
+}
+
+.user-dialog-state p {
+  margin: 0;
+}
+
+.user-permission-grid {
+  display: grid;
+  gap: 0.75rem;
+  margin: 1rem 0;
+}
+
+.user-permission-grid fieldset {
+  border: 1px solid var(--border, #d7dce4);
+  border-radius: 0.6rem;
+  display: grid;
+  gap: 0.5rem;
+  margin: 0;
+  padding: 0.75rem;
+}
+
+.user-permission-grid legend {
+  font-weight: 700;
+  padding: 0 0.25rem;
+}
+
+.user-permission-grid label {
+  align-items: flex-start;
+  display: grid;
+  gap: 0.55rem;
+  grid-template-columns: auto 1fr;
+}
+
+.user-permission-grid small,
+.user-binding-list small {
+  color: var(--muted);
+  display: block;
+  margin-top: 0.15rem;
+}
+
+.user-dialog-toggle {
+  align-items: center;
+  display: flex;
+  gap: 0.5rem;
+  margin: 0.75rem 0;
+}
+
+.user-binding-list {
+  display: grid;
+  gap: 0.5rem;
+  list-style: none;
+  margin: 0.75rem 0;
+  padding: 0;
+}
+
+.user-binding-list li {
+  align-items: center;
+  border: 1px solid var(--border, #d7dce4);
+  border-radius: 0.55rem;
+  display: grid;
+  gap: 0.75rem;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  padding: 0.65rem 0.75rem;
+}
+
+.user-subscription-grant {
+  justify-content: flex-start;
+  margin: 0.75rem 0 1rem;
+}
+
+.user-subscription-grant label {
+  display: grid;
+  flex: 1 1 16rem;
+  gap: 0.25rem;
+}
+
+@media (max-width: 640px) {
+  .user-binding-list li {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .user-binding-list li button {
+    grid-column: 1 / -1;
+    justify-self: start;
+  }
+}

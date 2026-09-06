@@ -19,7 +19,11 @@ func ListSubscriptionPlans(c *gin.Context) {
 		c.JSON(http.StatusOK, dto.Ok([]SubscriptionPlanDTO{}))
 		return
 	}
-	plans := service.ListSubscriptionPlans()
+	plans, err := service.ListSubscriptionPlans()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, dto.Fail("获取订阅套餐失败"))
+		return
+	}
 	result := make([]SubscriptionPlanDTO, 0, len(plans))
 	for _, p := range plans {
 		result = append(result, SubscriptionPlanDTO{Plan: p})
@@ -29,6 +33,9 @@ func ListSubscriptionPlans(c *gin.Context) {
 
 // CreateSubscriptionPlan creates a plan (admin).
 func CreateSubscriptionPlan(c *gin.Context) {
+	if !requirePaymentCompliance(c) {
+		return
+	}
 	var p model.SubscriptionPlan
 	if err := c.ShouldBindJSON(&p); err != nil {
 		c.JSON(http.StatusBadRequest, dto.Fail("参数错误"))

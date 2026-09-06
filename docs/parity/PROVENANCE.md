@@ -1,40 +1,80 @@
-# Provenance & License Audit
+# Provenance and License Record
 
-## Implementation provenance
+Last reviewed: 2026-09-06
 
-TokenRouter is an **independent reimplementation** of the functional behavior of
-the reference system (an AGPL-3.0 licensed AI API gateway). All source code in
-this repository was written from scratch for TokenRouter by Claude (Anthropic)
-during this engagement, based on:
+## Audited scope
 
-1. A read-only forensic inspection of the reference repository (routes,
-   entities, domain vocabulary, DTO shapes, and behavioral conventions), and
-2. The neutral functional specification captured in `docs/parity/INVENTORY.md`.
+TokenRouter is maintained as an independent implementation of an AI gateway.
+During this parity audit:
 
-No reference source code, comments, or documentation was copied into TokenRouter.
-The reference repository was not modified. Publicly-known domain facts that are
-not copyrightable expression — provider names, wire-protocol field names,
-channel-type enumeration order, and HTTP route shapes dictated by the
-OpenAI-compatible API contract — are necessarily reproduced for interoperability.
+- `/Users/hongzhe/Code/TokenRouter` was the writable target;
+- the reference checkout
+  `/Users/hongzhe/Code/new-api@ccd535ef8e50cf6e5846a59278c40b7ff59d1b7d`
+  was read-only;
+- implementation decisions were derived from observable behavior, route and
+  entity inventories, protocol contracts, and independently written tests;
+- the reference checkout was not modified, executed against production data, or
+  contacted as a network service.
 
-## License status
+The audit process did not intentionally copy reference source, comments, or
+documentation into TokenRouter. Interoperability facts such as standardized
+provider field names, HTTP paths, status values, and persisted identifiers may
+necessarily coincide. This record describes the process used in this audit; it
+is not a file-by-file authorship certification for every pre-existing line in
+the repository.
 
-Because TokenRouter is original work and does not incorporate AGPL-licensed
-reference code, it is **not** an AGPL derivative. TokenRouter is distributed
-under the MIT License (see `LICENSE`).
+## Repository and dependency licenses
 
-TokenRouter is not, and must not be represented as, the reference project or its
-organization. The "TokenRouter" name and identity are independent.
+The target repository currently contains an MIT `LICENSE` file. Third-party
+packages remain governed by their own licenses and notices.
+`THIRD-PARTY-LICENSES.md` is only a partial notice list: it does not yet cover
+every current direct backend dependency, frontend dependency, or transitive
+package and must not be treated as a release-complete SBOM or notice bundle.
 
-## Third-party dependencies
+Whether any implementation is a derivative work is a legal conclusion, not a
+build or source-scanning result. This document therefore does not assert that
+the MIT file alone resolves all obligations arising from earlier contributions
+or reference access. Before public distribution, a qualified reviewer should
+confirm contribution provenance, dependency notices, trademarks, and any
+applicable copyleft obligations.
 
-TokenRouter uses third-party open-source libraries (Gin, GORM, jwt, go-redis,
-tiktoken-go, expr-lang, etc.), each under its own permissive license. Their
-licenses and notices are recorded in `THIRD-PARTY-LICENSES.md`. No notices
-required by these dependencies were removed.
+TokenRouter must not be represented as the reference project or its
+organization.
 
-## Legal review note
+## Reproducibility and chain of custody
 
-This provenance record is provided for legal review. If legal review determines
-that any portion of TokenRouter is an AGPL derivative, TokenRouter will be
-distributed under AGPL-3.0 and all required notices and attribution preserved.
+The audited source snapshot is based on target Git revision
+`a88784d16269d86f1c37298b5a185e6cfe7fccd0` and contains 1,141 tracked or
+non-ignored paths, including this record. Because the working tree is
+intentionally dirty, the base revision alone does not identify the snapshot.
+
+The reproducible snapshot fingerprint is:
+
+`7f741e5b5a1e3284b458f7aa5920443e3135e99dbe24afb661ac6519a77f4585`
+
+It is SHA-256 over the lexicographically sorted 1,140-path source set excluding
+this self-referential file. For each path, the digest input is the UTF-8 path,
+one NUL byte, and the raw SHA-256 digest of the file contents. The source list
+is produced by:
+
+```text
+git ls-files -z --cached --others --exclude-standard -- . \
+  ':(exclude)docs/parity/PROVENANCE.md'
+```
+
+The complete acceptance gate passed first in the assembled working tree and
+again in a clean export containing exactly every tracked and non-ignored path.
+The clean directory had a newly initialized Git index and no copied ignored
+dependencies, frontend build, acceptance artifacts, or developer environment;
+the gate recreated all required generated state and finished with `ACCEPTANCE:
+ALL CHECKS PASSED`.
+
+The current Git HEAD still does not contain all audited paths. Before a release
+is cut, the intended changes must be reviewed and placed under version control;
+that action was outside this audit's authorization.
+
+No commit, push, persistent or external deployment, paid-provider request, or
+production-data operation was performed as part of this audit. Docker resolved
+its public base-image metadata during the build; every built application image,
+database, and process used for validation was disposable or an existing local
+test fixture, and no application endpoint was published externally.

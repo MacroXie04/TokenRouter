@@ -18,7 +18,22 @@ func channelHasSensitiveChanges(req *dtoChannelUpdate, origin *model.Channel, re
 	if _, ok := requestData["base_url"]; ok && req.BaseURL != origin.BaseURL {
 		return true
 	}
+	if _, ok := requestData["openai_organization"]; ok && req.OpenAIOrganization != origin.OpenAIOrganization {
+		return true
+	}
+	if _, ok := requestData["header_override"]; ok && req.HeaderOverride != origin.HeaderOverride {
+		return true
+	}
+	if _, ok := requestData["param_override"]; ok && req.ParamOverride != origin.ParamOverride {
+		return true
+	}
 	if _, ok := requestData["setting"]; ok && req.Setting != origin.Setting {
+		return true
+	}
+	if _, ok := requestData["other"]; ok && req.Other != origin.Other {
+		return true
+	}
+	if _, ok := requestData["settings"]; ok && req.Settings != origin.OtherSettings {
 		return true
 	}
 	for field := range requestData {
@@ -44,10 +59,15 @@ func channelHasSensitiveChanges(req *dtoChannelUpdate, origin *model.Channel, re
 // channelHasSensitiveChanges with a precise old-vs-new comparison; the set
 // is also used to exclude them from the fail-closed scan.
 var channelSensitiveFields = map[string]struct{}{
-	"type":      {},
-	"key":       {},
-	"base_url":  {},
-	"setting":   {},
+	"type":                {},
+	"key":                 {},
+	"base_url":            {},
+	"openai_organization": {},
+	"header_override":     {},
+	"param_override":      {},
+	"setting":             {},
+	"other":               {},
+	"settings":            {},
 }
 
 // channelOperationalFields lists fields managed by operation endpoints
@@ -94,18 +114,28 @@ var channelNonSensitiveFields = map[string]struct{}{
 // dtoChannelUpdate mirrors dto.ChannelRequest with an id and pointer-shaped
 // optional fields so the update can distinguish absent from zero values.
 type dtoChannelUpdate struct {
-	Id                int     `json:"id"`
-	Type              int     `json:"type"`
-	Key               string  `json:"key"`
-	BaseURL           string  `json:"base_url"`
-	Setting           string  `json:"setting"`
-	Name              string  `json:"name"`
-	Models            string  `json:"models"`
-	Group             string  `json:"group"`
-	Weight            *uint   `json:"weight"`
-	Priority          *int64  `json:"priority"`
-	ModelMapping      string  `json:"model_mapping"`
-	StatusCodeMapping string  `json:"status_code_mapping"`
-	Tag               string  `json:"tag"`
-	Remark            string  `json:"remark"`
+	Id                 int    `json:"id"`
+	Type               int    `json:"type"`
+	Key                string `json:"key"`
+	OpenAIOrganization string `json:"openai_organization"`
+	TestModel          string `json:"test_model"`
+	BaseURL            string `json:"base_url"`
+	Other              string `json:"other"`
+	Setting            string `json:"setting"`
+	Settings           string `json:"settings"`
+	Name               string `json:"name"`
+	Models             string `json:"models"`
+	Group              string `json:"group"`
+	Weight             *uint  `json:"weight"`
+	Priority           *int64 `json:"priority"`
+	ModelMapping       string `json:"model_mapping"`
+	StatusCodeMapping  string `json:"status_code_mapping"`
+	AutoBan            *int   `json:"auto_ban"`
+	OtherInfo          string `json:"other_info"`
+	Tag                string `json:"tag"`
+	Remark             string `json:"remark"`
+	ParamOverride      string `json:"param_override"`
+	HeaderOverride     string `json:"header_override"`
+	ChannelInfo        any    `json:"channel_info"`
+	MultiKeyMode       string `json:"multi_key_mode"`
 }

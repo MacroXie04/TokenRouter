@@ -121,6 +121,28 @@ func TestDeleteModelMetadataReleasesActiveName(t *testing.T) {
 	assert.NotEqual(t, metadata.Id, replacement.Id)
 }
 
+func TestRegistryCreateHooksPopulateDatabaseUniquenessKeys(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "create-hooks.db")), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(&Model{}, &Vendor{}))
+	setRegistryTestDB(t, db)
+	require.NoError(t, ensureRegistryActiveNames())
+
+	metadata := Model{ModelName: "direct-model", Status: 1}
+	require.NoError(t, db.Create(&metadata).Error)
+	require.NotNil(t, metadata.ActiveName)
+	assert.Equal(t, metadata.ModelName, *metadata.ActiveName)
+	assert.Error(t, db.Create(&Model{ModelName: metadata.ModelName, Status: 1}).Error,
+		"the database must reject a duplicate even when callers bypass the service mutex")
+
+	vendor := Vendor{Name: "direct-vendor", Status: 1}
+	require.NoError(t, db.Create(&vendor).Error)
+	require.NotNil(t, vendor.ActiveName)
+	assert.Equal(t, vendor.Name, *vendor.ActiveName)
+	assert.Error(t, db.Create(&Vendor{Name: vendor.Name, Status: 1}).Error,
+		"vendor uniqueness must also be enforced by the database")
+}
+
 func TestConcurrentModelNameUniqueness(t *testing.T) {
 	dsn := "file:" + filepath.Join(t.TempDir(), "concurrent.db") + "?_pragma=busy_timeout(10000)&_pragma=journal_mode(WAL)"
 	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})

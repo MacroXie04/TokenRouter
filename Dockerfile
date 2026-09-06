@@ -1,12 +1,12 @@
 # syntax=docker/dockerfile:1
-# TokenRouter multi-stage build: frontend (bun) -> backend (go) -> runtime.
+# TokenRouter multi-stage build: frontend (npm) -> backend (go) -> runtime.
 
-FROM oven/bun:1 AS frontend
+FROM node:22-bookworm-slim AS frontend
 WORKDIR /build/web
-COPY web/package.json web/bun.lock* ./
-RUN bun install --frozen-lockfile || bun install
+COPY web/package.json web/package-lock.json ./
+RUN npm ci --no-audit --no-fund
 COPY web ./
-RUN bun run build
+RUN npm run build
 
 FROM golang:1.26-alpine AS backend
 ENV GO111MODULE=on CGO_ENABLED=0 GOWORK=off

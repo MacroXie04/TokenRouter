@@ -90,5 +90,9 @@ func UsingPostgreSQL() bool {
 // UsingMySQL reports whether the primary database is MySQL.
 func UsingMySQL() bool {
 	dsn := os.Getenv("SQL_DSN")
-	return strings.Contains(dsn, "@tcp(") || strings.HasPrefix(dsn, "mysql://")
+	// InitDB treats every non-empty, non-PostgreSQL SQL_DSN as a MySQL DSN.
+	// That includes the driver's supported Unix-socket form
+	// (user@unix(/path/to/socket)/database), which must still enable row locks.
+	return dsn != "" && !strings.HasPrefix(dsn, "postgres://") &&
+		!strings.HasPrefix(dsn, "postgresql://")
 }

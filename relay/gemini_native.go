@@ -1,20 +1,24 @@
 package relay
 
 import (
-	"bufio"
 	"bytes"
 	"errors"
-	"io"
+	"fmt"
 	"net/http"
 	"strings"
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/tokenrouter/tokenrouter/common"
 	"github.com/tokenrouter/tokenrouter/constant"
+	advancedconfig "github.com/tokenrouter/tokenrouter/pkg/advancedcustom"
 	"github.com/tokenrouter/tokenrouter/protocolkit"
 	relaycommon "github.com/tokenrouter/tokenrouter/relay/common"
 	"github.com/tokenrouter/tokenrouter/service"
+	"github.com/tokenrouter/tokenrouter/setting"
 )
+
+const maxGeminiNativeRequestBodyBytes int64 = 16 << 20
 
 // RelayGeminiNative serves the native Gemini passthrough routes
 // (POST /v1/models/*path and POST /v1beta/models/*path). The client speaks the
@@ -24,8 +28,14 @@ import (
 // OpenAI-compatible channels convert the request to OpenAI chat completions
 // and convert the response back (mirroring the reference's RelayFormatGemini).
 func RelayGeminiNative(c *gin.Context) {
-	rawBody, err := io.ReadAll(io.LimitReader(c.Request.Body, 16*1024*1024))
+	cancel := applyRelayRequestDeadline(c)
+	defer cancel()
+	rawBody, err := common.ReadAllLimited(c.Request.Body, maxGeminiNativeRequestBodyBytes)
 	if err != nil {
+		if errors.Is(err, common.ErrBodyTooLarge) {
+			c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": protocolkit.OpenAIError{Message: "请求体过大", Type: "invalid_request_error"}})
+			return
+		}
 		c.JSON(http.StatusBadRequest, gin.H{"error": protocolkit.OpenAIError{Message: "读取请求体失败", Type: "invalid_request_error"}})
 		return
 	}
@@ -54,11 +64,14 @@ func RelayGeminiNative(c *gin.Context) {
 		Request:       converted,
 		GeminiRequest: &native,
 		RawBody:       rawBody,
+		UserGroup:     common.GetUserGroup(c),
 		Group:         getRelayGroup(c),
 		IsStream:      geminiStreamRequested(c, &native),
 	}
 	info.Request.Stream = info.IsStream
-	_ = relayAndSettleWithDispatch(c, info, dispatchGeminiNative)
+	if err := relayAndSettleWithDispatch(c, info, dispatchGeminiNative); err != nil {
+		common.SysError("Gemini relay lifecycle failed: " + err.Error())
+	}
 }
 
 // geminiStreamRequested reports whether the client asked for streaming: the
@@ -66,6 +79,9 @@ func RelayGeminiNative(c *gin.Context) {
 // or an Accept: text/event-stream header.
 func geminiStreamRequested(c *gin.Context, native *protocolkit.GeminiChatRequest) bool {
 	_ = native
+	if strings.HasSuffix(c.Request.URL.Path, ":streamGenerateContent") {
+		return true
+	}
 	if c.Query("alt") == "sse" {
 		return true
 	}
@@ -91,11 +107,119 @@ func extractModelNameFromGeminiPath(path string) string {
 
 // dispatchGeminiNative performs the upstream call for native Gemini relays.
 func dispatchGeminiNative(c *gin.Context, info *RelayInfo) (*protocolkit.Usage, error) {
-	channelType := constant.ChannelType(info.Channel.Type)
-	if channelType == constant.ChannelTypeGemini || channelType == constant.ChannelTypeVertexAi {
-		return geminiNativePassthrough(c, info)
+	if info == nil || info.Channel == nil || info.GeminiRequest == nil {
+		return nil, errors.New("channel not selected")
 	}
-	return geminiViaOpenAIChannel(c, info)
+	originalGeminiRequest := info.GeminiRequest
+	originalOpenAIRequest := info.Request
+	originalRawBody := info.RawBody
+	originalUpstreamModel := info.GeminiUpstreamModel
+	patchedBody, upstreamModel, err := relaycommon.PrepareGeminiNativeBody(
+		info.RawBody, info.ModelName, relaycommon.GetMappedModel(info.Channel, info.ModelName),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("apply configured Gemini policy: %w", err)
+	}
+	var prepared protocolkit.GeminiChatRequest
+	if err := protocolkit.UnmarshalJSON(patchedBody, &prepared); err != nil {
+		return nil, fmt.Errorf("decode configured Gemini request: %w", err)
+	}
+	info.GeminiRequest = &prepared
+	info.Request = protocolkit.GeminiRequestToOpenAIRequest(&prepared)
+	info.Request.Stream = info.IsStream
+	info.RawBody = patchedBody
+	info.GeminiUpstreamModel = upstreamModel
+	defer func() {
+		info.GeminiRequest = originalGeminiRequest
+		info.Request = originalOpenAIRequest
+		info.RawBody = originalRawBody
+		info.GeminiUpstreamModel = originalUpstreamModel
+	}()
+	channelType := constant.ChannelType(info.Channel.Type)
+	apiKey := service.GetChannelKey(info.Channel)
+	var usage *protocolkit.Usage
+	err = nil
+	switch {
+	case channelType == constant.ChannelTypeGemini:
+		usage, err = geminiNativePassthrough(c, info)
+	case channelType == constant.ChannelTypeVertexAi:
+		usage, err = geminiViaVertex(c, info)
+	case channelType == constant.ChannelTypeAdvancedCustom:
+		usage, err = geminiViaAdvancedCustom(c, info)
+	case channelType == constant.ChannelTypeSub2API || channelType == constant.ChannelTypeNewAPI:
+		usage, err = geminiGatewayPassthrough(c, info)
+	case constant.IsOpenAICompatibleChannelType(channelType) && channelType != constant.ChannelTypePerplexity:
+		usage, err = geminiViaOpenAIChannel(c, info)
+	default:
+		err = fmt.Errorf("channel type %d does not implement native Gemini relay", info.Channel.Type)
+	}
+	return usage, relaycommon.SanitizeUpstreamError(err, apiKey)
+}
+
+func preparedGeminiModel(info *RelayInfo) string {
+	if info == nil {
+		return ""
+	}
+	if model := strings.TrimSpace(info.GeminiUpstreamModel); model != "" {
+		return model
+	}
+	return relaycommon.GetMappedModel(info.Channel, info.ModelName)
+}
+
+// geminiViaVertex preserves the native Gemini request/response contract while
+// delegating project/location URL construction and service-account or API-key
+// authentication to the explicit Vertex adapter. The root relay retains the
+// shared SSRF-safe client and the ordinary reservation/settlement lifecycle.
+func geminiViaVertex(c *gin.Context, info *RelayInfo) (*protocolkit.Usage, error) {
+	if c == nil || info == nil || info.Channel == nil || info.GeminiRequest == nil || info.Request == nil {
+		return nil, errors.New("Vertex AI Gemini relay metadata is nil")
+	}
+	mappedModel := preparedGeminiModel(info)
+	requestCopy := *info.Request
+	meta := &relaycommon.Meta{
+		Context:           c.Request.Context(),
+		Channel:           info.Channel,
+		Mode:              constant.RelayModeGemini,
+		Format:            constant.RelayFormatGemini,
+		RequestPath:       c.Request.URL.Path,
+		OriginalModelName: info.ModelName,
+		ModelName:         mappedModel,
+		BaseURL:           info.Channel.BaseURL,
+		APIKey:            service.GetChannelKey(info.Channel),
+		ClientHeaders:     c.Request.Header.Clone(),
+		Request:           &requestCopy,
+		RawBody:           info.RawBody,
+		IsStream:          info.IsStream,
+		PromptTokens:      info.PromptTokens,
+		ToolUsage:         info.ToolUsageHooks,
+	}
+	adaptor := GetAdaptor(constant.ChannelTypeVertexAi)
+	if adaptor == nil {
+		return nil, errors.New("Vertex AI relay adapter is unavailable")
+	}
+	adaptor.Init(meta)
+	requestURL, err := adaptor.GetRequestURL(meta)
+	if err != nil {
+		return nil, err
+	}
+	body, err := adaptor.ConvertRequest(meta)
+	if err != nil {
+		return nil, err
+	}
+	request, err := http.NewRequestWithContext(c.Request.Context(), http.MethodPost, requestURL, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	if err := adaptor.SetupRequestHeader(request, meta); err != nil {
+		return nil, err
+	}
+	service.ApplyChannelAffinityRequestHeaders(c, request)
+	response, err := relayHTTPClient.Do(request)
+	if err != nil {
+		return nil, relaycommon.SanitizeTransportError(err)
+	}
+	defer response.Body.Close()
+	return adaptor.DoResponse(c, response, meta)
 }
 
 // geminiNativePassthrough forwards the native Gemini body verbatim to a Gemini
@@ -106,13 +230,14 @@ func geminiNativePassthrough(c *gin.Context, info *RelayInfo) (*protocolkit.Usag
 	if base == "" {
 		base = "https://generativelanguage.googleapis.com"
 	}
-	mappedModel := relaycommon.GetMappedModel(info.Channel, info.ModelName)
+	mappedModel := preparedGeminiModel(info)
 
 	action := "generateContent"
 	if info.IsStream {
 		action = "streamGenerateContent?alt=sse"
 	}
-	url := relaycommon.JoinURL(base, "/v1beta/models/"+mappedModel+":"+action)
+	version := setting.GetGeminiAPIVersion(mappedModel)
+	url := relaycommon.JoinURL(base, "/"+version+"/models/"+mappedModel+":"+action)
 
 	// Rewrite the model field when the request carries one and it was mapped;
 	// otherwise forward the raw body byte-for-byte.
@@ -137,7 +262,7 @@ func geminiNativePassthrough(c *gin.Context, info *RelayInfo) (*protocolkit.Usag
 
 	resp, err := relayHTTPClient.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, relaycommon.SanitizeTransportError(err)
 	}
 	defer resp.Body.Close()
 
@@ -145,21 +270,32 @@ func geminiNativePassthrough(c *gin.Context, info *RelayInfo) (*protocolkit.Usag
 		return nil, relaycommon.HandleErrorResponse(resp)
 	}
 	if info.IsStream {
-		return geminiNativeStreamResponse(c, resp)
+		return geminiNativeStreamResponseWithInfo(c, resp, info)
 	}
-	return geminiNativeNonStreamResponse(c, resp)
+	return geminiNativeNonStreamResponseWithInfo(c, resp, info)
 }
 
 // geminiNativeNonStreamResponse parses the native response for usage, then
 // copies it verbatim to the client.
 func geminiNativeNonStreamResponse(c *gin.Context, resp *http.Response) (*protocolkit.Usage, error) {
-	body, err := io.ReadAll(resp.Body)
+	return geminiNativeNonStreamResponseWithInfo(c, resp, nil)
+}
+
+func geminiNativeNonStreamResponseWithInfo(c *gin.Context, resp *http.Response, info *RelayInfo) (*protocolkit.Usage, error) {
+	body, err := relaycommon.ReadUpstreamBody(resp.Body, relaycommon.MaxUpstreamJSONBodyBytes)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("read Gemini native response: %w", err)
 	}
 	var geminiResp protocolkit.GeminiChatResponse
 	if err := protocolkit.UnmarshalJSON(body, &geminiResp); err != nil {
 		return nil, &relaycommon.UpstreamError{StatusCode: resp.StatusCode, Body: string(body)}
+	}
+	var hooks *relaycommon.ToolUsageHooks
+	if info != nil {
+		hooks = info.ToolUsageHooks
+	}
+	if err := relaycommon.ObserveGeminiResponse(hooks, &geminiResp); err != nil {
+		return nil, fmt.Errorf("observe Gemini native Google Search usage: %w", err)
 	}
 	var usage *protocolkit.Usage
 	if geminiResp.UsageMetadata != nil {
@@ -167,13 +303,19 @@ func geminiNativeNonStreamResponse(c *gin.Context, resp *http.Response) (*protoc
 	}
 	c.Status(resp.StatusCode)
 	c.Header("Content-Type", "application/json")
-	_, _ = c.Writer.Write(body)
+	if _, err := c.Writer.Write(body); err != nil {
+		return nil, fmt.Errorf("write Gemini native response: %w", err)
+	}
 	return usage, nil
 }
 
 // geminiNativeStreamResponse proxies the upstream SSE stream verbatim and
 // extracts usage metadata from streamed chunks.
 func geminiNativeStreamResponse(c *gin.Context, resp *http.Response) (*protocolkit.Usage, error) {
+	return geminiNativeStreamResponseWithInfo(c, resp, nil)
+}
+
+func geminiNativeStreamResponseWithInfo(c *gin.Context, resp *http.Response, info *RelayInfo) (*protocolkit.Usage, error) {
 	c.Status(resp.StatusCode)
 	c.Header("Content-Type", "text/event-stream")
 	c.Header("Cache-Control", "no-cache")
@@ -181,26 +323,76 @@ func geminiNativeStreamResponse(c *gin.Context, resp *http.Response) (*protocolk
 	c.Writer.Flush()
 
 	var usage *protocolkit.Usage
-	scanner := bufio.NewScanner(resp.Body)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	scanner := relaycommon.NewUpstreamSSEScanner(resp.Body)
 	for scanner.Scan() {
 		line := scanner.Text()
 		if strings.HasPrefix(line, "data:") {
 			data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
 			if data != "" {
 				var chunk protocolkit.GeminiChatResponse
-				if err := protocolkit.UnmarshalJSON([]byte(data), &chunk); err == nil && chunk.UsageMetadata != nil {
-					usage = protocolkit.GeminiUsageToOpenAIUsage(chunk.UsageMetadata)
+				if err := protocolkit.UnmarshalJSON([]byte(data), &chunk); err == nil {
+					var hooks *relaycommon.ToolUsageHooks
+					if info != nil {
+						hooks = info.ToolUsageHooks
+					}
+					if observeErr := relaycommon.ObserveGeminiResponse(hooks, &chunk); observeErr != nil {
+						return usage, fmt.Errorf("observe Gemini native stream Google Search usage: %w", observeErr)
+					}
+					if chunk.UsageMetadata != nil {
+						usage = protocolkit.GeminiUsageToOpenAIUsage(chunk.UsageMetadata)
+					}
 				}
 			}
 		}
-		_, _ = c.Writer.WriteString(line + "\n")
+		if _, err := c.Writer.WriteString(line + "\n"); err != nil {
+			return usage, fmt.Errorf("write Gemini native stream: %w", err)
+		}
 		c.Writer.Flush()
 	}
 	if err := scanner.Err(); err != nil {
-		return usage, err
+		return usage, fmt.Errorf("scan Gemini native stream (maximum event %d bytes): %w",
+			relaycommon.MaxUpstreamSSEEventBytes, err)
 	}
 	return usage, nil
+}
+
+func geminiViaAdvancedCustom(c *gin.Context, info *RelayInfo) (*protocolkit.Usage, error) {
+	mappedModel := preparedGeminiModel(info)
+	nativeBody := info.RawBody
+	if info.GeminiRequest != nil && info.GeminiRequest.Model != "" && mappedModel != info.ModelName {
+		var body map[string]any
+		if err := protocolkit.UnmarshalJSON(nativeBody, &body); err != nil {
+			return nil, errors.New("invalid Gemini request body")
+		}
+		body["model"] = "models/" + mappedModel
+		encoded, err := protocolkit.MarshalJSON(body)
+		if err != nil {
+			return nil, fmt.Errorf("encode mapped Gemini request: %w", err)
+		}
+		nativeBody = encoded
+	}
+	call, err := callAdvancedCustomNative(c, info, constant.RelayFormatGemini, nativeBody, info.Request)
+	if err != nil {
+		return nil, err
+	}
+	defer call.response.Body.Close()
+	if call.response.StatusCode >= http.StatusBadRequest {
+		return nil, relaycommon.HandleErrorResponse(call.response)
+	}
+	switch call.converter {
+	case advancedconfig.ConverterNone:
+		if info.IsStream {
+			return geminiNativeStreamResponseWithInfo(c, call.response, info)
+		}
+		return geminiNativeNonStreamResponseWithInfo(c, call.response, info)
+	case advancedconfig.ConverterGeminiToOpenAIChat:
+		if info.IsStream {
+			return geminiStreamFromOpenAI(c, call.response)
+		}
+		return geminiNonStreamFromOpenAI(c, call.response)
+	default:
+		return nil, fmt.Errorf("advanced custom converter %q cannot serve Gemini generateContent", call.converter)
+	}
 }
 
 // geminiViaOpenAIChannel converts the native Gemini request to OpenAI chat
@@ -208,32 +400,50 @@ func geminiNativeStreamResponse(c *gin.Context, resp *http.Response) (*protocolk
 // back to native Gemini format.
 func geminiViaOpenAIChannel(c *gin.Context, info *RelayInfo) (*protocolkit.Usage, error) {
 	base := info.Channel.BaseURL
-	if base == "" {
-		base = "https://api.openai.com"
-	}
-	mappedModel := relaycommon.GetMappedModel(info.Channel, info.ModelName)
-	openaiReq := info.Request
-	if openaiReq == nil {
+	mappedModel := preparedGeminiModel(info)
+	if info.Request == nil {
 		return nil, errors.New("invalid gemini request")
 	}
-	openaiReq.Model = mappedModel
-
-	body, err := protocolkit.MarshalJSON(openaiReq)
+	// Keep the request snapshot used for moderation and accounting immutable.
+	// Provider adapters receive a shallow copy and apply the mapped model via
+	// metadata when they serialize the upstream request.
+	openaiReq := *info.Request
+	meta := &relaycommon.Meta{
+		Channel:      info.Channel,
+		Mode:         constant.RelayModeChatCompletions,
+		Format:       constant.RelayFormatOpenAI,
+		ModelName:    mappedModel,
+		BaseURL:      base,
+		APIKey:       service.GetChannelKey(info.Channel),
+		Request:      &openaiReq,
+		IsStream:     info.IsStream,
+		PromptTokens: info.PromptTokens,
+	}
+	adaptor := GetAdaptor(constant.ChannelType(info.Channel.Type))
+	if adaptor == nil {
+		return nil, fmt.Errorf("channel type %d has no implemented relay adapter", info.Channel.Type)
+	}
+	adaptor.Init(meta)
+	url, err := adaptor.GetRequestURL(meta)
 	if err != nil {
 		return nil, err
 	}
-	url := relaycommon.JoinURL(base, "/v1/chat/completions")
+	body, err := adaptor.ConvertRequest(meta)
+	if err != nil {
+		return nil, err
+	}
 	req, err := http.NewRequestWithContext(c.Request.Context(), http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+service.GetChannelKey(info.Channel))
+	if err := adaptor.SetupRequestHeader(req, meta); err != nil {
+		return nil, err
+	}
 	service.ApplyChannelAffinityRequestHeaders(c, req)
 
 	resp, err := relayHTTPClient.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, relaycommon.SanitizeTransportError(err)
 	}
 	defer resp.Body.Close()
 
@@ -249,19 +459,24 @@ func geminiViaOpenAIChannel(c *gin.Context, info *RelayInfo) (*protocolkit.Usage
 // geminiNonStreamFromOpenAI converts an OpenAI chat completion into a native
 // Gemini GenerateContent response.
 func geminiNonStreamFromOpenAI(c *gin.Context, resp *http.Response) (*protocolkit.Usage, error) {
-	body, err := io.ReadAll(resp.Body)
+	body, err := relaycommon.ReadUpstreamBody(resp.Body, relaycommon.MaxUpstreamJSONBodyBytes)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("read OpenAI response for Gemini conversion: %w", err)
 	}
 	var openaiResp protocolkit.ChatCompletionsResponse
 	if err := protocolkit.UnmarshalJSON(body, &openaiResp); err != nil {
 		return nil, err
 	}
 	geminiResp := protocolkit.OpenAIResponseToGeminiResponse(&openaiResp)
-	out, _ := protocolkit.MarshalJSON(geminiResp)
+	out, err := protocolkit.MarshalJSON(geminiResp)
+	if err != nil {
+		return nil, fmt.Errorf("encode Gemini response: %w", err)
+	}
 	c.Status(resp.StatusCode)
 	c.Header("Content-Type", "application/json")
-	_, _ = c.Writer.Write(out)
+	if _, err := c.Writer.Write(out); err != nil {
+		return nil, fmt.Errorf("write Gemini response: %w", err)
+	}
 	return openaiResp.Usage, nil
 }
 
@@ -278,8 +493,7 @@ func geminiStreamFromOpenAI(c *gin.Context, resp *http.Response) (*protocolkit.U
 	var usage *protocolkit.Usage
 	var contentChars int
 	index := 0
-	scanner := bufio.NewScanner(resp.Body)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	scanner := relaycommon.NewUpstreamSSEScanner(resp.Body)
 	for scanner.Scan() {
 		line := scanner.Text()
 		if !strings.HasPrefix(line, "data:") {
@@ -310,13 +524,19 @@ func geminiStreamFromOpenAI(c *gin.Context, resp *http.Response) (*protocolkit.U
 					},
 				}},
 			}
-			b, _ := protocolkit.MarshalJSON(geminiChunk)
-			_, _ = c.Writer.WriteString("data: " + string(b) + "\n\n")
+			b, err := protocolkit.MarshalJSON(geminiChunk)
+			if err != nil {
+				return usage, fmt.Errorf("encode Gemini stream chunk: %w", err)
+			}
+			if _, err := c.Writer.WriteString("data: " + string(b) + "\n\n"); err != nil {
+				return usage, fmt.Errorf("write Gemini stream chunk: %w", err)
+			}
 			c.Writer.Flush()
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return usage, err
+		return usage, fmt.Errorf("scan OpenAI stream for Gemini conversion (maximum event %d bytes): %w",
+			relaycommon.MaxUpstreamSSEEventBytes, err)
 	}
 	final := protocolkit.GeminiChatResponse{
 		Candidates: []protocolkit.GeminiChatCandidate{{
@@ -332,8 +552,13 @@ func geminiStreamFromOpenAI(c *gin.Context, resp *http.Response) (*protocolkit.U
 			TotalTokenCount:      usage.TotalTokens,
 		}
 	}
-	b, _ := protocolkit.MarshalJSON(final)
-	_, _ = c.Writer.WriteString("data: " + string(b) + "\n\n")
+	b, err := protocolkit.MarshalJSON(final)
+	if err != nil {
+		return usage, fmt.Errorf("encode final Gemini stream chunk: %w", err)
+	}
+	if _, err := c.Writer.WriteString("data: " + string(b) + "\n\n"); err != nil {
+		return usage, fmt.Errorf("write final Gemini stream chunk: %w", err)
+	}
 	c.Writer.Flush()
 
 	if usage == nil && contentChars > 0 {

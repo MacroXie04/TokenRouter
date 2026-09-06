@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
 
+	"github.com/tokenrouter/tokenrouter/common"
 	"github.com/tokenrouter/tokenrouter/constant"
 	"github.com/tokenrouter/tokenrouter/model"
 	"github.com/tokenrouter/tokenrouter/router"
@@ -34,9 +35,12 @@ func setupSubscriptionAdminTest(t *testing.T) func(method, path, body string) *h
 	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
 	require.NoError(t, err)
 	require.NoError(t, db.AutoMigrate(&model.User{}, &model.Option{}, &model.UserSession{},
-		&model.SubscriptionPlan{}, &model.UserSubscription{}, &model.SubscriptionOrder{}, &model.Log{}))
+		&model.SubscriptionPlan{}, &model.UserSubscription{}, &model.SubscriptionOrder{}, &model.Log{},
+		&model.SubscriptionPreConsumeRecord{}, &model.RelayQuotaReservationRecord{},
+		&model.AuditLogOutbox{}, &model.CasbinRule{}))
 	model.DB = db
 	model.LOG_DB = db
+	require.NoError(t, service.InitCasbin())
 	service.SetGroupRatios(map[string]float64{"default": 1.0, "vip": 2.0})
 
 	admin := model.User{Username: "subadmin", Password: "pw", Role: constant.RoleAdminUser,
@@ -55,6 +59,24 @@ func setupSubscriptionAdminTest(t *testing.T) func(method, path, body string) *h
 		r.ServeHTTP(rec, req)
 		return rec
 	}
+}
+
+func TestLegacySubscriptionPlanCreateUsesComplianceAndComprehensiveValidation(t *testing.T) {
+	do := setupSubscriptionAdminTest(t)
+	setPaymentCompliance(t, false)
+	subExpectFail(t, do(http.MethodPost, "/api/admin/subscription/plan",
+		`{"title":"Legacy","price_amount":"1","total_amount":1}`),
+		service.ErrPaymentComplianceRequired.Error())
+
+	setPaymentCompliance(t, true)
+	subExpectFail(t, do(http.MethodPost, "/api/admin/subscription/plan",
+		`{"title":"Legacy","price_amount":"1","total_amount":1,"upgrade_group":"missing"}`),
+		"升级分组不存在")
+	created := subExpectOK(t, do(http.MethodPost, "/api/admin/subscription/plan",
+		`{"title":"Legacy","price_amount":"1","currency":"CNY","total_amount":1}`))
+	plan := created["data"].(map[string]any)
+	assert.Equal(t, "USD", plan["currency"])
+	assert.Equal(t, "month", plan["duration_unit"])
 }
 
 func subDecode(t *testing.T, rec *httptest.ResponseRecorder) map[string]any {
@@ -91,15 +113,18 @@ func TestAdminSubscriptionPlanCRUD(t *testing.T) {
 
 	// Validation contract (message per rejected field).
 	for body, msg := range map[string]string{
-		`{"plan":{"title":"  "}}`:                              "套餐标题不能为空",
-		`{"plan":{"title":"P","price_amount":"-1"}}`:           "价格不能为负数",
-		`{"plan":{"title":"P","price_amount":"10000"}}`:        "价格不能超过9999",
-		`{"plan":{"title":"P","max_purchase_per_user":-1}}`:    "购买上限不能为负数",
-		`{"plan":{"title":"P","total_amount":-1}}`:             "总额度不能为负数",
-		`{"plan":{"title":"P","upgrade_group":"nope"}}`:        "升级分组不存在",
-		`{"plan":{"title":"P","downgrade_group":"nope"}}`:      "降级分组不存在",
-		`{"plan":{"title":"P","quota_reset_period":"custom"}}`: "自定义重置周期需大于0秒",
-		`{"plan":{"title":"P","price_amount":"not-a-number"}}`: "参数错误",
+		`{"plan":{"title":"  "}}`:                                                  "套餐标题不能为空",
+		`{"plan":{"title":"P","price_amount":"-1"}}`:                               "价格不能为负数",
+		`{"plan":{"title":"P","price_amount":"10000"}}`:                            "价格不能超过9999",
+		`{"plan":{"title":"P","max_purchase_per_user":-1}}`:                        "购买上限不能为负数",
+		`{"plan":{"title":"P","total_amount":-1}}`:                                 "总额度不能为负数",
+		`{"plan":{"title":"P","upgrade_group":"nope"}}`:                            "升级分组不存在",
+		`{"plan":{"title":"P","downgrade_group":"nope"}}`:                          "降级分组不存在",
+		`{"plan":{"title":"P","quota_reset_period":"custom"}}`:                     "自定义重置周期需大于0秒",
+		`{"plan":{"title":"P","price_amount":"not-a-number"}}`:                     "参数错误",
+		`{"plan":{"title":"P","price_amount":"NaN"}}`:                              "参数错误",
+		`{"plan":{"title":"P","price_amount":"1.0000001"}}`:                        "参数错误",
+		fmt.Sprintf(`{"plan":{"title":"P","total_amount":%d}}`, common.MaxQuota+1): fmt.Sprintf("总额度不能超过%d", common.MaxQuota),
 	} {
 		subExpectFail(t, do(http.MethodPost, "/api/subscription/admin/plans", body), msg)
 	}
@@ -285,4 +310,78 @@ func TestAdminSubscriptionBindResetInvalidateDelete(t *testing.T) {
 	anonRec := httptest.NewRecorder()
 	router.SetUpRouter().ServeHTTP(anonRec, anon)
 	assert.Equal(t, http.StatusUnauthorized, anonRec.Code)
+}
+
+func TestAdminSubscriptionRoutesEnforceTargetRoleHierarchy(t *testing.T) {
+	do := setupSubscriptionAdminTest(t)
+	setPaymentCompliance(t, true)
+
+	created := subExpectOK(t, do(http.MethodPost, "/api/subscription/admin/plans",
+		`{"plan":{"title":"Hierarchy","total_amount":1000,"quota_reset_period":"monthly","enabled":true}}`))
+	planID := int(created["data"].(map[string]any)["id"].(float64))
+
+	peer := model.User{Username: "subscription-peer", Password: "pw", Role: constant.RoleAdminUser,
+		Status: model.UserStatusEnabled, Group: "default", AuthVersion: 1}
+	root := model.User{Username: "subscription-root", Password: "pw", Role: constant.RoleRootUser,
+		Status: model.UserStatusEnabled, Group: "default", AuthVersion: 1}
+	lower := model.User{Username: "subscription-lower", Password: "pw", Role: constant.RoleCommonUser,
+		Status: model.UserStatusEnabled, Group: "default", AuthVersion: 1}
+	require.NoError(t, model.DB.Create(&peer).Error)
+	require.NoError(t, model.DB.Create(&root).Error)
+	require.NoError(t, model.DB.Create(&lower).Error)
+
+	now := common.NowTimestamp()
+	peerSub := model.UserSubscription{UserId: peer.Id, PlanId: planID, AmountTotal: 1000, AmountUsed: 400,
+		StartTime: now, EndTime: now + 3600, Status: service.SubscriptionStatusActive, Source: "admin",
+		QuotaResetPeriodSnapshot: service.SubscriptionResetMonthly, EntitlementVersion: service.UserSubscriptionEntitlementVersion,
+		EntitlementMigrationState: service.SubscriptionEntitlementMigrationBackfilled}
+	rootSub := peerSub
+	rootSub.Id = 0
+	rootSub.UserId = root.Id
+	lowerSub := peerSub
+	lowerSub.Id = 0
+	lowerSub.UserId = lower.Id
+	require.NoError(t, model.DB.Create(&peerSub).Error)
+	require.NoError(t, model.DB.Create(&rootSub).Error)
+	require.NoError(t, model.DB.Create(&lowerSub).Error)
+
+	assertForbidden := func(rec *httptest.ResponseRecorder) {
+		t.Helper()
+		require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+		body := subDecode(t, rec)
+		assert.Equal(t, false, body["success"])
+		assert.Equal(t, service.ErrSubscriptionTargetForbidden.Error(), body["message"])
+	}
+
+	for _, targetID := range []int{peer.Id, root.Id} {
+		assertForbidden(do(http.MethodGet,
+			fmt.Sprintf("/api/subscription/admin/users/%d/subscriptions", targetID), ""))
+		assertForbidden(do(http.MethodPost,
+			fmt.Sprintf("/api/subscription/admin/users/%d/subscriptions", targetID),
+			fmt.Sprintf(`{"plan_id":%d}`, planID)))
+		assertForbidden(do(http.MethodPost,
+			fmt.Sprintf("/api/subscription/admin/users/%d/subscriptions/reset", targetID),
+			fmt.Sprintf(`{"plan_id":%d}`, planID)))
+		assertForbidden(do(http.MethodPost, "/api/subscription/admin/bind",
+			fmt.Sprintf(`{"user_id":%d,"plan_id":%d}`, targetID, planID)))
+	}
+
+	for _, subscriptionID := range []int{peerSub.Id, rootSub.Id} {
+		assertForbidden(do(http.MethodPost,
+			fmt.Sprintf("/api/subscription/admin/user_subscriptions/%d/invalidate", subscriptionID), ""))
+		assertForbidden(do(http.MethodDelete,
+			fmt.Sprintf("/api/subscription/admin/user_subscriptions/%d", subscriptionID), ""))
+	}
+
+	// A bulk reset is all-or-nothing: the presence of any peer/higher-role
+	// target rejects the operation before a lower user's quota is changed.
+	assertForbidden(do(http.MethodPost,
+		fmt.Sprintf("/api/subscription/admin/plans/%d/subscriptions/reset", planID), `{}`))
+	var unchanged []model.UserSubscription
+	require.NoError(t, model.DB.Where("id IN ?", []int{peerSub.Id, rootSub.Id, lowerSub.Id}).Order("id asc").Find(&unchanged).Error)
+	require.Len(t, unchanged, 3)
+	for _, subscription := range unchanged {
+		assert.Equal(t, int64(400), subscription.AmountUsed)
+		assert.Equal(t, service.SubscriptionStatusActive, subscription.Status)
+	}
 }

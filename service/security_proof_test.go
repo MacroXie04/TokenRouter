@@ -4,16 +4,30 @@ import (
 	"testing"
 	"time"
 
+	"github.com/glebarez/sqlite"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
+
+	"github.com/tokenrouter/tokenrouter/model"
 )
+
+func setupSecurityProofClock(t *testing.T) {
+	t.Helper()
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	previous := model.DB
+	model.DB = db
+	t.Cleanup(func() { model.DB = previous })
+}
 
 func testIdentity() SessionIdentity {
 	return SessionIdentity{UserID: 7, SessionID: "sid-abc", UserAuthVersion: 3, SessionVersion: 12}
 }
 
 func TestIssueAndVerifySecurityProof(t *testing.T) {
+	setupSecurityProofClock(t)
 	identity := testIdentity()
 	raw, expiresAt, err := IssueSecurityProof(identity, SecurityProofMethod2FA, []string{SecurityProofScopeChannelKeyRead})
 	require.NoError(t, err)
@@ -26,6 +40,7 @@ func TestIssueAndVerifySecurityProof(t *testing.T) {
 }
 
 func TestVerifySecurityProofScopeAndMethod(t *testing.T) {
+	setupSecurityProofClock(t)
 	identity := testIdentity()
 	raw, _, err := IssueSecurityProof(identity, SecurityProofMethodPasskey, []string{SecurityProofScopePasskeyDelete})
 	require.NoError(t, err)
@@ -42,6 +57,7 @@ func TestVerifySecurityProofScopeAndMethod(t *testing.T) {
 }
 
 func TestVerifySecurityProofSessionBinding(t *testing.T) {
+	setupSecurityProofClock(t)
 	identity := testIdentity()
 	raw, _, err := IssueSecurityProof(identity, SecurityProofMethod2FA, []string{SecurityProofScopeChannelKeyRead})
 	require.NoError(t, err)
@@ -70,6 +86,7 @@ func TestVerifySecurityProofSessionBinding(t *testing.T) {
 }
 
 func TestVerifySecurityProofExpired(t *testing.T) {
+	setupSecurityProofClock(t)
 	identity := testIdentity()
 	claims := securityProofClaims{
 		SessionID:       identity.SessionID,
@@ -96,4 +113,20 @@ func TestIssueSecurityProofRejectsIncompleteIdentity(t *testing.T) {
 	assert.ErrorIs(t, err, ErrSecurityProofInvalid)
 	_, _, err = IssueSecurityProof(testIdentity(), SecurityProofMethod2FA, nil)
 	assert.ErrorIs(t, err, ErrSecurityProofInvalid)
+}
+
+func TestSecurityProofUsesOneAuthoritativeClockSnapshot(t *testing.T) {
+	identity := testIdentity()
+	now := time.Unix(2_000_000_000, 0).UTC()
+	raw, expiresAt, err := issueSecurityProofAt(identity, SecurityProofMethod2FA,
+		[]string{SecurityProofScopeChannelKeyRead}, now)
+	require.NoError(t, err)
+	assert.Equal(t, now.Add(SecurityProofTTL).Unix(), expiresAt)
+
+	_, err = verifySecurityProofAt(raw, identity, SecurityProofScopeChannelKeyRead, nil,
+		now.Add(SecurityProofTTL-time.Second))
+	require.NoError(t, err)
+	_, err = verifySecurityProofAt(raw, identity, SecurityProofScopeChannelKeyRead, nil,
+		now.Add(SecurityProofTTL))
+	assert.ErrorIs(t, err, ErrSecurityProofExpired)
 }

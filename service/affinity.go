@@ -6,13 +6,15 @@ import (
 	"crypto/sha1"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/http"
-	"regexp"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
 	"github.com/go-redis/redis/v8"
@@ -37,7 +39,15 @@ const (
 	affinityContextMetaKey      = "tokenrouter_channel_affinity_meta"
 	affinityContextUsedKey      = "tokenrouter_channel_affinity_used"
 	affinityContextSkipRetryKey = "tokenrouter_channel_affinity_skip_retry"
+
+	affinityRedisPageSize      = 256
+	affinityRedisEvictionBatch = 256
+	maxAffinityRedisEntryBytes = 1024
+	affinityStatsErrorOverflow = "scan_overflow"
+	affinityStatsErrorBackend  = "backend_error"
 )
+
+var ErrChannelAffinityCacheScanOverflow = errors.New("channel affinity cache scan limit exceeded")
 
 type channelAffinityMeta struct {
 	CacheKey       string
@@ -67,6 +77,9 @@ type ChannelAffinityCacheStats struct {
 	ByRuleName    map[string]int `json:"by_rule_name"`
 	CacheCapacity int            `json:"cache_capacity"`
 	CacheAlgo     string         `json:"cache_algo"`
+	Complete      bool           `json:"complete"`
+	Overflow      bool           `json:"overflow"`
+	ErrorCode     string         `json:"error_code,omitempty"`
 }
 
 type ChannelAffinityUsageCacheStats struct {
@@ -103,10 +116,17 @@ func newBoundedTTLCache[T any](capacity int) *boundedTTLCache[T] {
 }
 
 func (cache *boundedTTLCache[T]) configure(capacity int) {
+	if capacity < 0 {
+		capacity = 0
+	}
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
+	// This runs on every affinity request. Keep the common unchanged-capacity
+	// path O(1); expiry is lazy on reads and swept by snapshot/clear operations.
+	if cache.capacity == capacity {
+		return
+	}
 	cache.capacity = capacity
-	cache.purgeExpiredLocked(time.Now())
 	cache.evictLocked()
 }
 
@@ -114,6 +134,9 @@ func (cache *boundedTTLCache[T]) get(key string) (T, bool) {
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
 	var zero T
+	if cache.capacity == 0 {
+		return zero, false
+	}
 	element, exists := cache.items[key]
 	if !exists {
 		return zero, false
@@ -130,6 +153,9 @@ func (cache *boundedTTLCache[T]) get(key string) (T, bool) {
 func (cache *boundedTTLCache[T]) set(key string, value T, ttl time.Duration) {
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
+	if cache.capacity == 0 || ttl <= 0 {
+		return
+	}
 	if element, exists := cache.items[key]; exists {
 		item := element.Value.(*ttlCacheItem[T])
 		item.value = value
@@ -139,7 +165,6 @@ func (cache *boundedTTLCache[T]) set(key string, value T, ttl time.Duration) {
 		item := &ttlCacheItem[T]{key: key, value: value, expiresAt: time.Now().Add(ttl)}
 		cache.items[key] = cache.order.PushFront(item)
 	}
-	cache.purgeExpiredLocked(time.Now())
 	cache.evictLocked()
 }
 
@@ -192,11 +217,7 @@ func (cache *boundedTTLCache[T]) purgeExpiredLocked(now time.Time) {
 }
 
 func (cache *boundedTTLCache[T]) evictLocked() {
-	capacity := cache.capacity
-	if capacity <= 0 {
-		capacity = setting.DefaultChannelAffinityMaxEntries
-	}
-	for len(cache.items) > capacity {
+	for len(cache.items) > cache.capacity {
 		cache.removeLocked(cache.order.Back())
 	}
 }
@@ -213,7 +234,6 @@ var (
 	affinityMemory              = newBoundedTTLCache[affinityCacheEntry](setting.DefaultChannelAffinityMaxEntries)
 	affinityUsageMemory         = newBoundedTTLCache[ChannelAffinityUsageCacheStats](setting.DefaultChannelAffinityMaxEntries)
 	affinityUsageMemoryUpdateMu sync.Mutex
-	affinityRegexCache          sync.Map
 )
 
 func GetPreferredChannelByAffinity(c *gin.Context, modelName, usingGroup string, body []byte) (int, bool) {
@@ -230,10 +250,10 @@ func GetPreferredChannelByAffinity(c *gin.Context, modelName, usingGroup string,
 		}
 	}
 	for _, rule := range config.Rules {
-		if !matchesAnyRegex(rule.ModelRegex, modelName) {
+		if !rule.MatchesModel(modelName) {
 			continue
 		}
-		if len(rule.PathRegex) > 0 && !matchesAnyRegex(rule.PathRegex, path) {
+		if rule.HasPathMatchers() && !rule.MatchesPath(path) {
 			continue
 		}
 		if len(rule.UserAgentInclude) > 0 && !containsAnyFold(rule.UserAgentInclude, userAgent) {
@@ -248,7 +268,7 @@ func GetPreferredChannelByAffinity(c *gin.Context, modelName, usingGroup string,
 				break
 			}
 		}
-		if value == "" || (rule.ValueRegex != "" && !matchesAnyRegex([]string{rule.ValueRegex}, value)) {
+		if !rule.MatchesValue(value) {
 			continue
 		}
 		ttlSeconds := rule.TTLSeconds
@@ -302,26 +322,6 @@ func extractChannelAffinityValue(c *gin.Context, body []byte, source setting.Cha
 		}
 	}
 	return ""
-}
-
-func matchesAnyRegex(patterns []string, value string) bool {
-	if len(patterns) == 0 || value == "" {
-		return false
-	}
-	for _, pattern := range patterns {
-		cached, exists := affinityRegexCache.Load(pattern)
-		if !exists {
-			compiled, err := regexp.Compile(pattern)
-			if err != nil {
-				continue
-			}
-			cached, _ = affinityRegexCache.LoadOrStore(pattern, compiled)
-		}
-		if cached.(*regexp.Regexp).MatchString(value) {
-			return true
-		}
-	}
-	return false
 }
 
 func containsAnyFold(parts []string, value string) bool {
@@ -427,7 +427,6 @@ func RecordChannelAffinity(c *gin.Context, initialChannelID, successfulChannelID
 
 func GetChannelAffinityCacheStats() ChannelAffinityCacheStats {
 	config := setting.GetChannelAffinitySetting()
-	entries := affinityEntries(config.MaxEntries)
 	byRule := make(map[string]int)
 	countable := make(map[string]bool)
 	for _, rule := range config.Rules {
@@ -435,6 +434,22 @@ func GetChannelAffinityCacheStats() ChannelAffinityCacheStats {
 			byRule[rule.Name] = 0
 			countable[rule.Name] = true
 		}
+	}
+	stats := ChannelAffinityCacheStats{
+		Enabled: config.Enabled && config.MaxEntries > 0, ByRuleName: byRule,
+		CacheCapacity: config.MaxEntries, CacheAlgo: "LRU", Complete: true,
+	}
+	entries, err := affinityEntries(config.MaxEntries)
+	if err != nil {
+		stats.Complete = false
+		stats.Overflow = errors.Is(err, ErrChannelAffinityCacheScanOverflow)
+		if stats.Overflow {
+			stats.ErrorCode = affinityStatsErrorOverflow
+		} else {
+			stats.ErrorCode = affinityStatsErrorBackend
+		}
+		common.SysError("channel affinity cache stats failed: " + err.Error())
+		return stats
 	}
 	unknown := 0
 	for _, entry := range entries {
@@ -444,13 +459,24 @@ func GetChannelAffinityCacheStats() ChannelAffinityCacheStats {
 			unknown++
 		}
 	}
-	return ChannelAffinityCacheStats{
-		Enabled: config.Enabled, Total: len(entries), Unknown: unknown, ByRuleName: byRule,
-		CacheCapacity: config.MaxEntries, CacheAlgo: "LRU",
-	}
+	stats.Total = len(entries)
+	stats.Unknown = unknown
+	return stats
 }
 
+// ClearChannelAffinityCacheAll keeps the historical integer API. A negative
+// result is an explicit failure/overflow sentinel; callers that need the exact
+// error should use ClearChannelAffinityCacheAllChecked.
 func ClearChannelAffinityCacheAll() int {
+	deleted, err := ClearChannelAffinityCacheAllChecked()
+	if err != nil {
+		common.SysError("channel affinity cache clear failed: " + err.Error())
+		return -1
+	}
+	return deleted
+}
+
+func ClearChannelAffinityCacheAllChecked() (int, error) {
 	return clearAffinityEntries(func(affinityCacheEntry) bool { return true })
 }
 
@@ -467,7 +493,7 @@ func ClearChannelAffinityCacheByRuleName(ruleName string) (int, error) {
 		if !rule.IncludeRuleName {
 			return 0, fmt.Errorf("该规则未启用 include_rule_name，无法按规则清空缓存")
 		}
-		return clearAffinityEntries(func(entry affinityCacheEntry) bool { return entry.RuleName == ruleName }), nil
+		return clearAffinityEntries(func(entry affinityCacheEntry) bool { return entry.RuleName == ruleName })
 	}
 	return 0, fmt.Errorf("未知规则名称")
 }
@@ -492,7 +518,14 @@ func ApplyChannelAffinityRequestHeaders(c *gin.Context, request *http.Request) {
 		}
 		for _, rawHeader := range values {
 			header, ok := rawHeader.(string)
-			if !ok || header == "" {
+			if !ok || !setting.IsChannelAffinityPassthroughHeaderAllowed(header) {
+				continue
+			}
+			if request.Header.Get(header) != "" {
+				// Provider adaptors install authentication and protocol headers
+				// before affinity hints. Never let a client value replace any
+				// already-established upstream decision, including arbitrary auth
+				// header names used by Advanced Custom channels.
 				continue
 			}
 			if value := c.Request.Header.Get(header); value != "" {
@@ -548,6 +581,11 @@ func GetChannelAffinityUsageCacheStats(ruleName, usingGroup, keyFingerprint stri
 	keyFingerprint = strings.TrimSpace(keyFingerprint)
 	empty := ChannelAffinityUsageCacheStats{RuleName: ruleName, UsingGroup: usingGroup, KeyFingerprint: keyFingerprint}
 	if ruleName == "" || keyFingerprint == "" {
+		return empty
+	}
+	capacity := setting.GetChannelAffinitySetting().MaxEntries
+	affinityUsageMemory.configure(capacity)
+	if capacity <= 0 {
 		return empty
 	}
 	key := affinityUsageKey(ruleName, usingGroup, keyFingerprint)
@@ -614,6 +652,10 @@ func redisAffinityEnabled() bool {
 }
 
 func getAffinityEntry(key string, capacity int) (affinityCacheEntry, bool) {
+	affinityMemory.configure(capacity)
+	if capacity <= 0 {
+		return affinityCacheEntry{}, false
+	}
 	if redisAffinityEnabled() {
 		raw, err := common.RedisClient.Get(context.Background(), affinityRedisPrefix+key).Result()
 		if err == redis.Nil {
@@ -621,7 +663,7 @@ func getAffinityEntry(key string, capacity int) (affinityCacheEntry, bool) {
 		}
 		if err == nil {
 			var entry affinityCacheEntry
-			if common.UnmarshalJsonStr(raw, &entry) == nil {
+			if validAffinityRedisMember(key) && decodeAffinityCacheEntry(raw, &entry) {
 				return entry, true
 			}
 			_ = common.RedisClient.Del(context.Background(), affinityRedisPrefix+key).Err()
@@ -629,12 +671,12 @@ func getAffinityEntry(key string, capacity int) (affinityCacheEntry, bool) {
 		}
 		common.SysError("channel affinity cache read failed: " + err.Error())
 	}
-	affinityMemory.configure(capacity)
 	return affinityMemory.get(key)
 }
 
 func setAffinityEntry(key string, entry affinityCacheEntry, ttl time.Duration, capacity int) {
-	if ttl <= 0 {
+	affinityMemory.configure(capacity)
+	if capacity <= 0 || ttl <= 0 || !validAffinityRedisMember(key) || !validAffinityCacheEntry(entry) {
 		return
 	}
 	if redisAffinityEnabled() {
@@ -644,14 +686,13 @@ func setAffinityEntry(key string, entry affinityCacheEntry, ttl time.Duration, c
 			_, err = common.RedisClient.Eval(context.Background(), affinitySetScript,
 				[]string{affinityRedisPrefix + key, affinityRedisIndex},
 				string(encoded), ttl.Milliseconds(), now.Add(ttl).UnixMilli(), key,
-				now.UnixMilli(), capacity, affinityRedisPrefix).Result()
+				now.UnixMilli(), capacity, affinityRedisPrefix, affinityRedisEvictionBatch).Result()
 		}
 		if err == nil {
 			return
 		}
 		common.SysError("channel affinity cache write failed: " + err.Error())
 	}
-	affinityMemory.configure(capacity)
 	affinityMemory.set(key, entry, ttl)
 }
 
@@ -671,92 +712,212 @@ func deleteAffinityEntry(key string) bool {
 	return deleted
 }
 
-func affinityEntries(capacity int) map[string]affinityCacheEntry {
-	if redisAffinityEnabled() {
-		entries, err := redisAffinityEntries()
-		if err == nil {
-			return entries
-		}
-		common.SysError("channel affinity cache stats failed: " + err.Error())
-	}
+func affinityEntries(capacity int) (map[string]affinityCacheEntry, error) {
 	affinityMemory.configure(capacity)
-	return affinityMemory.snapshot()
+	if capacity <= 0 {
+		return map[string]affinityCacheEntry{}, nil
+	}
+	if redisAffinityEnabled() {
+		return redisAffinityEntries(context.Background())
+	}
+	return affinityMemory.snapshot(), nil
 }
 
-func redisAffinityEntries() (map[string]affinityCacheEntry, error) {
-	ctx := context.Background()
-	if err := common.RedisClient.ZRemRangeByScore(ctx, affinityRedisIndex, "-inf", strconv.FormatInt(time.Now().UnixMilli(), 10)).Err(); err != nil {
+type affinityRedisPageFetcher func(context.Context, int64, int64) ([]string, []any, error)
+type affinityRedisMembersRemover func(context.Context, []string) error
+
+// walkAffinityRedisEntries is shared by stats and clear. It issues at most one
+// bounded ZRANGE and one equally bounded MGET per page, and refuses to scan an
+// index above the production ceiling before allocating proportional memory.
+// Removal shifts the sorted-set offsets, so the next offset advances only by
+// entries retained from the current page.
+func walkAffinityRedisEntries(
+	ctx context.Context,
+	total int64,
+	maximum int,
+	pageSize int,
+	fetch affinityRedisPageFetcher,
+	remove affinityRedisMembersRemover,
+	visit func(string, affinityCacheEntry) bool,
+) error {
+	if total < 0 || maximum < 1 || total > int64(maximum) {
+		return fmt.Errorf("%w: %d entries exceeds %d", ErrChannelAffinityCacheScanOverflow, total, maximum)
+	}
+	if pageSize < 1 || pageSize > affinityRedisPageSize || fetch == nil || remove == nil || visit == nil {
+		return errors.New("invalid channel affinity cache pager")
+	}
+	remaining := total
+	offset := int64(0)
+	for remaining > 0 {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		requested := int64(pageSize)
+		if remaining < requested {
+			requested = remaining
+		}
+		members, values, err := fetch(ctx, offset, offset+requested-1)
+		if err != nil {
+			return err
+		}
+		if len(members) == 0 {
+			break
+		}
+		if len(members) > int(requested) || len(values) != len(members) {
+			return errors.New("invalid channel affinity cache page")
+		}
+
+		removed := make([]string, 0, len(members))
+		for i, member := range members {
+			raw, ok := values[i].(string)
+			var entry affinityCacheEntry
+			if !ok || !validAffinityRedisMember(member) || !decodeAffinityCacheEntry(raw, &entry) {
+				removed = append(removed, member)
+				continue
+			}
+			if visit(member, entry) {
+				removed = append(removed, member)
+			}
+		}
+		if len(removed) > 0 {
+			if err := remove(ctx, removed); err != nil {
+				return err
+			}
+		}
+		remaining -= int64(len(members))
+		offset += int64(len(members) - len(removed))
+	}
+	return nil
+}
+
+func redisAffinityEntries(ctx context.Context) (map[string]affinityCacheEntry, error) {
+	total, err := common.RedisClient.ZCard(ctx, affinityRedisIndex).Result()
+	if err != nil {
 		return nil, err
 	}
-	members, err := common.RedisClient.ZRange(ctx, affinityRedisIndex, 0, -1).Result()
+	if total > int64(setting.MaxChannelAffinityEntries) {
+		return nil, fmt.Errorf("%w: %d entries exceeds %d", ErrChannelAffinityCacheScanOverflow, total, setting.MaxChannelAffinityEntries)
+	}
+	entries := make(map[string]affinityCacheEntry, int(total))
+	err = walkAffinityRedisEntries(ctx, total, setting.MaxChannelAffinityEntries, affinityRedisPageSize,
+		fetchAffinityRedisPage,
+		removeAffinityRedisMembers,
+		func(member string, entry affinityCacheEntry) bool {
+			entries[member] = entry
+			return false
+		},
+	)
+	if err != nil {
+		return nil, err
+	}
+	return entries, nil
+}
+
+func fetchAffinityRedisPage(ctx context.Context, start, stop int64) ([]string, []any, error) {
+	members, err := common.RedisClient.ZRange(ctx, affinityRedisIndex, start, stop).Result()
 	if err != nil || len(members) == 0 {
-		return map[string]affinityCacheEntry{}, err
+		return members, nil, err
 	}
 	keys := make([]string, len(members))
 	for i, member := range members {
 		keys[i] = affinityRedisPrefix + member
 	}
 	values, err := common.RedisClient.MGet(ctx, keys...).Result()
-	if err != nil {
-		return nil, err
-	}
-	entries := make(map[string]affinityCacheEntry, len(values))
-	stale := make([]any, 0)
-	for i, value := range values {
-		raw, ok := value.(string)
-		if !ok {
-			stale = append(stale, members[i])
-			continue
-		}
-		var entry affinityCacheEntry
-		if common.UnmarshalJsonStr(raw, &entry) != nil {
-			stale = append(stale, members[i])
-			continue
-		}
-		entries[members[i]] = entry
-	}
-	if len(stale) > 0 {
-		_ = common.RedisClient.ZRem(ctx, affinityRedisIndex, stale...).Err()
-	}
-	return entries, nil
+	return members, values, err
 }
 
-func clearAffinityEntries(predicate func(affinityCacheEntry) bool) int {
-	deleted := affinityMemory.clearWhere(predicate)
-	if !redisAffinityEnabled() {
-		return deleted
-	}
-	entries, err := redisAffinityEntries()
-	if err != nil {
-		common.SysError("channel affinity cache list for clear failed: " + err.Error())
-		return deleted
-	}
-	members := make([]string, 0)
-	keys := make([]string, 0)
-	for member, entry := range entries {
-		if predicate(entry) {
-			members = append(members, member)
-			keys = append(keys, affinityRedisPrefix+member)
-		}
-	}
+func removeAffinityRedisMembers(ctx context.Context, members []string) error {
 	if len(members) == 0 {
-		return deleted
+		return nil
+	}
+	if len(members) > affinityRedisPageSize {
+		return errors.New("channel affinity cache delete chunk exceeds limit")
+	}
+	keys := make([]string, len(members))
+	values := make([]any, len(members))
+	for i, member := range members {
+		keys[i] = affinityRedisPrefix + member
+		values[i] = member
 	}
 	pipe := common.RedisClient.TxPipeline()
-	pipe.Del(context.Background(), keys...)
-	values := make([]any, len(members))
-	for i := range members {
-		values[i] = members[i]
+	pipe.Del(ctx, keys...)
+	pipe.ZRem(ctx, affinityRedisIndex, values...)
+	_, err := pipe.Exec(ctx)
+	return err
+}
+
+func clearAffinityEntries(predicate func(affinityCacheEntry) bool) (int, error) {
+	if predicate == nil {
+		return 0, errors.New("channel affinity cache predicate is required")
 	}
-	pipe.ZRem(context.Background(), affinityRedisIndex, values...)
-	if _, err := pipe.Exec(context.Background()); err != nil {
-		common.SysError("channel affinity cache clear failed: " + err.Error())
-		return deleted
+	redisDeleted := 0
+	if redisAffinityEnabled() {
+		ctx := context.Background()
+		total, err := common.RedisClient.ZCard(ctx, affinityRedisIndex).Result()
+		if err != nil {
+			return 0, err
+		}
+		err = walkAffinityRedisEntries(ctx, total, setting.MaxChannelAffinityEntries, affinityRedisPageSize,
+			fetchAffinityRedisPage,
+			removeAffinityRedisMembers,
+			func(_ string, entry affinityCacheEntry) bool {
+				if predicate(entry) {
+					redisDeleted++
+					return true
+				}
+				return false
+			},
+		)
+		if err != nil {
+			return 0, err
+		}
 	}
-	return deleted + len(members)
+	memoryDeleted := affinityMemory.clearWhere(predicate)
+	return memoryDeleted + redisDeleted, nil
+}
+
+func decodeAffinityCacheEntry(raw string, destination *affinityCacheEntry) bool {
+	if destination == nil || raw == "" || len(raw) > maxAffinityRedisEntryBytes || !utf8.ValidString(raw) {
+		return false
+	}
+	if err := common.ValidateJSONNoDuplicateKeys([]byte(raw)); err != nil {
+		return false
+	}
+	if err := common.UnmarshalJsonStr(raw, destination); err != nil {
+		return false
+	}
+	return validAffinityCacheEntry(*destination)
+}
+
+func validAffinityCacheEntry(entry affinityCacheEntry) bool {
+	if entry.ChannelID <= 0 || len(entry.RuleName) > setting.MaxChannelAffinityRuleNameBytes || !utf8.ValidString(entry.RuleName) || entry.RuleName != strings.TrimSpace(entry.RuleName) {
+		return false
+	}
+	for _, character := range entry.RuleName {
+		if unicode.IsControl(character) || unicode.Is(unicode.Cf, character) {
+			return false
+		}
+	}
+	return true
+}
+
+func validAffinityRedisMember(member string) bool {
+	if len(member) != sha256.Size*2 {
+		return false
+	}
+	for _, character := range member {
+		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func observeAffinityUsage(delta ChannelAffinityUsageCacheStats, ttl time.Duration, capacity int) {
+	affinityUsageMemory.configure(capacity)
+	if capacity <= 0 || ttl <= 0 {
+		return
+	}
 	key := affinityUsageKey(delta.RuleName, delta.UsingGroup, delta.KeyFingerprint)
 	if redisAffinityEnabled() {
 		now := time.Now()
@@ -766,7 +927,8 @@ func observeAffinityUsage(delta ChannelAffinityUsageCacheStats, ttl time.Duratio
 			delta.CompletionTokens, delta.TotalTokens, delta.CachedTokens,
 			delta.PromptCacheHitTokens, delta.WindowSeconds, delta.LastSeenAt,
 			delta.RuleName, delta.UsingGroup, delta.KeyFingerprint, int64(ttl/time.Second),
-			now.Add(ttl).UnixMilli(), now.UnixMilli(), key, capacity, affinityUsageRedisPrefix).Result()
+			now.Add(ttl).UnixMilli(), now.UnixMilli(), key, capacity, affinityUsageRedisPrefix,
+			affinityRedisEvictionBatch).Result()
 		if err == nil {
 			return
 		}
@@ -774,7 +936,6 @@ func observeAffinityUsage(delta ChannelAffinityUsageCacheStats, ttl time.Duratio
 	}
 	affinityUsageMemoryUpdateMu.Lock()
 	defer affinityUsageMemoryUpdateMu.Unlock()
-	affinityUsageMemory.configure(capacity)
 	previous, _ := affinityUsageMemory.get(key)
 	if previous.RuleName == "" {
 		previous = delta
@@ -821,11 +982,18 @@ func affinityUsageStatsFromStrings(ruleName, usingGroup, keyFingerprint string, 
 const affinitySetScript = `
 redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2])
 redis.call('ZADD', KEYS[2], ARGV[3], ARGV[4])
-redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', ARGV[5])
+local batch = tonumber(ARGV[8])
+local expired = redis.call('ZRANGEBYSCORE', KEYS[2], '-inf', ARGV[5], 'LIMIT', 0, batch)
+for _, member in ipairs(expired) do
+  redis.call('DEL', ARGV[7] .. member)
+  redis.call('ZREM', KEYS[2], member)
+end
 local size = redis.call('ZCARD', KEYS[2])
 local maximum = tonumber(ARGV[6])
 if maximum > 0 and size > maximum then
-  local stale = redis.call('ZRANGE', KEYS[2], 0, size - maximum - 1)
+  local excess = size - maximum
+  if excess > batch then excess = batch end
+  local stale = redis.call('ZRANGE', KEYS[2], 0, excess - 1)
   for _, member in ipairs(stale) do
     redis.call('DEL', ARGV[7] .. member)
     redis.call('ZREM', KEYS[2], member)
@@ -854,11 +1022,18 @@ redis.call('HINCRBY', KEYS[1], 'cached_tokens', ARGV[7])
 redis.call('HINCRBY', KEYS[1], 'prompt_cache_hit_tokens', ARGV[8])
 redis.call('EXPIRE', KEYS[1], ARGV[14])
 redis.call('ZADD', KEYS[2], ARGV[15], ARGV[17])
-redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', ARGV[16])
+local batch = tonumber(ARGV[20])
+local expired = redis.call('ZRANGEBYSCORE', KEYS[2], '-inf', ARGV[16], 'LIMIT', 0, batch)
+for _, member in ipairs(expired) do
+  redis.call('DEL', ARGV[19] .. member)
+  redis.call('ZREM', KEYS[2], member)
+end
 local size = redis.call('ZCARD', KEYS[2])
 local maximum = tonumber(ARGV[18])
 if maximum > 0 and size > maximum then
-  local stale = redis.call('ZRANGE', KEYS[2], 0, size - maximum - 1)
+  local excess = size - maximum
+  if excess > batch then excess = batch end
+  local stale = redis.call('ZRANGE', KEYS[2], 0, excess - 1)
   for _, member in ipairs(stale) do
     redis.call('DEL', ARGV[19] .. member)
     redis.call('ZREM', KEYS[2], member)

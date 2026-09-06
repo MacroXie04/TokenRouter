@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
 
+	"github.com/tokenrouter/tokenrouter/common"
 	"github.com/tokenrouter/tokenrouter/model"
 	"github.com/tokenrouter/tokenrouter/router"
 )
@@ -22,6 +23,9 @@ import (
 // without a valid query token and accepted with one.
 func TestRegisterTurnstileGate(t *testing.T) {
 	gin.SetMode(gin.TestMode)
+	t.Cleanup(common.InitSSRF)
+	t.Setenv("SSRF_DISABLE", "true")
+	common.InitSSRF()
 	t.Setenv("TURNSTILE_SECRET_KEY", "secret")
 	t.Setenv("CRITICAL_RATE_LIMIT", "1000")
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

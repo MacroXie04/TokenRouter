@@ -1,14 +1,29 @@
 package service
 
 import (
-	"io"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/tokenrouter/tokenrouter/common"
 	"github.com/tokenrouter/tokenrouter/setting"
 )
+
+const maxTurnstileResponseBytes = int64(64 << 10)
+
+var turnstileHTTPClient = &http.Client{
+	Timeout: 10 * time.Second,
+	Transport: &http.Transport{
+		DialContext: common.SafeDialContext,
+	},
+	// The verification body contains the site secret. Never replay it to a
+	// redirect target, even when a custom test/self-hosted endpoint is used.
+	CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	},
+}
 
 // turnstileVerifyURL is the Cloudflare siteverify endpoint (overridable in
 // tests via TURNSTILE_VERIFY_URL).
@@ -58,12 +73,20 @@ func VerifyTurnstile(token, remoteIP string) (bool, error) {
 	if remoteIP != "" {
 		form.Set("remoteip", remoteIP)
 	}
-	resp, err := http.PostForm(turnstileVerifyURL(), form)
+	req, err := http.NewRequest(http.MethodPost, turnstileVerifyURL(), strings.NewReader(form.Encode()))
+	if err != nil {
+		return false, err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	resp, err := turnstileHTTPClient.Do(req)
 	if err != nil {
 		return false, err
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
+	body, err := common.ReadAllLimited(resp.Body, maxTurnstileResponseBytes)
+	if err != nil {
+		return false, fmt.Errorf("read Turnstile response: %w", err)
+	}
 	var result struct {
 		Success bool `json:"success"`
 	}

@@ -248,3 +248,25 @@ func TestLogsStatRejectsBadPattern(t *testing.T) {
 	assert.Equal(t, false, body["success"])
 	assert.Equal(t, "搜索模式中不允许包含连续的 % 通配符", body["message"])
 }
+
+func TestLogQueriesRejectOversizedControlAndDuplicateFilters(t *testing.T) {
+	_, do, _ := setupChannelRead(t, constant.RoleRootUser)
+
+	tests := []struct {
+		path        string
+		messagePart string
+	}{
+		{path: "/api/log?model_name=" + strings.Repeat("m", 256), messagePart: "model_name"},
+		{path: "/api/log/self?request_id=" + strings.Repeat("r", 65), messagePart: "request_id"},
+		{path: "/api/log/stat?group=vip%0Aadmin", messagePart: "group"},
+		{path: "/api/log?model_name=a&model_name=b", messagePart: "不能重复"},
+		{path: "/api/log?ignored=" + strings.Repeat("x", 16<<10), messagePart: "过大"},
+	}
+	for _, test := range tests {
+		rec := do(http.MethodGet, test.path, "")
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		body := decodeBody(t, rec)
+		assert.Equal(t, false, body["success"], test.path)
+		assert.Contains(t, body["message"], test.messagePart, test.path)
+	}
+}

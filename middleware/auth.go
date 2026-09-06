@@ -6,16 +6,44 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/golang-jwt/jwt/v5"
 
 	"github.com/tokenrouter/tokenrouter/common"
+	"github.com/tokenrouter/tokenrouter/constant"
 	"github.com/tokenrouter/tokenrouter/model"
 	"github.com/tokenrouter/tokenrouter/service"
 )
 
 // relayContextToken holds the authenticated relay token.
 const relayTokenContext = "relay_token"
+
+const (
+	relayGroupPolicyContext = "relay_group_policy"
+	dashboardClaimsContext  = "dashboard_session_claims"
+	dashboardUserContext    = "dashboard_session_user"
+)
+
+// ErrDashboardSessionInvalid marks an unusable session access credential.
+// Live-session storage errors remain unwrapped so callers such as logout can
+// distinguish an invalid credential from an unavailable database.
+var ErrDashboardSessionInvalid = errors.New("dashboard session credential invalid")
+
+// errDashboardTokenExpired is joined with ErrDashboardSessionInvalid so
+// existing non-HTTP callers continue to treat an expired token as an invalid
+// credential while the dashboard middleware can expose a stable, specific
+// machine-readable code.
+var errDashboardTokenExpired = errors.New("dashboard access token expired")
+
+const (
+	dashboardAuthUnauthorizedCode = "AUTH_UNAUTHORIZED"
+	dashboardAuthExpiredCode      = "AUTH_TOKEN_EXPIRED"
+	dashboardAuthRevokedCode      = "AUTH_SESSION_REVOKED"
+	dashboardAuthInternalCode     = "AUTH_INTERNAL_ERROR"
+	dashboardAuthMessage          = "未登录或会话已过期"
+)
 
 // TokenAuth authenticates a relay request by its bearer API key and loads the
 // owning user and token onto the context.
@@ -38,18 +66,103 @@ func TokenAuth() gin.HandlerFunc {
 		}
 
 		// IP allow-list enforcement.
-		if token.AllowIps != "" {
+		if token.AllowIps != nil && *token.AllowIps != "" {
 			clientIP := c.ClientIP()
-			if !ipInList(clientIP, token.AllowIps) {
+			if !ipInList(clientIP, *token.AllowIps) {
 				c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": &protocolError{Message: "IP 不在白名单内", Type: "invalid_request_error", Code: "ip_not_allowed"}})
 				return
 			}
 		}
 
+		groupPolicy, err := service.ResolveRelayGroupPolicy(user.Group, token)
+		if err != nil {
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": &protocolError{
+				Message: "令牌分组不可用", Type: "invalid_request_error", Code: "group_not_allowed",
+			}})
+			return
+		}
+
+		userGroup := user.Group
+		if userGroup == "" {
+			userGroup = service.GroupDefault
+		}
 		common.SetUserId(c, user.Id)
 		common.SetUsername(c, user.Username)
+		common.SetUserGroup(c, userGroup)
 		common.SetRole(c, user.Role)
 		SetupRelayTokenContext(c, token)
+		SetRelayGroupPolicy(c, groupPolicy)
+		c.Next()
+	}
+}
+
+// TokenOrUserAuth authenticates either a relay API key or a dashboard
+// identity. It is used only for user-owned task content: API keys receive the
+// same status, expiry, IP, and group checks as TokenAuth, while browser
+// sessions/PATs fall back to the normal dashboard validator. A presented sk-
+// credential is never silently reinterpreted as a dashboard credential.
+func TokenOrUserAuth() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		key := extractTokenKey(c)
+		if key != "" {
+			token, tokenErr := service.TokenByKey(key)
+			if tokenErr == nil {
+				if err := service.CheckTokenUsable(token); err != nil {
+					c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": &protocolError{
+						Message: err.Error(), Type: "invalid_request_error", Code: "invalid_api_key",
+					}})
+					return
+				}
+				user, err := service.GetUserByID(token.UserId)
+				if err != nil || user.Status == model.UserStatusDisabled {
+					c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": &protocolError{
+						Message: "用户不存在或已禁用", Type: "invalid_request_error", Code: "invalid_api_key",
+					}})
+					return
+				}
+				if token.AllowIps != nil && *token.AllowIps != "" && !ipInList(c.ClientIP(), *token.AllowIps) {
+					c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": &protocolError{
+						Message: "IP 不在白名单内", Type: "invalid_request_error", Code: "ip_not_allowed",
+					}})
+					return
+				}
+				groupPolicy, err := service.ResolveRelayGroupPolicy(user.Group, token)
+				if err != nil {
+					c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": &protocolError{
+						Message: "令牌分组不可用", Type: "invalid_request_error", Code: "group_not_allowed",
+					}})
+					return
+				}
+				userGroup := user.Group
+				if userGroup == "" {
+					userGroup = service.GroupDefault
+				}
+				common.SetUserId(c, user.Id)
+				common.SetUsername(c, user.Username)
+				common.SetUserGroup(c, userGroup)
+				common.SetRole(c, user.Role)
+				SetupRelayTokenContext(c, token)
+				SetRelayGroupPolicy(c, groupPolicy)
+				c.Next()
+				return
+			}
+			if strings.HasPrefix(key, "sk-") || c.Query("sk-key") != "" {
+				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": &protocolError{
+					Message: "无效的令牌", Type: "invalid_request_error", Code: "invalid_api_key",
+				}})
+				return
+			}
+		}
+		user, err := authenticateUser(c)
+		if err != nil {
+			abortDashboardAuth(c, err)
+			return
+		}
+		userGroup := user.Group
+		if userGroup == "" {
+			userGroup = service.GroupDefault
+		}
+		common.SetUserGroup(c, userGroup)
 		c.Next()
 	}
 }
@@ -96,10 +209,48 @@ func GetRelayToken(c *gin.Context) *model.Token {
 // SetupRelayTokenContext installs token metadata for the shared relay lifecycle.
 func SetupRelayTokenContext(c *gin.Context, token *model.Token) {
 	c.Set(relayTokenContext, token)
+	c.Set(relayModelPolicyContext, service.NewTokenModelPolicy(token))
 	c.Set(common.ContextKeyToken, token)
 	c.Set(common.ContextKeyTokenId, token.Id)
 	c.Set(common.ContextKeyTokenName, token.Name)
-	c.Set(common.ContextKeyGroup, token.Group)
+	if token.Group == service.GroupAuto {
+		c.Set(common.ContextKeyGroup, "")
+	} else {
+		c.Set(common.ContextKeyGroup, token.Group)
+	}
+}
+
+// SetRelayGroupPolicy installs the current fail-closed authorization decision.
+func SetRelayGroupPolicy(c *gin.Context, policy service.RelayGroupPolicy) {
+	policy.Groups = append([]string(nil), policy.Groups...)
+	c.Set(relayGroupPolicyContext, policy)
+	if len(policy.Groups) > 0 {
+		// The first candidate is safe for legacy readers; relay selection replaces
+		// it with the group that actually supplied the channel.
+		c.Set(common.ContextKeyGroup, policy.Groups[0])
+	} else {
+		c.Set(common.ContextKeyGroup, "")
+	}
+}
+
+// GetRelayGroupPolicy returns a defensive copy of the request policy.
+func GetRelayGroupPolicy(c *gin.Context) service.RelayGroupPolicy {
+	if value, ok := c.Get(relayGroupPolicyContext); ok {
+		if policy, ok := value.(service.RelayGroupPolicy); ok {
+			policy.Groups = append([]string(nil), policy.Groups...)
+			return policy
+		}
+	}
+	group := common.GetString(c, common.ContextKeyGroup)
+	if group == "" || group == service.GroupAuto {
+		return service.RelayGroupPolicy{}
+	}
+	return service.RelayGroupPolicy{Groups: []string{group}}
+}
+
+// GetTokenGroups returns the ordered authorized group candidates.
+func GetTokenGroups(c *gin.Context) []string {
+	return GetRelayGroupPolicy(c).Groups
 }
 
 // GetTokenGroup returns the effective token group for a relay request.
@@ -116,7 +267,20 @@ func extractTokenKey(c *gin.Context) string {
 		key = strings.TrimPrefix(key, "bearer ")
 		return key
 	}
-	return c.Query("sk-key")
+	if key = c.Query("sk-key"); key != "" {
+		return key
+	}
+	// Midjourney Proxy clients conventionally authenticate the relay with the
+	// same header name used on the provider wire. Restrict the fallback to the
+	// exact Midjourney route family so other protocols cannot gain a new token
+	// transport accidentally.
+	mode := constant.PathToRelayModeMidjourney(c.Request.URL.Path)
+	if mode != constant.RelayModeUnknown && mode != constant.RelayModeMidjourneyNotify {
+		key = c.Request.Header.Get("mj-api-secret")
+		key = strings.TrimPrefix(key, "Bearer ")
+		key = strings.TrimPrefix(key, "bearer ")
+	}
+	return key
 }
 
 // ipInList checks whether ip matches a comma-separated allow-list.
@@ -144,10 +308,19 @@ type protocolError struct {
 func UserAuth() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if _, err := authenticateUser(c); err != nil {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"success": false, "message": "未登录或会话已过期"})
+			abortDashboardAuth(c, err)
 			return
 		}
 		c.Next()
+	}
+}
+
+// TryUserAuth accepts a request without dashboard credentials, but validates
+// any credential that is presented. This prevents expired or forged browser
+// credentials from being silently treated as an anonymous request.
+func TryUserAuth() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		requireOptionalDashboardIdentity(c, false)
 	}
 }
 
@@ -156,7 +329,7 @@ func UserAuth() gin.HandlerFunc {
 // AdminAuth/RootAuth safely (a middleware's c.Next() would otherwise run the
 // downstream handler before the role check).
 func authenticateUser(c *gin.Context) (*model.User, error) {
-	claims, err := dashboardClaims(c)
+	_, err := dashboardClaims(c)
 	if err != nil {
 		// Session token failed (or absent): the reference also accepts a
 		// dashboard access token (PAT) as a bearer credential.
@@ -169,8 +342,9 @@ func authenticateUser(c *gin.Context) (*model.User, error) {
 		}
 		return nil, err
 	}
-	user, err := service.GetUserByID(claims.UserID)
-	if err != nil || user.Status == model.UserStatusDisabled {
+	value, ok := c.Get(dashboardUserContext)
+	user, ok := value.(*model.User)
+	if !ok || user == nil {
 		return nil, errUnauthorized
 	}
 	common.SetUserId(c, user.Id)
@@ -200,10 +374,12 @@ func accessTokenUser(c *gin.Context) (*model.User, bool) {
 
 // AdminAuth requires an authenticated admin user, then enforces fine-grained
 // Casbin authorization on the resource/action.
+var authorizeAdminRequest = service.Authorize
+
 func AdminAuth() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if _, err := authenticateUser(c); err != nil {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"success": false, "message": "未登录或会话已过期"})
+			abortDashboardAuth(c, err)
 			return
 		}
 		role := common.GetRole(c)
@@ -211,8 +387,11 @@ func AdminAuth() gin.HandlerFunc {
 			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"success": false, "message": "无权限"})
 			return
 		}
-		// Fine-grained authorization (fail-open only if the engine is unset).
-		if allowed, err := service.Authorize(role, "/api"+c.Request.URL.Path, c.Request.Method); err == nil && !allowed {
+		allowed, err := authorizeAdminRequest(role, "/api"+c.Request.URL.Path, c.Request.Method)
+		if err != nil {
+			common.SysError("admin authorization check failed: " + err.Error())
+		}
+		if err != nil || !allowed {
 			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"success": false, "message": "无权限"})
 			return
 		}
@@ -224,7 +403,7 @@ func AdminAuth() gin.HandlerFunc {
 func RootAuth() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if _, err := authenticateUser(c); err != nil {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"success": false, "message": "未登录或会话已过期"})
+			abortDashboardAuth(c, err)
 			return
 		}
 		if !service.IsRoot(common.GetRole(c)) {
@@ -237,6 +416,11 @@ func RootAuth() gin.HandlerFunc {
 
 // dashboardClaims reads and validates the access-token JWT from cookie or header.
 func dashboardClaims(c *gin.Context) (*common.JWTClaims, error) {
+	if value, ok := c.Get(dashboardClaimsContext); ok {
+		if claims, ok := value.(*common.JWTClaims); ok && claims != nil {
+			return claims, nil
+		}
+	}
 	tokenStr := ""
 	if cookie, err := c.Cookie("access_token"); err == nil {
 		tokenStr = cookie
@@ -244,13 +428,88 @@ func dashboardClaims(c *gin.Context) (*common.JWTClaims, error) {
 		tokenStr = strings.TrimPrefix(h, "Bearer ")
 	}
 	if tokenStr == "" {
-		return nil, errUnauthorized
+		return nil, ErrDashboardSessionInvalid
 	}
-	claims, err := common.ParseJWT(tokenStr, common.SessionSecret())
+	claims, err := common.ParseJWTSigned(tokenStr, common.SessionSecret())
+	if err != nil {
+		return nil, ErrDashboardSessionInvalid
+	}
+	now, err := model.PrimaryDatabaseUnixTimestamp(c.Request.Context())
 	if err != nil {
 		return nil, err
 	}
+	if err := common.ValidateJWTClaimsAt(claims, time.Unix(now, 0).UTC()); err != nil {
+		if isSoleJWTExpiryError(err) {
+			return nil, errors.Join(ErrDashboardSessionInvalid, errDashboardTokenExpired)
+		}
+		return nil, ErrDashboardSessionInvalid
+	}
+	_, user, err := service.ValidateAccessTokenClaimsAt(claims, now)
+	if err != nil {
+		return nil, err
+	}
+	c.Set(dashboardClaimsContext, claims)
+	c.Set(dashboardUserContext, user)
 	return claims, nil
+}
+
+// GetDashboardSessionClaims returns a fully validated session-backed access
+// identity. PAT-authenticated requests intentionally have no session claims.
+func GetDashboardSessionClaims(c *gin.Context) (*common.JWTClaims, error) {
+	return dashboardClaims(c)
+}
+
+// isSoleJWTExpiryError recognizes an otherwise-valid, correctly signed token
+// whose only claims failure is expiration. A token that is also malformed or
+// violates another registered claim remains a generic invalid credential.
+func isSoleJWTExpiryError(err error) bool {
+	if !errors.Is(err, jwt.ErrTokenExpired) {
+		return false
+	}
+	for _, competing := range []error{
+		jwt.ErrTokenMalformed,
+		jwt.ErrTokenUnverifiable,
+		jwt.ErrTokenSignatureInvalid,
+		jwt.ErrTokenRequiredClaimMissing,
+		jwt.ErrTokenInvalidAudience,
+		jwt.ErrTokenUsedBeforeIssued,
+		jwt.ErrTokenInvalidIssuer,
+		jwt.ErrTokenInvalidSubject,
+		jwt.ErrTokenNotValidYet,
+		jwt.ErrTokenInvalidId,
+		jwt.ErrInvalidType,
+	} {
+		if errors.Is(err, competing) {
+			return false
+		}
+	}
+	return true
+}
+
+func abortDashboardAuth(c *gin.Context, err error) {
+	status := http.StatusUnauthorized
+	code := dashboardAuthUnauthorizedCode
+	message := dashboardAuthMessage
+	switch {
+	case errors.Is(err, errDashboardTokenExpired):
+		code = dashboardAuthExpiredCode
+	case errors.Is(err, service.ErrSessionRevoked):
+		code = dashboardAuthRevokedCode
+	case errors.Is(err, ErrDashboardSessionInvalid), errors.Is(err, errUnauthorized):
+		// Keep the historical unauthorized message for missing or invalid
+		// credentials while adding the stable machine-readable code.
+	default:
+		status = http.StatusInternalServerError
+		code = dashboardAuthInternalCode
+		message = http.StatusText(status)
+		common.SysError("dashboard authentication failed: " + err.Error())
+	}
+	c.Header("Cache-Control", "no-store")
+	c.AbortWithStatusJSON(status, gin.H{
+		"success": false,
+		"code":    code,
+		"message": message,
+	})
 }
 
 var errUnauthorized = errors.New("unauthorized")

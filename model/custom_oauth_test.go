@@ -2,6 +2,7 @@ package model_test
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/glebarez/sqlite"
@@ -44,12 +45,52 @@ func TestCustomOAuthProviderValidation(t *testing.T) {
 		{func(p *model.CustomOAuthProvider) { p.Slug = "bad slug!" },
 			"provider slug must contain only lowercase letters, numbers, and hyphens"},
 		{func(p *model.CustomOAuthProvider) { p.ClientId = "" }, "client ID is required"},
+		{func(p *model.CustomOAuthProvider) { p.ClientSecret = "" }, "client secret is required"},
+		{func(p *model.CustomOAuthProvider) { p.ClientId = " client" }, "client ID is invalid"},
 		{func(p *model.CustomOAuthProvider) { p.AuthorizationEndpoint = "" }, "authorization endpoint is required"},
 		{func(p *model.CustomOAuthProvider) { p.TokenEndpoint = "" }, "token endpoint is required"},
 		{func(p *model.CustomOAuthProvider) { p.UserInfoEndpoint = "" }, "user info endpoint is required"},
 		{func(p *model.CustomOAuthProvider) { p.AccessPolicy = "{not json" }, "access_policy must be valid JSON"},
-		{func(p *model.CustomOAuthProvider) { p.AccessPolicy = `{"logic":"xor","conditions":[{"field":"x","op":"eq","value":1}]}` },
+		{func(p *model.CustomOAuthProvider) {
+			p.AccessPolicy = `{"logic":"xor","conditions":[{"field":"x","op":"eq","value":1}]}`
+		},
 			"access_policy is invalid: unsupported logic: xor"},
+		{func(p *model.CustomOAuthProvider) { p.Name = strings.Repeat("n", 65) },
+			"provider name exceeds safe limits"},
+		{func(p *model.CustomOAuthProvider) { p.Slug = strings.Repeat("s", 65) },
+			"provider slug exceeds safe limits"},
+		{func(p *model.CustomOAuthProvider) { p.ClientId = strings.Repeat("c", 257) },
+			"client ID exceeds safe limits"},
+		{func(p *model.CustomOAuthProvider) { p.ClientSecret = strings.Repeat("s", 513) },
+			"client secret exceeds safe limits"},
+		{func(p *model.CustomOAuthProvider) { p.AuthorizationEndpoint = "http://sso.example.com/authorize" },
+			"authorization endpoint must use HTTPS except on loopback"},
+		{func(p *model.CustomOAuthProvider) { p.TokenEndpoint = "javascript:alert(1)" },
+			"token endpoint must be an absolute HTTP(S) URL"},
+		{func(p *model.CustomOAuthProvider) { p.TokenEndpoint = "https://user:secret@sso.example.com/token" },
+			"token endpoint must be an absolute HTTP(S) URL"},
+		{func(p *model.CustomOAuthProvider) { p.TokenEndpoint = "https://sso.example.com/token#secret" },
+			"token endpoint must be an absolute HTTP(S) URL"},
+		{func(p *model.CustomOAuthProvider) { p.TokenEndpoint = "https://sso.example.com/token?a=1&a=2" },
+			"token endpoint has an unsafe or duplicate query parameter"},
+		{func(p *model.CustomOAuthProvider) { p.TokenEndpoint = "https://sso.example.com/a/../token" },
+			"token endpoint has an ambiguous path"},
+		{func(p *model.CustomOAuthProvider) { p.TokenEndpoint = "https://sso.example.com:65536/token" },
+			"token endpoint has an invalid port"},
+		{func(p *model.CustomOAuthProvider) { p.AuthStyle = 3 }, "auth style is invalid"},
+		{func(p *model.CustomOAuthProvider) { p.UserIdField = strings.Repeat("f", 129) },
+			"user ID field exceeds safe limits"},
+		{func(p *model.CustomOAuthProvider) { p.UserIdField = "sub|@pretty" },
+			"user ID field must be a simple JSON field path"},
+		{func(p *model.CustomOAuthProvider) {
+			p.AccessPolicy = `{"conditions":[{"field":"groups.#(admin)","op":"exists"}]}`
+		}, "access_policy is invalid: condition[0].field must be a simple JSON field path"},
+		{func(p *model.CustomOAuthProvider) { p.Scopes = strings.Repeat("scope ", 33) },
+			"scopes exceed safe limits"},
+		{func(p *model.CustomOAuthProvider) { p.AccessDeniedMessage = strings.Repeat("m", 513) },
+			"access denied message exceeds safe limits"},
+		{func(p *model.CustomOAuthProvider) { p.AccessPolicy = strings.Repeat(" ", 64<<10) + "x" },
+			"access_policy exceeds safe limits"},
 	}
 	for _, tc := range cases {
 		p := validProvider()
@@ -76,6 +117,64 @@ func TestCustomOAuthProviderValidation(t *testing.T) {
 	assert.True(t, model.IsCustomOAuthSlugTaken("corp-sso", 0))
 	assert.False(t, model.IsCustomOAuthSlugTaken("corp-sso", p.Id))
 	assert.False(t, model.IsCustomOAuthSlugTaken("other", 0))
+}
+
+func TestAccessPolicyComplexityAndValueBounds(t *testing.T) {
+	leaf := model.AccessPolicyDocument{Conditions: []model.AccessPolicyCondition{{
+		Field: "membership.plan", Op: "eq", Value: "pro",
+	}}}
+	deep := leaf
+	for range 16 {
+		deep = model.AccessPolicyDocument{Groups: []model.AccessPolicyDocument{deep}}
+	}
+	err := model.ValidateAccessPolicyDocument(&deep)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "maximum nesting depth")
+
+	many := model.AccessPolicyDocument{Conditions: make([]model.AccessPolicyCondition, 1025)}
+	err = model.ValidateAccessPolicyDocument(&many)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "maximum entry count")
+
+	largeSet := make([]any, 257)
+	for index := range largeSet {
+		largeSet[index] = index
+	}
+	policy := model.AccessPolicyDocument{Conditions: []model.AccessPolicyCondition{{
+		Field: "teams", Op: "in", Value: largeSet,
+	}}}
+	err = model.ValidateAccessPolicyDocument(&policy)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "value exceeds safe limits")
+
+	policy = model.AccessPolicyDocument{Conditions: []model.AccessPolicyCondition{{
+		Field: "claim", Op: "eq", Value: strings.Repeat("v", 4097),
+	}}}
+	err = model.ValidateAccessPolicyDocument(&policy)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "value exceeds safe limits")
+
+	_, err = model.ParseAccessPolicy(strings.Repeat(" ", 64<<10) + "x")
+	assert.EqualError(t, err, "access_policy exceeds safe limits")
+}
+
+func TestEnabledAndLoginLookupRejectUnsafeLegacyCustomOAuthProvider(t *testing.T) {
+	newCustomOAuthDB(t)
+	unsafe := validProvider()
+	unsafe.Enabled = true
+	unsafe.AuthorizationEndpoint = "http://identity.example.com/authorize"
+	require.NoError(t, model.DB.Session(&gorm.Session{SkipHooks: true}).Create(unsafe).Error,
+		"the fixture represents a legacy row written before validation existed")
+
+	providers, err := model.GetEnabledCustomOAuthProviders()
+	require.Error(t, err)
+	assert.Nil(t, providers)
+	assert.Contains(t, err.Error(), "must use HTTPS except on loopback")
+
+	provider, err := model.GetCustomOAuthProviderBySlug(unsafe.Slug)
+	require.Error(t, err)
+	assert.Nil(t, provider)
+	assert.Contains(t, err.Error(), "must use HTTPS except on loopback")
 }
 
 func TestAccessPolicyDocumentValidation(t *testing.T) {
@@ -128,10 +227,18 @@ func TestUserOAuthBindingLifecycle(t *testing.T) {
 	assert.EqualError(t, err, "provider ID is required")
 	err = model.CreateUserOAuthBinding(&model.UserOAuthBinding{UserId: 1, ProviderId: p.Id})
 	assert.EqualError(t, err, "provider user ID is required")
+	err = model.CreateUserOAuthBinding(&model.UserOAuthBinding{
+		UserId: 1, ProviderId: p.Id, ProviderUserId: strings.Repeat("x", 257),
+	})
+	assert.EqualError(t, err, "provider user ID exceeds safe limits")
+	err = model.CreateUserOAuthBinding(&model.UserOAuthBinding{
+		UserId: 1, ProviderId: p.Id, ProviderUserId: "unsafe\nsubject",
+	})
+	assert.EqualError(t, err, "provider user ID exceeds safe limits")
 
 	// A binding for user 1; the same identity is then taken for user 2.
 	require.NoError(t, model.CreateUserOAuthBinding(&model.UserOAuthBinding{
-		UserId: 1, ProviderId: p.Id, ProviderUserId: "ext-1",
+		UserId: 1, ProviderId: p.Id, ProviderUserId: " ext-1 ",
 	}))
 	err = model.CreateUserOAuthBinding(&model.UserOAuthBinding{
 		UserId: 2, ProviderId: p.Id, ProviderUserId: "ext-1",

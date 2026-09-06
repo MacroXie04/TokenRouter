@@ -1,0 +1,186 @@
+.playground-page {
+  max-width: 980px;
+}
+
+.playground-heading {
+  gap: 1rem;
+  margin-bottom: 1.25rem;
+}
+
+.playground-heading .tagline {
+  margin-bottom: 0.35rem;
+}
+
+.playground-eyebrow,
+.playground-account,
+.playground-group-description {
+  color: var(--muted);
+  font-size: 0.82rem;
+  margin: 0 0 0.35rem;
+}
+
+.playground-section-heading,
+.playground-message-heading,
+.playground-composer-actions {
+  align-items: center;
+  display: flex;
+  gap: 0.75rem;
+  justify-content: space-between;
+}
+
+.playground-section-heading {
+  margin-bottom: 1rem;
+}
+
+.playground-section-heading h2,
+.playground-section-heading p {
+  margin-bottom: 0;
+  margin-top: 0;
+}
+
+.playground-option-grid,
+.playground-parameter-grid {
+  display: grid;
+  gap: 0.85rem;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.playground-alert,
+.playground-request-error {
+  background: color-mix(in srgb, var(--error), transparent 90%);
+  border: 1px solid color-mix(in srgb, var(--error), transparent 50%);
+  border-radius: 8px;
+  color: var(--error);
+  margin: 0 0 1rem;
+  padding: 0.75rem;
+}
+
+.playground-alert {
+  align-items: center;
+  display: flex;
+  gap: 1rem;
+  justify-content: space-between;
+}
+
+.playground-alert p,
+.playground-request-error {
+  margin-top: 0;
+}
+
+.playground-alert p {
+  margin-bottom: 0;
+}
+
+.playground-empty {
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  color: var(--muted);
+  margin-bottom: 1rem;
+  padding: 1rem;
+  text-align: center;
+}
+
+.playground-empty p {
+  margin: 0.25rem 0;
+}
+
+.playground-advanced {
+  border-top: 1px solid var(--border);
+  margin-top: 1rem;
+  padding-top: 0.9rem;
+}
+
+.playground-advanced summary {
+  color: var(--accent);
+  cursor: pointer;
+  margin-bottom: 0.9rem;
+}
+
+.playground-messages {
+  display: grid;
+  gap: 0.85rem;
+  list-style: none;
+  margin: 0 0 1.25rem;
+  padding: 0;
+}
+
+.playground-message {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0.9rem 1rem;
+}
+
+.playground-message-user {
+  background: color-mix(in srgb, var(--accent), transparent 90%);
+  margin-left: min(10%, 4rem);
+}
+
+.playground-message-assistant {
+  background: color-mix(in srgb, var(--panel), white 2%);
+  margin-right: min(10%, 4rem);
+}
+
+.playground-message-heading {
+  font-size: 0.85rem;
+  margin-bottom: 0.6rem;
+}
+
+.playground-message-content,
+.playground-reasoning pre {
+  font: inherit;
+  line-height: 1.55;
+  margin: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  unicode-bidi: plaintext;
+}
+
+.playground-reasoning {
+  border-bottom: 1px solid var(--border);
+  color: var(--muted);
+  margin-bottom: 0.75rem;
+  padding-bottom: 0.75rem;
+}
+
+.playground-reasoning summary {
+  cursor: pointer;
+  margin-bottom: 0.5rem;
+}
+
+.playground-composer {
+  border-top: 1px solid var(--border);
+  padding-top: 1rem;
+}
+
+.playground-composer-actions .muted {
+  font-size: 0.78rem;
+  text-align: right;
+}
+
+.playground-stop {
+  background: var(--error);
+}
+
+@media (max-width: 640px) {
+  .playground-option-grid,
+  .playground-parameter-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .playground-heading,
+  .playground-section-heading,
+  .playground-composer-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .playground-message-user,
+  .playground-message-assistant {
+    margin-left: 0;
+    margin-right: 0;
+  }
+
+  .playground-composer-actions .muted {
+    text-align: left;
+  }
+}

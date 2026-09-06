@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"errors"
 	"net/http"
 	"sort"
 
@@ -10,12 +11,16 @@ import (
 	"github.com/tokenrouter/tokenrouter/dto"
 	"github.com/tokenrouter/tokenrouter/model"
 	"github.com/tokenrouter/tokenrouter/service"
+	"github.com/tokenrouter/tokenrouter/setting"
 )
 
 // GetModels returns the dashboard model registry.
 func GetModels(c *gin.Context) {
 	var models []model.Model
-	model.DB.Order("id desc").Find(&models)
+	if err := model.DB.Order("id desc").Find(&models).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, dto.Fail("查询模型失败"))
+		return
+	}
 	c.JSON(http.StatusOK, dto.Ok(models))
 }
 
@@ -26,45 +31,106 @@ func GetUserModels(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, dto.Fail("用户不存在"))
 		return
 	}
-	group := user.Group
-	if group == "" {
-		group = service.GroupDefault
+	userGroup := user.Group
+	if userGroup == "" {
+		userGroup = service.GroupDefault
 	}
-	models := service.GetGroupModels(group)
+	usableGroups := service.GetUserUsableGroups(userGroup)
+	requestedGroup := c.Query("group")
+	groupsToQuery := make([]string, 0, len(usableGroups))
+	switch requestedGroup {
+	case "":
+		for group := range usableGroups {
+			if service.IsUserSelectableGroup(userGroup, group) {
+				groupsToQuery = append(groupsToQuery, group)
+			}
+		}
+	case service.GroupAuto:
+		if _, allowed := usableGroups[service.GroupAuto]; allowed {
+			groupsToQuery = service.GetUserDefaultAutoGroups(userGroup)
+		}
+	default:
+		if service.IsUserSelectableGroup(userGroup, requestedGroup) {
+			groupsToQuery = append(groupsToQuery, requestedGroup)
+		}
+	}
+	models := service.GetGroupsModels(groupsToQuery)
+	models, err = service.FilterModelsByReferencePricing(
+		models, service.UserSettingsFromRaw(user.Setting).AcceptUnsetRatioModel,
+	)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, dto.Fail("查询模型失败"))
+		return
+	}
 	names := make([]string, 0, len(models))
 	for m := range models {
 		names = append(names, m)
 	}
 	sort.Strings(names)
-	c.JSON(http.StatusOK, dto.Ok(names))
+	c.JSON(http.StatusOK, gin.H{"success": true, "message": "", "data": names})
 }
 
-// GetUserGroups returns the distinct routing groups (public metadata).
+// GetUserGroups returns the reference group-selection metadata. The public
+// route exposes globally selectable groups; the authenticated self route also
+// includes the user's own group.
 func GetUserGroups(c *gin.Context) {
-	var abilities []model.Ability
-	model.DB.Distinct("group").Find(&abilities)
-	groups := make([]string, 0, len(abilities))
-	for _, a := range abilities {
-		if a.Group != "" {
-			groups = append(groups, a.Group)
+	userGroup := ""
+	if userID := common.GetUserId(c); userID > 0 {
+		user, err := service.GetUserByID(userID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, dto.Fail("查询用户分组失败"))
+			return
+		}
+		userGroup = user.Group
+		if userGroup == "" {
+			userGroup = service.GroupDefault
 		}
 	}
-	if len(groups) == 0 {
-		groups = append(groups, service.GroupDefault)
+	usableGroups := service.GetUserUsableGroups(userGroup)
+	groups := make(map[string]gin.H)
+	for group := range service.ExportedGroupRatios() {
+		if desc, allowed := usableGroups[group]; allowed {
+			ratio, _ := service.EffectiveGroupRatio(userGroup, group)
+			groups[group] = gin.H{"ratio": ratio, "desc": desc}
+		}
 	}
-	c.JSON(http.StatusOK, dto.Ok(groups))
+	if desc, allowed := usableGroups[service.GroupAuto]; allowed {
+		groups[service.GroupAuto] = gin.H{"ratio": "自动", "desc": desc}
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "message": "", "data": groups})
 }
 
 // GetRatioConfig returns the model price registry and group ratios for pricing.
 func GetRatioConfig(c *gin.Context) {
-	c.JSON(http.StatusOK, dto.Ok(gin.H{
-		"model_prices": service.ExportedModelPrices(),
-		"group_ratios": service.ExportedGroupRatios(),
-	}))
+	if !setting.GetOptionBool(setting.ExposeRatioEnabledOption, false) {
+		c.JSON(http.StatusForbidden, dto.Fail("倍率配置接口未启用"))
+		return
+	}
+	data := service.ExposedRatioData()
+	// Keep the existing TokenRouter names as additive compatibility aliases
+	// while exposing the reference fields used by ratio-sync clients.
+	data["model_prices"] = service.ExportedModelPrices()
+	data["group_ratios"] = service.ExportedGroupRatios()
+	c.JSON(http.StatusOK, gin.H{"success": true, "message": "", "data": data})
 }
 
 // GetRankings returns model usage rankings.
 func GetRankings(c *gin.Context) {
+	period, hasPeriod := c.GetQuery("period")
+	if hasPeriod {
+		snapshot, err := service.GetRankingsSnapshot(c.Request.Context(), period)
+		if err != nil {
+			if errors.Is(err, service.ErrInvalidRankingPeriod) {
+				c.JSON(http.StatusBadRequest, dto.Fail("排行榜周期无效"))
+				return
+			}
+			c.JSON(http.StatusInternalServerError, dto.Fail("查询排行榜失败"))
+			return
+		}
+		c.JSON(http.StatusOK, dto.Ok(snapshot))
+		return
+	}
+
 	// Rankings aggregate usage from quota_data; a simple recent-usage ranking.
 	type rank struct {
 		ModelName string `json:"model_name"`
@@ -72,12 +138,15 @@ func GetRankings(c *gin.Context) {
 		Quota     int64  `json:"quota"`
 	}
 	var rows []rank
-	model.DB.Model(&model.QuotaData{}).
+	if err := model.DB.Model(&model.QuotaData{}).
 		Select("model_name, SUM(count) as count, SUM(quota) as quota").
 		Group("model_name").
 		Order("count desc").
 		Limit(50).
-		Scan(&rows)
+		Scan(&rows).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, dto.Fail("查询排行榜失败"))
+		return
+	}
 	if rows == nil {
 		rows = []rank{}
 	}
